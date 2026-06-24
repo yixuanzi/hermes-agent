@@ -308,6 +308,7 @@ def build_session_context_prompt(
         )
     elif context.source.user_name:
         lines.append(f"**User:** {context.source.user_name}")
+        lines.append(f"**User ID:** {context.source.user_id}")
     elif context.source.user_id:
         uid = context.source.user_id
         if redact_pii:
