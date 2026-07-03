@@ -23,6 +23,21 @@ type SessionsResponse = {
   offset?: number;
 };
 
+type SearchResultRow = {
+  session_id: string;
+  snippet?: string;
+  role?: string;
+  source?: string;
+  model?: string;
+  session_started?: number;
+};
+
+type SearchResponse = {
+  results: SearchResultRow[];
+};
+
+const SEARCH_LIMIT = 50;
+
 export function isLatestSessionSelectionRequest(requestId: number, latestRequestId: number): boolean {
   return requestId === latestRequestId;
 }
@@ -31,8 +46,35 @@ export function isSessionActivationKey(key: string): boolean {
   return key === "Enter" || key === " ";
 }
 
-function formatSessionDate(row: SessionRow): string {
-  const candidate = row.last_active ?? row.started_at ?? undefined;
+/**
+ * Split an FTS5 snippet into plain and highlighted segments. The backend marks
+ * matched terms with `>>>` (open) and `<<<` (close) sentinels.
+ */
+export function parseSnippetSegments(snippet: string): { text: string; highlight: boolean }[] {
+  const open = ">>>";
+  const close = "<<<";
+  const segments: { text: string; highlight: boolean }[] = [];
+  let rest = snippet || "";
+  while (rest.length > 0) {
+    const start = rest.indexOf(open);
+    if (start === -1) {
+      segments.push({ text: rest, highlight: false });
+      break;
+    }
+    if (start > 0) segments.push({ text: rest.slice(0, start), highlight: false });
+    const after = rest.slice(start + open.length);
+    const end = after.indexOf(close);
+    if (end === -1) {
+      segments.push({ text: after, highlight: true });
+      break;
+    }
+    segments.push({ text: after.slice(0, end), highlight: true });
+    rest = after.slice(end + close.length);
+  }
+  return segments.filter((segment) => segment.text.length > 0);
+}
+
+function formatEpochSeconds(candidate?: number | null): string {
   if (!candidate) return "--";
   const date = new Date(candidate * 1000);
   if (Number.isNaN(date.getTime())) return "--";
@@ -42,6 +84,10 @@ function formatSessionDate(row: SessionRow): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatSessionDate(row: SessionRow): string {
+  return formatEpochSeconds(row.last_active ?? row.started_at ?? undefined);
 }
 
 export function SessionsPage() {
@@ -59,7 +105,13 @@ export function SessionsPage() {
   const [detailError, setDetailError] = useState("");
   const [messages, setMessages] = useState<SessionMessagesResponse["messages"]>([]);
   const [expandedToolMessages, setExpandedToolMessages] = useState<Record<string, boolean>>({});
+  const [searchTerm, setSearchTerm] = useState("");
+  const [searchMode, setSearchMode] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<SearchResultRow[]>([]);
+  const [searchError, setSearchError] = useState("");
   const detailRequestIdRef = useRef(0);
+  const searchRequestIdRef = useRef(0);
   const visibleMessages = messages.filter((msg) => (msg.role || "").toLowerCase() !== "system");
   const renderedMessages = visibleMessages
     .map((msg) => ({ msg, rendered: formatMessagePayload(msg) }));
@@ -92,6 +144,38 @@ export function SessionsPage() {
   useEffect(() => {
     void loadPage(0, true);
   }, []);
+
+  async function runSearch() {
+    const query = searchTerm.trim();
+    if (!query) return;
+    const requestId = ++searchRequestIdRef.current;
+    setSearchMode(true);
+    setSearching(true);
+    setSearchError("");
+    try {
+      const payload = await fetchJSON<SearchResponse>(
+        `/api/sessions/search?q=${encodeURIComponent(query)}&limit=${SEARCH_LIMIT}`,
+      );
+      if (requestId !== searchRequestIdRef.current) return;
+      setSearchResults(payload.results || []);
+    } catch {
+      if (requestId !== searchRequestIdRef.current) return;
+      setSearchResults([]);
+      setSearchError("Failed to search session messages.");
+    } finally {
+      if (requestId !== searchRequestIdRef.current) return;
+      setSearching(false);
+    }
+  }
+
+  function clearSearch() {
+    searchRequestIdRef.current += 1;
+    setSearchMode(false);
+    setSearching(false);
+    setSearchTerm("");
+    setSearchResults([]);
+    setSearchError("");
+  }
 
   async function relaunch(rawSessionId: string) {
     try {
@@ -161,82 +245,176 @@ export function SessionsPage() {
           <div className="sessions-history-head">
             <h3>Session History</h3>
             <span className="status-badge">
-              {refreshing ? "Refreshing..." : `${total} total`}
+              {searchMode
+                ? searching
+                  ? "Searching..."
+                  : `${searchResults.length} match${searchResults.length === 1 ? "" : "es"}`
+                : refreshing
+                  ? "Refreshing..."
+                  : `${total} total`}
             </span>
           </div>
-          <p className="subtle-copy">Title, model, and date are shown per session. Click an item to inspect messages.</p>
-          {loading ? <p>Loading sessions...</p> : null}
-          {!loading && rows.length === 0 ? <p className="subtle-copy">No sessions found.</p> : null}
-          <div className="sessions-history-scroll">
-            <ul className="list-grid sessions-history-list">
-              {rows.map((row) => (
-                <li
-                  key={row.id || row.session_id}
-                  className={
-                    selectedSessionId === (row.id || row.session_id || "")
-                      ? "clickable-card active"
-                      : "clickable-card"
-                  }
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => selectSession(row.id || row.session_id || "")}
-                  onKeyDown={(event) => {
-                    if (!isSessionActivationKey(event.key)) return;
-                    event.preventDefault();
-                    void selectSession(row.id || row.session_id || "");
-                  }}
-                >
-                  <div className="sessions-history-item-top">
-                    <strong>{row.title || row.id || row.session_id}</strong>
-                    <div className="sessions-history-actions">
-                      <button
-                        type="button"
-                        className="ghost-button session-icon-button"
-                        title="Relaunch in chat"
-                        aria-label="Relaunch in chat"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void relaunch(row.id || row.session_id || "");
-                        }}
-                        disabled={!(row.id || row.session_id)}
-                      >
-                        ↻
-                      </button>
-                      <button
-                        type="button"
-                        className="ghost-button session-icon-button session-delete-button"
-                        title="Delete session"
-                        aria-label="Delete session"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void deleteSession(row.id || row.session_id || "");
-                        }}
-                        disabled={deletingSessionId === (row.id || row.session_id || "")}
-                      >
-                        {deletingSessionId === (row.id || row.session_id || "") ? "…" : "×"}
-                      </button>
-                    </div>
-                  </div>
-                  <div className="sessions-history-item-meta">
-                    <span>{row.model || "unknown-model"}</span>
-                    <span>{row.source || "unknown-source"}</span>
-                    <span>{formatSessionDate(row)}</span>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </div>
-          <div className="sessions-pagination">
-            <button type="button" className="ghost-button" disabled={!canPrev} onClick={() => void loadPage(offset - pageLimit, false)}>
-              Previous
+          <form
+            className="sessions-search"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void runSearch();
+            }}
+          >
+            <input
+              type="search"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              placeholder="Search messages by keyword..."
+              aria-label="Search session messages"
+            />
+            <button
+              type="submit"
+              className="ghost-button sessions-search-button"
+              disabled={searching || !searchTerm.trim()}
+            >
+              {searching ? "…" : "Search"}
             </button>
-            <span className="status-badge">
-              Page {page} / {totalPages}
-            </span>
-            <button type="button" className="ghost-button" disabled={!canNext} onClick={() => void loadPage(offset + pageLimit, false)}>
-              Next
-            </button>
-          </div>
+            {searchMode ? (
+              <button
+                type="button"
+                className="ghost-button sessions-search-button"
+                onClick={clearSearch}
+                aria-label="Clear search"
+              >
+                Clear
+              </button>
+            ) : null}
+          </form>
+          <p className="subtle-copy">
+            {searchMode
+              ? "Sessions containing the keyword in their messages. Click an item to inspect messages."
+              : "Title, model, and date are shown per session. Click an item to inspect messages."}
+          </p>
+          {searchMode ? (
+            <>
+              {searchError ? <p className="error-text">{searchError}</p> : null}
+              {!searching && !searchError && searchResults.length === 0 ? (
+                <p className="subtle-copy">No sessions matched that keyword.</p>
+              ) : null}
+              <div className="sessions-history-scroll">
+                <ul className="list-grid sessions-history-list">
+                  {searchResults.map((result, index) => (
+                    <li
+                      key={`${result.session_id}-${index}`}
+                      className={
+                        selectedSessionId === result.session_id ? "clickable-card active" : "clickable-card"
+                      }
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => selectSession(result.session_id)}
+                      onKeyDown={(event) => {
+                        if (!isSessionActivationKey(event.key)) return;
+                        event.preventDefault();
+                        void selectSession(result.session_id);
+                      }}
+                    >
+                      <div className="sessions-history-item-top">
+                        <strong>{result.session_id}</strong>
+                      </div>
+                      {result.snippet ? (
+                        <p className="sessions-search-snippet">
+                          {parseSnippetSegments(result.snippet).map((segment, segmentIndex) =>
+                            segment.highlight ? (
+                              <mark key={segmentIndex}>{segment.text}</mark>
+                            ) : (
+                              <span key={segmentIndex}>{segment.text}</span>
+                            ),
+                          )}
+                        </p>
+                      ) : null}
+                      <div className="sessions-history-item-meta">
+                        <span>{result.model || "unknown-model"}</span>
+                        <span>{result.source || "unknown-source"}</span>
+                        {result.role ? <span>{result.role}</span> : null}
+                        <span>{formatEpochSeconds(result.session_started)}</span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </>
+          ) : (
+            <>
+              {loading ? <p>Loading sessions...</p> : null}
+              {!loading && rows.length === 0 ? <p className="subtle-copy">No sessions found.</p> : null}
+              <div className="sessions-history-scroll">
+                <ul className="list-grid sessions-history-list">
+                  {rows.map((row) => (
+                    <li
+                      key={row.id || row.session_id}
+                      className={
+                        selectedSessionId === (row.id || row.session_id || "")
+                          ? "clickable-card active"
+                          : "clickable-card"
+                      }
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => selectSession(row.id || row.session_id || "")}
+                      onKeyDown={(event) => {
+                        if (!isSessionActivationKey(event.key)) return;
+                        event.preventDefault();
+                        void selectSession(row.id || row.session_id || "");
+                      }}
+                    >
+                      <div className="sessions-history-item-top">
+                        <strong>{row.title || row.id || row.session_id}</strong>
+                        <div className="sessions-history-actions">
+                          <button
+                            type="button"
+                            className="ghost-button session-icon-button"
+                            title="Relaunch in chat"
+                            aria-label="Relaunch in chat"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void relaunch(row.id || row.session_id || "");
+                            }}
+                            disabled={!(row.id || row.session_id)}
+                          >
+                            ↻
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost-button session-icon-button session-delete-button"
+                            title="Delete session"
+                            aria-label="Delete session"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void deleteSession(row.id || row.session_id || "");
+                            }}
+                            disabled={deletingSessionId === (row.id || row.session_id || "")}
+                          >
+                            {deletingSessionId === (row.id || row.session_id || "") ? "…" : "×"}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="sessions-history-item-meta">
+                        <span>{row.model || "unknown-model"}</span>
+                        <span>{row.source || "unknown-source"}</span>
+                        <span>{formatSessionDate(row)}</span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div className="sessions-pagination">
+                <button type="button" className="ghost-button" disabled={!canPrev} onClick={() => void loadPage(offset - pageLimit, false)}>
+                  Previous
+                </button>
+                <span className="status-badge">
+                  Page {page} / {totalPages}
+                </span>
+                <button type="button" className="ghost-button" disabled={!canNext} onClick={() => void loadPage(offset + pageLimit, false)}>
+                  Next
+                </button>
+              </div>
+            </>
+          )}
         </article>
         <article className="detail-panel sessions-message-pane sessions-message-pane-wide">
           <div className="sessions-message-head">

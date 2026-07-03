@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+import re
 import time
 
 from hermes_state import SessionDB
@@ -14,6 +15,26 @@ def _strip_sensitive_session_fields(item: dict[str, Any]) -> dict[str, Any]:
     """Remove heavy/sensitive fields that should not be exposed in list APIs."""
     item.pop("system_prompt", None)
     return item
+
+
+def _build_message_search_query(query: str) -> str:
+    """Translate a user query into an FTS5 query for ``search_messages``.
+
+    ASCII tokens get a trailing ``*`` so partial words match as prefixes.
+    CJK tokens are passed through verbatim: ``search_messages`` routes them to
+    its trigram/LIKE paths where ``*`` is a literal character, so appending it
+    would prevent any match. Already-quoted phrases and explicit ``*`` prefixes
+    are left untouched.
+    """
+    terms: list[str] = []
+    for token in re.findall(r'"[^"]*"|\S+', query.strip()):
+        if token.startswith('"') or token.endswith("*"):
+            terms.append(token)
+        elif SessionDB._contains_cjk(token):
+            terms.append(token)
+        else:
+            terms.append(token + "*")
+    return " ".join(terms)
 
 
 def list_sessions(limit: int = 20, offset: int = 0) -> dict[str, Any]:
@@ -37,17 +58,9 @@ def search_sessions(query: str, limit: int = 20) -> dict[str, Any]:
     if not query or not query.strip():
         return {"results": []}
 
-    import re
-
     db = SessionDB()
     try:
-        terms = []
-        for token in re.findall(r'"[^"]*"|\S+', query.strip()):
-            if token.startswith('"') or token.endswith("*"):
-                terms.append(token)
-            else:
-                terms.append(token + "*")
-        prefix_query = " ".join(terms)
+        prefix_query = _build_message_search_query(query)
         matches = db.search_messages(query=prefix_query, limit=limit)
         seen: dict[str, dict[str, Any]] = {}
         for match in matches:

@@ -54,6 +54,7 @@ export function SkillsPage() {
   const [appendixError, setAppendixError] = useState("");
   const [appendixCollapsed, setAppendixCollapsed] = useState(false);
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
+  const [search, setSearch] = useState("");
 
   async function loadSkills(): Promise<boolean> {
     setLoading(true);
@@ -148,9 +149,20 @@ export function SkillsPage() {
     void loadSkillDetail(target);
   }, [skills, selectedSkillName]);
 
+  const normalizedQuery = search.trim().toLowerCase();
+  const isSearching = normalizedQuery.length > 0;
+
+  const filteredSkills = useMemo(() => {
+    if (!normalizedQuery) return skills;
+    return skills.filter((skill) => {
+      const haystack = `${skill.name} ${skill.description || ""} ${normalizeCategory(skill.category)}`.toLowerCase();
+      return haystack.includes(normalizedQuery);
+    });
+  }, [skills, normalizedQuery]);
+
   const groupedSkills = useMemo(() => {
     const groups = new Map<string, SkillRow[]>();
-    for (const skill of skills) {
+    for (const skill of filteredSkills) {
       const category = normalizeCategory(skill.category);
       const bucket = groups.get(category) || [];
       bucket.push(skill);
@@ -162,7 +174,7 @@ export function SkillsPage() {
         items: items.sort((a, b) => a.name.localeCompare(b.name)),
       }))
       .sort((a, b) => a.category.localeCompare(b.category));
-  }, [skills]);
+  }, [filteredSkills]);
 
   useEffect(() => {
     setCollapsedCategories((current) => {
@@ -185,7 +197,28 @@ export function SkillsPage() {
         <article className="detail-panel skills-list-pane">
           <div className="skills-list-head">
             <h3>Skills</h3>
-            <span className="status-badge">{`${skills.length} total`}</span>
+            <span className="status-badge">
+              {isSearching ? `${filteredSkills.length} / ${skills.length}` : `${skills.length} total`}
+            </span>
+          </div>
+          <div className="skills-search">
+            <input
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search skills by name, description, or category..."
+              aria-label="Search skills"
+            />
+            {isSearching ? (
+              <button
+                type="button"
+                className="ghost-button skills-search-clear"
+                onClick={() => setSearch("")}
+                aria-label="Clear skill search"
+              >
+                Clear
+              </button>
+            ) : null}
           </div>
           <p className="subtle-copy">Categorized skill index. Empty category is grouped under misc.</p>
           {loading ? (
@@ -193,6 +226,9 @@ export function SkillsPage() {
           ) : null}
           {!loading && !error && skills.length === 0 ? (
             <StateBlock kind="empty" title="No Skills Found" message="No skill entries were returned for this profile." />
+          ) : null}
+          {!loading && !error && skills.length > 0 && isSearching && filteredSkills.length === 0 ? (
+            <StateBlock kind="empty" title="No Matches" message={`No skills match "${search.trim()}".`} />
           ) : null}
           <div className="skills-list-scroll">
             {groupedSkills.map((group) => (
@@ -207,17 +243,17 @@ export function SkillsPage() {
                     }))
                   }
                   aria-label={`Toggle ${group.category} category`}
-                  aria-expanded={!collapsedCategories[group.category]}
+                  aria-expanded={isSearching || !collapsedCategories[group.category]}
                 >
                   <h4>{group.category}</h4>
                   <span className="skills-category-head-right">
                     <span className="status-badge">{group.items.length}</span>
                     <span className="skills-category-chevron" aria-hidden="true">
-                      {collapsedCategories[group.category] ? "▸" : "▾"}
+                      {isSearching || !collapsedCategories[group.category] ? "▾" : "▸"}
                     </span>
                   </span>
                 </button>
-                {!collapsedCategories[group.category] ? (
+                {isSearching || !collapsedCategories[group.category] ? (
                   <ul className="list-grid skills-narrow-list">
                     {group.items.map((skill) => (
                       <li
