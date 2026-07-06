@@ -104,7 +104,7 @@ class HermesA2AExecutor(AgentExecutor):
                 _source_meta = json.loads(_src_m.group(1))
             except (json.JSONDecodeError, ValueError):
                 pass
-            user_input = user_input[_src_m.end():]  # 剥离前缀，LLM 只看干净正文
+            # 保留前缀，LLM 可见完整原文
 
         _src_platform = _source_meta.get("platform", "")
         _src_uid      = _source_meta.get("uid", "")

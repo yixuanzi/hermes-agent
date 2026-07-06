@@ -8136,7 +8136,20 @@ class GatewayRunner:
             group_sessions_per_user=_group_sessions_per_user,
             thread_sessions_per_user=_thread_sessions_per_user,
         )
-        if _is_shared_multi_user and source.user_name:
+        # 对 Slack 平台（含 DM）统一注入 <source> 结构化前缀，
+        # 使 executor.py 能解析 uid/uname/channel，与 A2A 路径格式一致。
+        if source.platform and getattr(source.platform, "value", None) == "slack" and source.user_id:
+            import json as _json
+            _source_data: dict = {"platform": "slack"}
+            if source.chat_id:
+                _source_data["channel"] = source.chat_id
+            _source_data["uid"] = source.user_id
+            if source.user_name:
+                _source_data["uname"] = source.user_name
+            _source_header = f"<source>{_json.dumps(_source_data, ensure_ascii=False, separators=(',', ':'))}</source>"
+            message_text = f"{_source_header}\n\n{message_text}"
+        elif _is_shared_multi_user and source.user_name:
+            # 其他平台的 group session 保留原有纯文本前缀逻辑
             message_text = f"[{source.user_name}] {message_text}"
 
         # Prepend channel context from history backfill (if any).  This
