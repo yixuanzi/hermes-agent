@@ -2,6 +2,51 @@
 
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
+## Aegis Change Log Workflow
+
+When a task modifies a code file that satisfies all of the following, treat
+the workflow below as mandatory project memory:
+
+- not under `aisoc/`
+- not under `aegis/`
+- not under `tests/`
+- not a test-named file such as `test_*.py` or `*_test.py`
+- ends with the `.py` suffix
+
+1. Record the task in repository-root `hermes_change_log_by_aegis.md` before
+   treating the work as ready for completion.
+2. The file title is `Hermes Change Log by Ages`, and each applicable task
+   must be maintained as a file-centric summary rather than as a simple running
+   diary.
+3. List modified files as `## File: \`path\`` blocks in the summary file.
+4. Each file block may contain multiple change points, but every change point
+   must explain both the feature being modified and the intent behind that
+   change.
+5. End every such task with an explicit review step, then decide whether to
+   continue with completion actions such as commit, handoff, or final delivery.
+
+Checker:
+
+- `python scripts/check_aegis_change_log.py`
+  - Purpose: inspect the current Git diff and decide whether the current task
+    must update `hermes_change_log_by_aegis.md`.
+  - Trigger rule: it only cares about changed files that are outside `aisoc/`,
+    `aegis/`, and `tests/`, are not test-named Python files, and end with
+    `.py`.
+  - Pass condition: if no such Python files changed, it reports that no Hermes
+    change-log entry is required; if such files changed, it requires
+    `hermes_change_log_by_aegis.md` to also be changed and to contain a `## File:`
+    block for each matching Python file with both `Feature` and `Intent`.
+  - When to use: run it before treating a task as ready for completion whenever
+    you touched Python code that might match the workflow trigger.
+  - Output: exits `0` with `PASS: ...` when the summary is sufficient; exits
+    non-zero with `FAIL: ...` and tells you what is missing when the summary
+    does not yet satisfy the workflow.
+
+Only files matching every rule above should trigger this workflow. Do not use
+it for test-only edits, non-Python code changes, files inside `aisoc/`,
+`aegis/`, or `tests/`, or Python files whose names already mark them as tests.
+
 ## Development Environment
 
 ```bash

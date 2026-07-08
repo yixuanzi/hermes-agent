@@ -1,3 +1,0 @@
-- [Bugfix log](../memory/bugfix.md) — Recurring bug fixes and the lessons they establish
-- [Decisions log](../memory/decisions.md) — Durable project decisions and why they matter
-- [Gotchas log](../memory/gotchas.md) — Non-obvious pitfalls worth surfacing in future sessions
