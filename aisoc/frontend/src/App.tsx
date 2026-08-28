@@ -10,6 +10,8 @@ import { MemoryPage } from "./pages/MemoryPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { RegisterPage } from "./pages/RegisterPage";
+import { ServiceEntryPage } from "./pages/ServiceEntryPage";
+import { SsoCallbackPage } from "./pages/SsoCallbackPage";
 import { UsersPage } from "./pages/UsersPage";
 
 const OntologyPage = lazy(() =>
@@ -37,11 +39,12 @@ import { WikiPage } from "./pages/WikiPage";
 export function App() {
   return (
     <Routes>
+      <Route path="/" element={<ServiceEntryPage />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/register" element={<RegisterPage />} />
+      <Route path="/sso/callback" element={<SsoCallbackPage />} />
       <Route element={<RequireAuth />}>
         <Route element={<AppShell />}>
-          <Route index element={<Navigate to="/overview" replace />} />
           <Route path="/overview" element={<OverviewPage />} />
           <Route path="/chat" element={<ChatPage />} />
           <Route path="/sessions" element={<SessionsPage />} />

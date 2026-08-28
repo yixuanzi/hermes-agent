@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import secrets
 import sqlite3
@@ -42,6 +43,10 @@ def _normalize_email(email: str) -> str:
 class UserService:
     def __init__(self, store: AisocUserStore | None = None) -> None:
         self._store = store or get_aisoc_user_store()
+
+    @property
+    def store(self) -> AisocUserStore:
+        return self._store
 
     def ensure_bootstrap_admin(self) -> bool:
         """Create the initial admin only when an explicit secret is supplied."""
@@ -122,6 +127,61 @@ class UserService:
             raise HTTPException(status_code=401, detail="Invalid username or password.")
         self._validate_password(new_password)
         self._store.update_password(uid, hash_password(new_password))
+
+    def upsert_oidc_user(self, *, subject: str, email: str) -> UserResponse:
+        normalized_subject = str(subject or "").strip()
+        normalized_email = _normalize_email(email)
+        if not normalized_subject or not normalized_email:
+            raise HTTPException(status_code=400, detail="OIDC identity is incomplete.")
+        self._validate_email(normalized_email)
+
+        subject_user = self._store.get_user_by_oidc_subject(normalized_subject)
+        email_user = self._store.get_user_by_email(normalized_email)
+        if subject_user and email_user and subject_user["uid"] != email_user["uid"]:
+            raise HTTPException(status_code=409, detail="OIDC subject and email belong to different users.")
+
+        user = subject_user or email_user
+        if user is not None:
+            if user["username"] == DEFAULT_ADMIN_USERNAME and not subject_user:
+                raise HTTPException(status_code=403, detail="The local admin account cannot be bound by email.")
+            if user["oidc_subject"] and user["oidc_subject"] != normalized_subject:
+                raise HTTPException(status_code=409, detail="The local email is bound to another OIDC user.")
+            if user["status"] != "enabled":
+                raise HTTPException(status_code=403, detail="User account is disabled.")
+            try:
+                self._store.update_oidc_identity(
+                    user["uid"],
+                    normalized_subject,
+                    normalized_email,
+                    _utc_timestamp(),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise HTTPException(status_code=409, detail="OIDC identity conflicts with another user.") from exc
+            refreshed = self._store.get_user_by_uid(user["uid"])
+            assert refreshed is not None
+            return self._build_user_response(refreshed)
+
+        username_prefix = f"oidc_{hashlib.sha256(normalized_subject.encode('utf-8')).hexdigest()[:16]}"
+        username = username_prefix
+        suffix = 1
+        while self._store.get_user_by_username(username) is not None:
+            suffix += 1
+            username = f"{username_prefix}_{suffix}"
+        try:
+            record = {
+                "uid": self._generate_user_uid(),
+                "username": username,
+                "passwd": hash_password(secrets.token_urlsafe(32)),
+                "email": normalized_email,
+                "oidc_subject": normalized_subject,
+                "status": "enabled",
+                "create_time": _utc_timestamp(),
+                "last_login": _utc_timestamp(),
+            }
+            self._store.create_user(record)
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="OIDC user already exists or conflicts with another user.") from exc
+        return self._build_user_response(record)
 
     def reset_password(self, uid: str, new_password: str) -> None:
         self._require_user_row(uid)

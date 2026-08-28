@@ -24,6 +24,7 @@ from aisoc.backend.routes.ontology import build_ontology_router
 from aisoc.backend.routes.overview import build_overview_router
 from aisoc.backend.routes.sessions import build_sessions_router
 from aisoc.backend.routes.skills import build_skills_router
+from aisoc.backend.routes.sso import build_sso_router
 from aisoc.backend.routes.kb import build_kb_router
 from aisoc.backend.routes.system import build_system_router
 from aisoc.backend.routes.users import build_users_router
@@ -38,6 +39,9 @@ PUBLIC_API_PATHS = frozenset(
         "/api/auth/register",
         "/api/auth/session",
         "/api/auth/logout",
+        "/api/sso/start",
+        "/api/sso/callback",
+        "/api/sso/exchange",
         "/health",
         "/api/system/bootstrap",
     }
@@ -120,6 +124,7 @@ def create_app(settings: AisocSettings | None = None) -> FastAPI:
     app.state.quick_command_service = quick_command_service
 
     app.include_router(build_auth_router(active_settings, user_service))
+    app.include_router(build_sso_router(active_settings, user_service, user_service.store))
     app.include_router(build_users_router(active_settings, user_service))
     app.include_router(
         build_system_router(active_settings, user_service, admin_setup_required=not admin_ready)

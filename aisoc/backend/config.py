@@ -24,6 +24,12 @@ class AisocSettings:
     a2a_session_token: str = ""
     a2a_token_source: A2ATokenSource = "disabled"
     a2a_admin_token: str = ""
+    oidc_issuer: str = "http://127.0.0.1:8080"
+    oidc_backchannel_url: str = "http://127.0.0.1:8080"
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_redirect_uri: str = "http://127.0.0.1:9120/api/sso/callback"
+    oidc_post_login_redirect: str = "/sso/callback"
     dist_dir: Path | None = None
 
 
@@ -58,6 +64,18 @@ def load_aisoc_settings(
 
     a2a_admin_token = (os.environ.get("AISOC_A2A_ADMIN_TOKEN") or "").strip()
 
+    oidc_issuer = (os.environ.get("AISOC_OIDC_ISSUER") or "http://127.0.0.1:8080").strip().rstrip("/")
+    oidc_backchannel_url = (
+        os.environ.get("AISOC_OIDC_BACKCHANNEL_URL") or oidc_issuer
+    ).strip().rstrip("/")
+    oidc_redirect_uri = (
+        os.environ.get("AISOC_OIDC_REDIRECT_URI")
+        or "http://127.0.0.1:9120/api/sso/callback"
+    ).strip()
+    oidc_post_login_redirect = (
+        os.environ.get("AISOC_OIDC_POST_LOGIN_REDIRECT") or "/sso/callback"
+    ).strip()
+
     return AisocSettings(
         host=host,
         port=port,
@@ -69,6 +87,12 @@ def load_aisoc_settings(
         a2a_session_token=a2a_token,
         a2a_token_source=a2a_source,
         a2a_admin_token=a2a_admin_token,
+        oidc_issuer=oidc_issuer,
+        oidc_backchannel_url=oidc_backchannel_url,
+        oidc_client_id=(os.environ.get("AISOC_OIDC_CLIENT_ID") or "").strip(),
+        oidc_client_secret=(os.environ.get("AISOC_OIDC_CLIENT_SECRET") or "").strip(),
+        oidc_redirect_uri=oidc_redirect_uri,
+        oidc_post_login_redirect=oidc_post_login_redirect,
         dist_dir=dist_dir,
     )
 

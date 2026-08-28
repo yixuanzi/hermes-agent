@@ -69,6 +69,13 @@ export function LoginPage() {
               Sign in with your AISOC username and password.
             </p>
             <LoginForm onSuccess={() => navigate("/overview", { replace: true })} />
+            <button
+              type="button"
+              onClick={() => window.location.assign("/api/sso/start?sso=1")}
+              className="mt-[calc(10px*var(--density-scale))] min-h-[calc(40px*var(--density-scale))] w-full cursor-pointer rounded-[var(--aisoc-radius-sm)] border border-aisoc-border bg-transparent px-[calc(12px*var(--density-scale))] py-[calc(10px*var(--density-scale))] font-bold text-aisoc-accent transition-colors duration-[160ms] hover:border-aisoc-accent"
+            >
+              SSO Sign-In
+            </button>
           </>
         )}
       </div>
