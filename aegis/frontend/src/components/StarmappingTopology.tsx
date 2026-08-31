@@ -9,11 +9,15 @@ import heimdallEye from '../assets/starmapping/heimdall-eye.svg';
 import janusDuality from '../assets/starmapping/janus-duality.svg';
 import wedjatEye from '../assets/starmapping/wedjat-eye.svg';
 import StarmappingStarfieldCanvas from './StarmappingStarfieldCanvas';
-import type { StarmappingTopology, TopologyAgentNode, TopologyStarKind } from '../types';
+import type { AppEntry, StarmappingTopology, TopologyAgentNode, TopologyStarKind } from '../types';
 
 interface StarmappingTopologyProps {
   topology: StarmappingTopology | null;
   error: string;
+  appEntries: AppEntry[];
+  appEntriesLoading: boolean;
+  appEntriesError: string;
+  appEntriesLoaded: boolean;
 }
 
 type RenderNodeKind = 'center' | 'agent' | 'star';
@@ -76,6 +80,10 @@ function radians(degrees: number): number {
 
 function nodeStatusLabel(status: TopologyAgentNode['runtime']['status']): string {
   return status === 'planned' ? 'BASELINE' : status.toUpperCase();
+}
+
+function normalizeProductServiceCode(value: string): string {
+  return value.replace(/\s/g, '').toLowerCase();
 }
 
 function StarGlyph({ symbol, color, size, lit }: { symbol: string; color: string; size: number; lit: boolean }) {
@@ -181,17 +189,22 @@ function buildRenderNodes(topology: StarmappingTopology): RenderNode[] {
   return nodes;
 }
 
-function NodeInsight({ node }: { node: RenderNode }) {
+interface AgentEntryState {
+  code: string;
+  status: string;
+}
+
+function NodeInsight({ node, agentEntryState }: { node: RenderNode; agentEntryState?: AgentEntryState }) {
   if (node.kind === 'center') {
     return <><p className="text-[10px] font-mono tracking-[0.18em] text-cyan-300">CENTER · ORCHESTRATION CORE</p><h4 className="mt-1 text-base font-semibold text-slate-100">{node.name}</h4><p className="mt-1.5 max-w-xl text-[11px] leading-relaxed text-slate-400">{node.detail}</p><p className="mt-2 text-[10px] font-mono text-slate-500">COORDINATING 7 DOMAIN AGENTS · 84 REQUIRED CAPABILITIES</p></>;
   }
   if (node.kind === 'agent' && node.agent) {
-    return <><div className="flex flex-wrap items-center gap-2"><p className="text-[10px] font-mono tracking-[0.18em] text-cyan-300">{node.agent.business_domain} · AGENT RING</p><span className="rounded border border-cyan-900/60 bg-cyan-950/30 px-1.5 py-0.5 text-[9px] font-mono text-cyan-200">{nodeStatusLabel(node.agent.runtime.status)}</span></div><h4 className="mt-1 text-base font-semibold text-slate-100">{node.name} <span className="text-xs font-normal text-slate-500">{node.agent.marketing_name}</span></h4><p className="mt-1.5 text-[11px] leading-relaxed text-slate-400">{node.detail}</p><p className="mt-2 text-[10px] font-mono text-slate-500">{node.agent.cultural_origin} · {node.agent.star_nodes.length} STARS · {node.agent.runtime.source}</p></>;
+    return <><div className="flex flex-wrap items-center gap-2"><p className="text-[10px] font-mono tracking-[0.18em] text-cyan-300">{node.agent.business_domain} · AGENT RING</p><span className="rounded border border-cyan-900/60 bg-cyan-950/30 px-1.5 py-0.5 text-[9px] font-mono text-cyan-200">{nodeStatusLabel(node.agent.runtime.status)}</span></div><h4 className="mt-1 text-base font-semibold text-slate-100">{node.name} <span className="text-xs font-normal text-slate-500">{node.agent.marketing_name}</span></h4><p className="mt-1.5 text-[11px] leading-relaxed text-slate-400">{node.detail}</p><p className="mt-2 text-[10px] font-mono text-slate-500">{node.agent.cultural_origin} · {node.agent.star_nodes.length} STARS · {node.agent.runtime.source}</p><p className="mt-2 text-[10px] font-mono text-slate-400">PRODUCT SERVICE · {agentEntryState?.code || node.agent.product_service_code}</p><p className={`mt-1 text-[10px] font-mono ${agentEntryState?.status === 'ENTRY READY' ? 'text-emerald-300' : 'text-amber-300/90'}`}>{agentEntryState?.status || 'ENTRY UNAVAILABLE'}</p></>;
   }
   return <><p className="text-[10px] font-mono tracking-[0.18em] text-cyan-300">{node.starKind?.toUpperCase()} · STAR FIELD</p><h4 className="mt-1 text-base font-semibold text-slate-100">{node.name}</h4><p className="mt-1.5 text-[11px] leading-relaxed text-slate-400">{node.detail}</p><p className="mt-2 text-[10px] font-mono text-slate-500">{node.integration} · {node.required ? 'REQUIRED' : 'OPTIONAL'}</p></>;
 }
 
-export default function StarmappingTopology({ topology, error }: StarmappingTopologyProps) {
+export default function StarmappingTopology({ topology, error, appEntries, appEntriesLoading, appEntriesError, appEntriesLoaded }: StarmappingTopologyProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [tooltip, setTooltip] = useState<{ id: string; x: number; y: number } | null>(null);
@@ -203,6 +216,10 @@ export default function StarmappingTopology({ topology, error }: StarmappingTopo
   const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const activeNodeId = hoveredNodeId;
   const activeNode = activeNodeId ? nodeById.get(activeNodeId) : undefined;
+  const appEntryByCode = useMemo(
+    () => new Map(appEntries.map((entry) => [normalizeProductServiceCode(entry.product_service_code), entry])),
+    [appEntries],
+  );
   const litIds = useMemo(() => {
     const lit = new Set<string>();
     if (!activeNode || !topology) return lit;
@@ -288,6 +305,19 @@ export default function StarmappingTopology({ topology, error }: StarmappingTopo
     setTooltip({ id, x: 20, y: 72 });
   };
 
+  const activateNode = (id: string) => {
+    focusNode(id);
+    const node = nodeById.get(id);
+    if (node?.kind !== 'agent' || !node.agent || appEntriesLoading || appEntriesError || !appEntriesLoaded) {
+      return;
+    }
+
+    const entryUrl = appEntryByCode.get(normalizeProductServiceCode(node.agent.product_service_code))?.entry_url?.trim();
+    if (entryUrl) {
+      window.open(entryUrl, '_blank', 'noopener,noreferrer');
+    }
+  };
+
   const toggleFullscreen = async () => {
     if (isFullscreen || document.fullscreenElement) {
       await document.exitFullscreen();
@@ -300,9 +330,24 @@ export default function StarmappingTopology({ topology, error }: StarmappingTopo
   const handleNodeKeyDown = (event: KeyboardEvent<SVGGElement>, id: string) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      focusNode(id);
+      activateNode(id);
     }
   };
+
+  const agentEntryState = activeNode?.kind === 'agent' && activeNode.agent
+    ? {
+      code: activeNode.agent.product_service_code,
+      status: appEntriesLoading
+        ? 'ENTRY UNAVAILABLE · DIRECTORY LOADING'
+        : appEntriesError
+          ? 'ENTRY UNAVAILABLE · DIRECTORY ERROR'
+          : !appEntriesLoaded
+            ? 'ENTRY UNAVAILABLE'
+            : appEntryByCode.get(normalizeProductServiceCode(activeNode.agent.product_service_code))?.entry_url?.trim()
+              ? 'ENTRY READY'
+              : 'ENTRY UNAVAILABLE',
+    }
+    : undefined;
 
   if (!topology) {
     return <div className="aegis-starmap flex min-h-0 flex-1 items-center justify-center px-8 text-center"><div><p className="text-xs font-mono tracking-[0.2em] text-cyan-400">STARMAPPING UNAVAILABLE</p><p className="mt-3 max-w-sm text-xs leading-relaxed text-slate-500">{error || 'The three-layer topology is loading from the Aegis API.'}</p></div></div>;
@@ -360,7 +405,7 @@ export default function StarmappingTopology({ topology, error }: StarmappingTopo
               onPointerLeave={hideTooltip}
               onFocus={() => focusNode(node.id)}
               onBlur={hideTooltip}
-              onClick={() => focusNode(node.id)}
+              onClick={() => activateNode(node.id)}
               onKeyDown={(event) => handleNodeKeyDown(event, node.id)}
               className="cursor-pointer outline-none"
               opacity={opacity}
@@ -386,7 +431,7 @@ export default function StarmappingTopology({ topology, error }: StarmappingTopo
         })}
       </svg>
 
-      {tooltip && activeNode?.id === tooltip.id ? <div role="status" className="aegis-starmap__tooltip pointer-events-none absolute z-20 w-80 rounded-lg border p-3 backdrop-blur-md" style={{ left: tooltip.x, top: tooltip.y }}><NodeInsight node={activeNode} /></div> : null}
+      {tooltip && activeNode?.id === tooltip.id ? <div role="status" className="aegis-starmap__tooltip pointer-events-none absolute z-20 w-80 rounded-lg border p-3 backdrop-blur-md" style={{ left: tooltip.x, top: tooltip.y }}><NodeInsight node={activeNode} agentEntryState={agentEntryState} /></div> : null}
       <div className="pointer-events-none absolute right-14 top-4 flex gap-3 text-[9px] font-mono tracking-wide text-slate-500"><span><i className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-cyan-300" />CORE</span><span><i className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-teal-300" />AGENT RING</span><span><i className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-indigo-300" />STAR FIELD</span></div>
       <button type="button" aria-label={isFullscreen ? 'Exit topology fullscreen' : 'Enter topology fullscreen'} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen topology'} onClick={() => void toggleFullscreen()} className="aegis-starmap__control absolute right-4 top-3 z-30 rounded-md border p-2 shadow-lg backdrop-blur transition">
         {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}

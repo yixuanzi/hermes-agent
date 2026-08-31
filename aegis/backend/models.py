@@ -240,6 +240,30 @@ class UserManualListResponse(BaseModel):
     default_manual_id: str | None = None
 
 
+AppEntrySubscriptionStatus = Literal["active", "expiring"]
+AppEntrySource = Literal["app", "subscription"]
+
+
+class AppEntryResponse(BaseModel):
+    """A safe, display-ready application entry returned to the Aegis UI."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subscription_id: str
+    subscription_no: str
+    subscription_status: AppEntrySubscriptionStatus
+    effective_to: str
+    product_service_code: str
+    product_service_name: str
+    entry_url: str | None = None
+    entry_source: AppEntrySource | None = None
+
+
+class AppEntryListResponse(BaseModel):
+    organization_code: str
+    entries: list[AppEntryResponse] = Field(default_factory=list)
+
+
 class UserManualResponse(UserManualSummary):
     content: str
 
@@ -288,6 +312,7 @@ class SystemBootstrapResponse(BaseModel):
     embedded_chat: bool
     auth_scheme: str
     admin_setup_required: bool
+    lark_sso_enabled: bool
 
 
 class SystemRestartResponse(BaseModel):
@@ -443,6 +468,7 @@ class TopologyAgentResponse(BaseModel):
     id: str
     layer: Literal["agent_ring"]
     business_domain: str
+    product_service_code: str
     name: str
     display_name: str
     marketing_name: str

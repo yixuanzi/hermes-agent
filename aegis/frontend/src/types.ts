@@ -45,6 +45,25 @@ export interface UserManual extends UserManualSummary {
   content: string;
 }
 
+export type AppEntrySubscriptionStatus = 'active' | 'expiring';
+export type AppEntrySource = 'app' | 'subscription';
+
+export interface AppEntry {
+  subscription_id: string;
+  subscription_no: string;
+  subscription_status: AppEntrySubscriptionStatus;
+  effective_to: string;
+  product_service_code: string;
+  product_service_name: string;
+  entry_url: string | null;
+  entry_source: AppEntrySource | null;
+}
+
+export interface AppEntryList {
+  organization_code: string;
+  entries: AppEntry[];
+}
+
 export interface A2AContextAgent {
   name: string;
   url: string | null;
@@ -188,6 +207,7 @@ export interface TopologyAgentNode {
   id: string;
   layer: 'agent_ring';
   business_domain: string;
+  product_service_code: string;
   name: string;
   display_name: string;
   marketing_name: string;

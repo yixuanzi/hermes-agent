@@ -59,6 +59,12 @@ Intent: Prefix every remote A2A turn with a compact source envelope rebuilt from
 Feature: Hermes A2A interaction client bridge.
 Intent: Read the optional `hermes.interaction.v1` Agent Card extension, parse approval/clarify metadata from both streaming and polling task updates, de-duplicate interaction events, and schedule authenticated responses with task/context/interaction IDs on the session owner loop. Preserve fail-closed behavior when the remote service does not declare or cannot serve the response channel.
 
+Feature: Interaction-aware A2A task deadline.
+Intent: Pause the caller-side polling deadline while a supported approval or clarification is pending, restore the remaining deadline after the matching resolved event, and clear stale pending markers when the remote task reaches a terminal state without adding a new interaction event protocol.
+
+Feature: Configurable A2A polling timing.
+Intent: Use a 120-second client polling deadline by default and allow process-level overrides through `A2A_POLL_TIMEOUT` and `A2A_POLL_INTERVAL`, while preserving explicit session arguments and leaving HTTP and remote approval/clarify timeouts unchanged.
+
 ## File: `toolsets.py`
 
 Feature: Toolset catalog.
@@ -110,6 +116,9 @@ Intent: Capture follow-up messages for active delegate loops before normal messa
 
 Feature: Slack slash-command source identity.
 Intent: Preserve the invoking Slack display name when constructing slash-command events, including legacy `/hermes` free-form turns, so downstream source envelopes retain the same user identity fields as normal Slack messages.
+
+Feature: Slack bot-message source identity fallback.
+Intent: Preserve `bot_id` as the sender identity when a Slack `bot_message` event omits `user`, propagate the bot marker through authorization and `SessionSource`, and use event-provided bot names without passing a bot ID to the user lookup API so `<source>` attribution remains available for peer-bot mentions.
 
 Feature: Slack clarify Block Kit prompts.
 Intent: Render multi-choice gateway clarify prompts as Slack buttons, resolve authorized button clicks through the shared clarify primitive, preserve the typed-answer fallback for Other/open-ended responses, and enforce the same gateway user authorization boundary used by Slack approval and slash-confirm interactions.

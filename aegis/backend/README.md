@@ -84,6 +84,24 @@ export AEGIS_BOOTSTRAP_ADMIN_PASSWORD="choose-a-strong-password"
 hermes aegis
 ```
 
+## App Entry
+
+The authenticated `GET /api/app-entries` endpoint loads the current
+organization's active and expiring subscription entries from Aegis Portal.
+Configure the Portal URL, organization code, and server-only public API key in
+the Aegis process environment:
+
+```dotenv
+AEGIS_PORTAL_URL=http://127.0.0.1:8080
+AEGIS_ORG_CODE=XINGHAI-SH
+PUBLIC_SUBSCRIPTION_API_KEY=<server-side-secret>
+```
+
+`AEGIS_PORTAL_URL` is the Portal base URL. `PORTAL_BASE_URL` is also accepted
+as a compatibility fallback. Aegis sends `PUBLIC_SUBSCRIPTION_API_KEY` to the
+Portal as `X-API-Key`; the key is never sent to the browser. App Entry uses the
+Portal's `sub_app_entry_url` when available and falls back to `sub_entry_url`.
+
 The first `admin` account is created only when this secret is present. If it
 is missing, `/api/system/bootstrap` reports that setup is required and login
 remains rejected; there is no anonymous admin registration or fixed default
@@ -137,11 +155,14 @@ a password through the existing user-management API if local login is needed.
 
 ## Lark SSO
 
-The login page also supports Lark OAuth login. Configure the Lark application
+The login page supports Lark OAuth login when `LARK_SSO_ENABLE=true`. The
+default is `false`; when disabled, the login option is hidden and
+`/api/lark/start` rejects new login attempts. Configure the Lark application
 credentials in the process environment and register the exact callback URL in
 the Lark developer console:
 
 ```dotenv
+LARK_SSO_ENABLE=false
 LARK_APP_ID=<Lark application App ID>
 LARK_APP_SECRET=<Lark application App Secret>
 LARK_REDIRECT_URI=http://127.0.0.1:9130/api/lark/callback
@@ -197,6 +218,7 @@ The standalone backend currently supports these API areas:
 - Portal OIDC client: `/api/sso/start`, `/api/sso/callback`, `/api/sso/exchange`
 - User management: `/api/users`, `/api/users/{uid}/status`, `/api/users/{uid}/password`, `/api/users/{uid}`
 - System: `/health`, `/api/system/bootstrap`
+- App Entry: `/api/app-entries` (Portal-backed organization application directory)
 - Public skill JavaScript: `/static/skills/html-deliverable/assets/agent2ui-bridge.js`
 - Overview: `/api/overview/agents`, `/api/overview/stats`
 - Agents: `/api/agents`, `/api/agents/{agent_id}`

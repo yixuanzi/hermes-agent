@@ -1,9 +1,11 @@
-import { fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import LoginScreen from '../LoginScreen';
 
 describe('LoginScreen', () => {
-  it('keeps credentials empty and exposes both SSO entries', () => {
+  afterEach(cleanup);
+
+  it('keeps credentials empty and exposes both SSO entries when Lark SSO is enabled', () => {
     const onAegisSsoLogin = vi.fn();
     const onLarkSsoLogin = vi.fn();
     render(
@@ -11,6 +13,7 @@ describe('LoginScreen', () => {
         onSubmit={vi.fn()}
         onAegisSsoLogin={onAegisSsoLogin}
         onLarkSsoLogin={onLarkSsoLogin}
+        larkSsoEnabled
         onSwitchToRegister={vi.fn()}
         pending={false}
       />,
@@ -24,5 +27,20 @@ describe('LoginScreen', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Lark SSO' }));
     expect(onLarkSsoLogin).toHaveBeenCalledOnce();
+  });
+
+  it('hides the Lark SSO entry when it is disabled', () => {
+    render(
+      <LoginScreen
+        onSubmit={vi.fn()}
+        onAegisSsoLogin={vi.fn()}
+        onLarkSsoLogin={vi.fn()}
+        larkSsoEnabled={false}
+        onSwitchToRegister={vi.fn()}
+        pending={false}
+      />,
+    );
+
+    expect(screen.queryByRole('button', { name: 'Lark SSO' })).not.toBeInTheDocument();
   });
 });

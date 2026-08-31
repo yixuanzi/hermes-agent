@@ -11,6 +11,7 @@ import {
   FilePenLine,
   BookOpen,
   UserRound,
+  AppWindow,
   PanelLeftClose,
   PanelLeftOpen,
 } from 'lucide-react';
@@ -175,6 +176,28 @@ export default function Sidebar({
               </button>
             </div>
           ) : null}
+          <button
+            type="button"
+            aria-label="App Entry"
+            onClick={() => setActiveTab('app_entry')}
+            title={isCollapsed ? 'App Entry' : undefined}
+            className={`group relative flex w-full items-center text-left transition-all duration-150 ${
+              activeTab === 'app_entry'
+                ? 'aegis-nav-item--active border-l-2 border-cyan-500 text-cyan-400 font-medium'
+                : 'text-slate-500 hover:bg-[#080C14] hover:text-slate-300 border-l-2 border-transparent'
+            } ${isCollapsed ? 'justify-center px-2 py-3' : 'gap-3 px-4 py-3'}`}
+          >
+            <AppWindow className={`h-4 w-4 shrink-0 ${activeTab === 'app_entry' ? 'text-cyan-400' : 'text-slate-500 group-hover:text-slate-300'}`} />
+            {!isCollapsed ? (
+              <div className="flex-1">
+                <div className={`text-xs font-semibold tracking-wide ${activeTab === 'app_entry' ? 'text-cyan-400' : 'text-slate-400 group-hover:text-white'}`}>App Entry</div>
+                <div className="mt-0.5 text-[10px] font-normal leading-tight text-slate-500">组织应用入口</div>
+              </div>
+            ) : null}
+            {activeTab === 'app_entry' && !isCollapsed ? (
+              <span className="aegis-status-indicator aegis-status-indicator--accent absolute right-3 top-1/2 -translate-y-1/2" />
+            ) : null}
+          </button>
         </div>
 
         {adminItems.length > 0 ? (

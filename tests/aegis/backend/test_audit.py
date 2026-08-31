@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 
 import jwt
@@ -228,6 +229,15 @@ def test_overview_topology_api_returns_the_three_layer_starmapping(client: TestC
     assert len(topology["edges"]) == 91
     assert topology["agents"][0]["id"] == "ai-soc"
     assert topology["agents"][0]["symbol"] == "argus-eyes"
+    assert [agent["product_service_code"] for agent in topology["agents"]] == [
+        "WORKAGENT-AI-SOC",
+        "WORKAGENT-AI-GRC",
+        "WORKAGENT-AI-REDTEAM",
+        "WORKAGENT-AI-SDLC",
+        "WORKAGENT-AI-UEBA",
+        "WORKAGENT-AI-ITOps",
+        "WORKAGENT-AI-Web3",
+    ]
     assert topology["agents"][0]["runtime"] == {
         "status": "planned",
         "source": "starmapping_baseline",
@@ -252,3 +262,25 @@ def test_overview_topology_api_overlays_matching_a2a_agent_runtime(client: TestC
     assert response.status_code == 200
     argus = next(agent for agent in response.json()["agents"] if agent["id"] == "ai-soc")
     assert argus["runtime"] == {"status": "active", "source": "a2a_registry"}
+
+
+def test_overview_topology_api_falls_back_for_legacy_starmapping_data(client: TestClient, monkeypatch) -> None:
+    from aegis.backend.routes import overview
+
+    legacy_starmapping = deepcopy(overview._load_starmapping())
+    legacy_starmapping["agent_ring"][0].pop("product_service_code")
+    monkeypatch.setattr(overview, "_load_starmapping", lambda: legacy_starmapping)
+
+    response = client.get("/api/overview/topology", headers=AUTH_HEADERS)
+
+    assert response.status_code == 200
+    argus = next(agent for agent in response.json()["agents"] if agent["id"] == "ai-soc")
+    assert argus["product_service_code"] == "WORKAGENT-AI-SOC"
+
+
+def test_topology_openapi_schema_includes_product_service_code(client: TestClient) -> None:
+    schema = client.get("/openapi.json").json()
+
+    topology_schema = schema["components"]["schemas"]["TopologyAgentResponse"]
+    assert "product_service_code" in topology_schema["properties"]
+    assert "product_service_code" in topology_schema["required"]

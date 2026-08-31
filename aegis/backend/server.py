@@ -20,6 +20,7 @@ from aegis.backend.services.chat_quick_command_service import ChatQuickCommandSe
 from aegis.backend.config import AegisSettings, is_loopback_host, load_aegis_settings
 from aegis.backend.routes.agents import build_agents_router
 from aegis.backend.routes.a2a_context import build_a2a_context_router
+from aegis.backend.routes.app_entries import build_app_entries_router
 from aegis.backend.routes.audit import build_audit_router
 from aegis.backend.routes.auth import build_auth_router
 from aegis.backend.routes.lark import build_lark_sso_router
@@ -188,6 +189,7 @@ def create_app(settings: AegisSettings | None = None) -> FastAPI:
         )
     )
     app.include_router(build_user_manuals_router(active_settings, user_service, user_manual_service))
+    app.include_router(build_app_entries_router(active_settings, user_service))
     app.include_router(build_a2a_context_router(active_settings, user_service, a2a_context_service))
     app.include_router(
         build_agents_router(

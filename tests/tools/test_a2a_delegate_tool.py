@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import threading
@@ -257,11 +258,38 @@ def test_a2a_list_rejects_unknown_output_type():
     }
 
 
-def test_remote_delegate_session_default_poll_interval_is_one_second():
+def test_remote_delegate_session_uses_default_poll_settings(monkeypatch):
     from tools.a2a_delegate_tool import _A2ADelegateSession
+
+    monkeypatch.delenv("A2A_POLL_TIMEOUT", raising=False)
+    monkeypatch.delenv("A2A_POLL_INTERVAL", raising=False)
+    session = _A2ADelegateSession("http://agent.local/a2a")
+
+    assert session.timeout == 120.0
+    assert session.poll_interval == 1.0
+
+
+def test_remote_delegate_session_reads_poll_settings_from_environment(monkeypatch):
+    from tools.a2a_delegate_tool import _A2ADelegateSession
+
+    monkeypatch.setenv("A2A_POLL_TIMEOUT", "180.5")
+    monkeypatch.setenv("A2A_POLL_INTERVAL", "0.25")
 
     session = _A2ADelegateSession("http://agent.local/a2a")
 
+    assert session.timeout == 180.5
+    assert session.poll_interval == 0.25
+
+
+def test_remote_delegate_session_rejects_invalid_poll_settings(monkeypatch):
+    from tools.a2a_delegate_tool import _A2ADelegateSession
+
+    monkeypatch.setenv("A2A_POLL_TIMEOUT", "not-a-number")
+    monkeypatch.setenv("A2A_POLL_INTERVAL", "-1")
+
+    session = _A2ADelegateSession("http://agent.local/a2a")
+
+    assert session.timeout == 120.0
     assert session.poll_interval == 1.0
 
 
@@ -301,6 +329,135 @@ def test_remote_task_poll_refreshes_parent_activity():
     parent._touch_activity.assert_called_once_with(
         "a2a_delegate: received remote task update"
     )
+
+
+def test_remote_task_deadline_pauses_while_interaction_is_pending():
+    from a2a.types import Message, Part, Role
+    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+
+    output = _OutputSink()
+    interaction = Message(
+        message_id="interaction-message",
+        role=Role.ROLE_AGENT,
+        context_id="ctx-1",
+        task_id="task-1",
+        parts=[Part(text="")],
+        metadata={
+            "hermes": {
+                "kind": "approval_request",
+                "interaction_id": "approval-1",
+                "task_id": "task-1",
+                "context_id": "ctx-1",
+                "command": "chmod 777 ./artifact",
+                "choices": ["once", "deny"],
+            }
+        },
+    )
+    completed_task = SimpleNamespace(
+        id="task-1",
+        context_id="ctx-1",
+        history=[],
+        status=SimpleNamespace(state="completed", message=None),
+    )
+
+    class FakeClient:
+        async def get_task(self, request):
+            assert request.id == "task-1"
+            return completed_task
+
+    session = _A2ADelegateSession(
+        "http://agent.local/a2a",
+        output=output,
+        timeout=0.01,
+        poll_interval=0.03,
+        session_id="ctx-1",
+        interaction_supported=True,
+    )
+    session._client = FakeClient()
+    initial_task = SimpleNamespace(
+        id="task-1",
+        context_id="ctx-1",
+        history=[interaction],
+        status=SimpleNamespace(state="working", message=None),
+    )
+
+    result = _run_coro_sync(session._wait_for_final(initial_task))
+
+    assert result is completed_task
+    assert output.events[0][1] == "approval_request"
+
+
+def test_remote_task_deadline_resumes_after_interaction_is_resolved():
+    from a2a.types import Message, Part, Role
+    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+
+    output = _OutputSink()
+
+    def interaction_message(kind):
+        return Message(
+            message_id=f"{kind}-message",
+            role=Role.ROLE_AGENT,
+            context_id="ctx-1",
+            task_id="task-1",
+            parts=[Part(text="")],
+            metadata={
+                "hermes": {
+                    "kind": kind,
+                    "interaction_id": "approval-1",
+                    "task_id": "task-1",
+                    "context_id": "ctx-1",
+                }
+            },
+        )
+
+    resolved_task = SimpleNamespace(
+        id="task-1",
+        context_id="ctx-1",
+        history=[interaction_message("approval_resolved")],
+        status=SimpleNamespace(state="working", message=None),
+    )
+    completed_task = SimpleNamespace(
+        id="task-1",
+        context_id="ctx-1",
+        history=[],
+        status=SimpleNamespace(state="completed", message=None),
+    )
+
+    class FakeClient:
+        def __init__(self):
+            self.tasks = iter((resolved_task, completed_task))
+            self.first_poll = True
+
+        async def get_task(self, request):
+            assert request.id == "task-1"
+            if self.first_poll:
+                self.first_poll = False
+                await asyncio.sleep(0.02)
+            return next(self.tasks)
+
+    session = _A2ADelegateSession(
+        "http://agent.local/a2a",
+        output=output,
+        timeout=0.01,
+        poll_interval=0,
+        session_id="ctx-1",
+        interaction_supported=True,
+    )
+    session._client = FakeClient()
+    initial_task = SimpleNamespace(
+        id="task-1",
+        context_id="ctx-1",
+        history=[interaction_message("approval_request")],
+        status=SimpleNamespace(state="working", message=None),
+    )
+
+    result = _run_coro_sync(session._wait_for_final(initial_task))
+
+    assert result is completed_task
+    assert [event[1] for event in output.events] == [
+        "approval_request",
+        "approval_resolved",
+    ]
 
 
 def test_aegis_gate_absent_skips_policy_and_audit(monkeypatch):

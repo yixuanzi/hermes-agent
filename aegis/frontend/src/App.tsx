@@ -14,6 +14,7 @@ import SettingsTab from './components/SettingsTab';
 import AuditLogsTab from './components/AuditLogsTab';
 import PromptTemplateTab from './components/PromptTemplateTab';
 import UserManualTab from './components/UserManualTab';
+import AppEntryTab from './components/AppEntryTab';
 import ThemeDialog from './components/ThemeDialog';
 import { AegisChatProvider, useAegisChatRuntime } from './lib/chatRuntime';
 import { clearStoredAuth, getStoredUser, hasStoredToken, setStoredAuth, setStoredUser } from './lib/auth';
@@ -30,9 +31,9 @@ import {
   uiAgentDraftToApi,
   uiRoutingDraftToApi,
 } from './lib/adapters';
-import { Agent, AgentDraft, AuthenticatedUser, OverviewStats, RoutingRule, RoutingRuleDraft, StarmappingTopology, UserDraft } from './types';
+import { Agent, AgentDraft, AppEntryList, AuthenticatedUser, OverviewStats, RoutingRule, RoutingRuleDraft, StarmappingTopology, UserDraft } from './types';
 
-type AppTab = 'overview' | 'chat' | 'prompt_templates' | 'user_manual' | 'orchestration' | 'policy' | 'users' | 'settings' | 'audit';
+type AppTab = 'overview' | 'chat' | 'prompt_templates' | 'user_manual' | 'app_entry' | 'orchestration' | 'policy' | 'users' | 'settings' | 'audit';
 
 type AuthLoginResponse = {
   authenticated: boolean;
@@ -50,6 +51,13 @@ type AuthSessionResponse = {
   user?: AuthenticatedUser | null;
 };
 
+type SystemBootstrapResponse = {
+  embedded_chat: boolean;
+  auth_scheme: string;
+  admin_setup_required: boolean;
+  lark_sso_enabled?: boolean;
+};
+
 type BackendUserList = {
   users: AuthenticatedUser[];
 };
@@ -59,6 +67,7 @@ const TAB_TO_PATH: Record<AppTab, string> = {
   chat: '/chat',
   prompt_templates: '/prompt-templates',
   user_manual: '/user-manual',
+  app_entry: '/app-entry',
   orchestration: '/orchestration',
   policy: '/policy',
   users: '/users',
@@ -84,6 +93,9 @@ function resolveTabFromPath(pathname: string): AppTab | null {
   }
   if (pathname === '/user-manual') {
     return 'user_manual';
+  }
+  if (pathname === '/app-entry') {
+    return 'app_entry';
   }
   if (pathname === '/orchestration') {
     return 'orchestration';
@@ -152,6 +164,11 @@ function AuthenticatedAppShell({
   overviewStatsError,
   topology,
   topologyError,
+  appEntries,
+  appEntriesLoading,
+  appEntriesError,
+  appEntriesLoaded,
+  onRefreshAppEntries,
   rules,
   syncError,
   theme,
@@ -183,6 +200,11 @@ function AuthenticatedAppShell({
   overviewStatsError: string;
   topology: StarmappingTopology | null;
   topologyError: string;
+  appEntries: AppEntryList | null;
+  appEntriesLoading: boolean;
+  appEntriesError: string;
+  appEntriesLoaded: boolean;
+  onRefreshAppEntries: () => Promise<void>;
   rules: RoutingRule[];
   syncError: string;
   theme: AegisTheme;
@@ -326,12 +348,25 @@ function AuthenticatedAppShell({
               statsError={overviewStatsError}
               topology={topology}
               topologyError={topologyError}
+              appEntries={appEntries?.entries ?? []}
+              appEntriesLoading={appEntriesLoading}
+              appEntriesError={appEntriesError}
+              appEntriesLoaded={appEntriesLoaded}
               setTab={(tab) => navigateTo(tab as AppTab)}
             />
           ) : null}
           {activeTab === 'chat' ? <ChatTab agents={agents} /> : null}
           {activeTab === 'prompt_templates' ? <PromptTemplateTab /> : null}
           {activeTab === 'user_manual' ? <UserManualTab /> : null}
+          {activeTab === 'app_entry' ? (
+            <AppEntryTab
+              directory={appEntries}
+              loading={appEntriesLoading}
+              error={appEntriesError}
+              loaded={appEntriesLoaded}
+              onRefresh={onRefreshAppEntries}
+            />
+          ) : null}
           {activeTab === 'orchestration' ? (
             <AgentTab
               agents={agents}
@@ -390,10 +425,17 @@ export default function App() {
   const [overviewStatsError, setOverviewStatsError] = useState('');
   const [topology, setTopology] = useState<StarmappingTopology | null>(null);
   const [topologyError, setTopologyError] = useState('');
+  const [appEntries, setAppEntries] = useState<AppEntryList | null>(null);
+  const [appEntriesLoading, setAppEntriesLoading] = useState(false);
+  const [appEntriesError, setAppEntriesError] = useState('');
+  const [appEntriesLoaded, setAppEntriesLoaded] = useState(false);
+  const appEntriesRequestRef = useRef<Promise<void> | null>(null);
+  const appEntriesRequestGenerationRef = useRef(0);
   const [rules, setRules] = useState<RoutingRule[]>([]);
   const [users, setUsers] = useState<AuthenticatedUser[]>([]);
   const [currentUser, setCurrentUser] = useState<AuthenticatedUser | null>(() => getStoredUser());
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [larkSsoEnabled, setLarkSsoEnabled] = useState(false);
   const [isBootstrapping, setIsBootstrapping] = useState(true);
   const [authPending, setAuthPending] = useState(false);
   const [registerPending, setRegisterPending] = useState(false);
@@ -458,7 +500,16 @@ export default function App() {
         return;
       }
 
+      const systemBootstrapPromise = fetchJSON<SystemBootstrapResponse>('/api/system/bootstrap', {}, false)
+        .then((systemBootstrap) => {
+          setLarkSsoEnabled(systemBootstrap.lark_sso_enabled === true);
+        })
+        .catch(() => {
+          setLarkSsoEnabled(false);
+        });
+
       if (!hasStoredToken()) {
+        await systemBootstrapPromise;
         setIsAuthenticated(false);
         if (window.location.pathname !== '/register' && window.location.pathname !== '/sso/callback') {
           window.history.replaceState({}, '', '/login');
@@ -469,9 +520,13 @@ export default function App() {
       }
 
       try {
-        const session = await fetchJSON<AuthSessionResponse>('/api/auth/session');
+        const [, session] = await Promise.all([
+          systemBootstrapPromise,
+          fetchJSON<AuthSessionResponse>('/api/auth/session'),
+        ]);
         if (!session.authenticated || !session.user) {
           clearStoredAuth();
+          resetAppEntries();
           setCurrentUser(null);
           setIsAuthenticated(false);
           window.history.replaceState({}, '', '/login');
@@ -494,6 +549,7 @@ export default function App() {
         }
       } catch (error) {
         clearStoredAuth();
+        resetAppEntries();
         setCurrentUser(null);
         setIsAuthenticated(false);
         alertApiError(error, 'Authentication failed.');
@@ -524,7 +580,7 @@ export default function App() {
   }, [currentUser, pathname]);
 
   useEffect(() => {
-    if (!isAuthenticated || !currentUser) {
+    if (!isAuthenticated || !currentUser || activeTab !== 'overview') {
       return;
     }
 
@@ -533,7 +589,68 @@ export default function App() {
     }, 60_000);
 
     return () => window.clearInterval(timer);
-  }, [isAuthenticated, currentUser?.uid]);
+  }, [activeTab, isAuthenticated, currentUser?.uid]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !currentUser || (activeTab !== 'overview' && activeTab !== 'app_entry') || appEntriesLoaded) {
+      return;
+    }
+
+    void loadAppEntries();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, appEntriesLoaded, currentUser?.uid, isAuthenticated]);
+
+  function resetAppEntries() {
+    appEntriesRequestGenerationRef.current += 1;
+    appEntriesRequestRef.current = null;
+    setAppEntries(null);
+    setAppEntriesLoading(false);
+    setAppEntriesError('');
+    setAppEntriesLoaded(false);
+  }
+
+  async function loadAppEntries(): Promise<void> {
+    if (appEntriesRequestRef.current) {
+      return appEntriesRequestRef.current;
+    }
+
+    const requestGeneration = appEntriesRequestGenerationRef.current;
+    const request = (async () => {
+      setAppEntriesLoading(true);
+      setAppEntriesError('');
+      setAppEntriesLoaded(false);
+      try {
+        const directory = await fetchJSON<AppEntryList>('/api/app-entries');
+        if (requestGeneration !== appEntriesRequestGenerationRef.current) {
+          return;
+        }
+        setAppEntries(directory);
+        setAppEntriesLoaded(true);
+      } catch (error) {
+        if (requestGeneration !== appEntriesRequestGenerationRef.current) {
+          return;
+        }
+        if (error instanceof ApiError && error.status === 401) {
+          handleAuthExpired();
+          return;
+        }
+        setAppEntriesError(getApiErrorMessage(error, 'Unable to load application entries.'));
+      } finally {
+        if (requestGeneration === appEntriesRequestGenerationRef.current) {
+          setAppEntriesLoading(false);
+        }
+      }
+    })();
+    appEntriesRequestRef.current = request;
+
+    try {
+      await request;
+    } finally {
+      if (appEntriesRequestRef.current === request) {
+        appEntriesRequestRef.current = null;
+      }
+    }
+  }
 
   async function loadConsoleData(userOverride?: AuthenticatedUser | null) {
     const activeUser = userOverride ?? currentUser;
@@ -623,6 +740,7 @@ export default function App() {
 
   function handleAuthExpired() {
     clearStoredAuth();
+    resetAppEntries();
     setCurrentUser(null);
     setIsAuthenticated(false);
     setAgents([]);
@@ -713,6 +831,7 @@ export default function App() {
 
   function handleLogout() {
     clearStoredAuth();
+    resetAppEntries();
     setCurrentUser(null);
     setIsAuthenticated(false);
     setAgents([]);
@@ -981,6 +1100,7 @@ export default function App() {
         onSubmit={handleLogin}
         onAegisSsoLogin={() => window.location.assign('/api/sso/start?sso=1')}
         onLarkSsoLogin={() => window.location.assign('/api/lark/start')}
+        larkSsoEnabled={larkSsoEnabled}
         onSwitchToRegister={() => navigateAuth('/register')}
         pending={authPending}
       />
@@ -1024,6 +1144,11 @@ export default function App() {
           overviewStatsError={overviewStatsError}
           topology={topology}
           topologyError={topologyError}
+          appEntries={appEntries}
+          appEntriesLoading={appEntriesLoading}
+          appEntriesError={appEntriesError}
+          appEntriesLoaded={appEntriesLoaded}
+          onRefreshAppEntries={loadAppEntries}
           rules={rules}
           syncError={syncError}
           theme={theme}

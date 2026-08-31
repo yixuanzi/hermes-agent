@@ -117,7 +117,13 @@ a2a_delegate(
 
 ## 3. 远端会话、输出和停止
 
-`_A2ADelegateSession` 封装 SDK client、HTTP client、远端 ids、已渲染工具调用和已输出文本。`send_turn()` 先使用 streaming `send_message()`，随后在未终态时调用 `get_task()` 轮询。polling 补偿的默认间隔为 1 秒。
+`_A2ADelegateSession` 封装 SDK client、HTTP client、远端 ids、已渲染工具调用和已输出文本。`send_turn()` 先使用 streaming `send_message()`，随后在未终态时调用 `get_task()` 轮询。polling 补偿的默认间隔为 1 秒，客户端 task polling deadline 默认 120 秒；两者可在进程启动前通过 `A2A_POLL_INTERVAL` 和 `A2A_POLL_TIMEOUT` 覆盖，例如：
+
+```bash
+A2A_POLL_TIMEOUT=300 A2A_POLL_INTERVAL=2 hermes -p aisoc --yolo aisoc --module a2a
+```
+
+环境变量在创建 A2A delegate session 时读取；显式传入的 session 参数优先于环境变量。`A2A_POLL_TIMEOUT` 只控制客户端在非终态 task 上的等待 deadline，不改变 HTTP 建连/读写超时，也不改变远端 approval/clarify 的服务端等待超时。approval/clarify pending 期间客户端 deadline 会暂停，收到对应 resolved 事件后恢复剩余时间。
 
 ### 3.1 输出事件协议
 

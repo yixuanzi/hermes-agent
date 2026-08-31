@@ -1,8 +1,10 @@
-import { fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Sidebar from '../Sidebar';
 
 describe('Sidebar user profile navigation', () => {
+  afterEach(cleanup);
+
   it('keeps User Profile collapsed until opened, then navigates to User Manual', () => {
     const setActiveTab = vi.fn();
     render(<Sidebar activeTab="overview" setActiveTab={setActiveTab} />);
@@ -12,6 +14,19 @@ describe('Sidebar user profile navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: /user manual/i }));
 
     expect(setActiveTab).toHaveBeenCalledWith('user_manual');
+  });
+
+  it('places App Entry after the complete User Profile section for every user', () => {
+    const setActiveTab = vi.fn();
+    const { container } = render(<Sidebar activeTab="overview" setActiveTab={setActiveTab} />);
+
+    const userProfile = screen.getByRole('button', { name: /user profile/i });
+    const appEntry = screen.getByRole('button', { name: /app entry/i });
+    expect(userProfile.compareDocumentPosition(appEntry) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    fireEvent.click(appEntry);
+    expect(setActiveTab).toHaveBeenCalledWith('app_entry');
+    expect(container.querySelector('[aria-label="App Entry"]')).toBeInTheDocument();
   });
 
   it('locks System Integrity outside the scrolling menu and toggles an icon navigation rail', () => {

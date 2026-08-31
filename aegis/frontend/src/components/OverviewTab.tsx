@@ -1,7 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { Activity, AlertTriangle, Cpu, Play, Search, Server, ShieldCheck } from 'lucide-react';
 import StarmappingTopology from './StarmappingTopology';
-import { Agent, OverviewStats, StarmappingTopology as StarmappingTopologyData } from '../types';
+import { Agent, AppEntry, OverviewStats, StarmappingTopology as StarmappingTopologyData } from '../types';
 
 interface OverviewTabProps {
   agents: Agent[];
@@ -11,6 +11,10 @@ interface OverviewTabProps {
   statsError: string;
   topology: StarmappingTopologyData | null;
   topologyError: string;
+  appEntries: AppEntry[];
+  appEntriesLoading: boolean;
+  appEntriesError: string;
+  appEntriesLoaded: boolean;
 }
 
 function formatPercent(value: number): string {
@@ -35,6 +39,10 @@ export default function OverviewTab({
   statsError,
   topology,
   topologyError,
+  appEntries,
+  appEntriesLoading,
+  appEntriesError,
+  appEntriesLoaded,
 }: OverviewTabProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedStatus, setSelectedStatus] = useState('All');
@@ -72,7 +80,14 @@ export default function OverviewTab({
       <div className="grid grid-cols-1 gap-3 xl:min-h-0 xl:flex-1 xl:grid-cols-3">
         <section className="flex h-[clamp(26rem,54dvh,36rem)] min-h-0 flex-col overflow-hidden rounded-xl border border-slate-800 bg-[#05080F] xl:col-span-2 xl:h-full">
           <div className="z-10 flex flex-col justify-between gap-2 border-b border-slate-800 bg-[#03060C] p-3 sm:flex-row sm:items-center"><div><h3 className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-white italic">Aegis Orchestration Topology <span className="rounded border border-cyan-800 px-1.5 py-0.5 font-mono text-[10px] text-cyan-400">STARMAPPING</span></h3><p className="mt-1 text-[10px] text-slate-500">Hover or focus a node to inspect and illuminate its orchestration path.</p></div><span className="font-mono text-[9px] tracking-wider text-slate-500">API · {topology ? `${topology.agents.length} AGENTS / ${topology.edges.length} EDGES` : 'CONNECTING'}</span></div>
-          <StarmappingTopology topology={topology} error={topologyError} />
+          <StarmappingTopology
+            topology={topology}
+            error={topologyError}
+            appEntries={appEntries}
+            appEntriesLoading={appEntriesLoading}
+            appEntriesError={appEntriesError}
+            appEntriesLoaded={appEntriesLoaded}
+          />
         </section>
 
         <aside className="flex h-[clamp(26rem,54dvh,36rem)] min-h-0 flex-col gap-3 xl:h-full">

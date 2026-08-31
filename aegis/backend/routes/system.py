@@ -37,6 +37,7 @@ def build_system_router(
             embedded_chat=settings.embedded_chat,
             auth_scheme="jwt-password",
             admin_setup_required=admin_setup_required,
+            lark_sso_enabled=settings.lark_sso_enabled,
         )
 
     @router.post(

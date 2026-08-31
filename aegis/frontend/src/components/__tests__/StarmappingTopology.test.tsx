@@ -13,7 +13,7 @@ const topology: StarmappingTopologyData = {
     capabilities: ['agent-delegation'], layout: { x: 0.5, y: 0.5, radius: 'core' },
   },
   agents: [{
-    id: 'ai-soc', layer: 'agent_ring', business_domain: 'AI-SOC', name: 'Argus', display_name: 'AI-SOC · Argus', marketing_name: '[ Argus ]', symbol: 'argus-eyes',
+    id: 'ai-soc', layer: 'agent_ring', business_domain: 'AI-SOC', product_service_code: 'WORKAGENT-AI-SOC', name: 'Argus', display_name: 'AI-SOC · Argus', marketing_name: '[ Argus ]', symbol: 'argus-eyes',
     cultural_origin: '希腊神话·百眼巨人', business_fit: '全天候、零死角威胁监控与感知', role: '安全运营',
     layout: { ring_position: 0, angle_degrees: 270, radius: 'agent' }, runtime: { status: 'active', source: 'a2a_registry' },
     star_nodes: Array.from({ length: 10 }, (_, index) => ({
@@ -36,7 +36,7 @@ afterEach(() => {
 
 describe('StarmappingTopology', () => {
   it('shows and illuminates API-backed node details on hover', () => {
-    render(<StarmappingTopology topology={topology} error="" />);
+    render(<StarmappingTopology topology={topology} error="" appEntries={[]} appEntriesLoading={false} appEntriesError="" appEntriesLoaded={false} />);
 
     const background = screen.getByTestId('star-map-background');
     expect(background).toBeInTheDocument();
@@ -68,13 +68,96 @@ describe('StarmappingTopology', () => {
     expect(screen.getByText(/Splunk API · REQUIRED/)).toBeInTheDocument();
   });
 
+  it('opens a matching application entry from click, Enter, and Space activation', () => {
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const appEntries = [{
+      subscription_id: 'subscription-1',
+      subscription_no: 'SUB-001',
+      subscription_status: 'active' as const,
+      effective_to: '2027-08-01T00:00:00Z',
+      product_service_code: ' workagent-ai-soc ',
+      product_service_name: 'Argus Work Agent',
+      entry_url: 'https://workagent.example.com',
+      entry_source: 'app' as const,
+    }];
+
+    render(<StarmappingTopology topology={topology} error="" appEntries={appEntries} appEntriesLoading={false} appEntriesError="" appEntriesLoaded />);
+    const agent = screen.getByLabelText(/AI-SOC · Argus/);
+
+    fireEvent.click(agent);
+    fireEvent.keyDown(agent, { key: 'Enter' });
+    fireEvent.keyDown(agent, { key: ' ' });
+
+    expect(openSpy).toHaveBeenCalledTimes(3);
+    expect(openSpy).toHaveBeenLastCalledWith('https://workagent.example.com', '_blank', 'noopener,noreferrer');
+    expect(screen.getByText('PRODUCT SERVICE · WORKAGENT-AI-SOC')).toBeInTheDocument();
+    expect(screen.getByText('ENTRY READY')).toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      label: 'no matching entry',
+      appEntries: [],
+      appEntriesLoading: false,
+      appEntriesError: '',
+      appEntriesLoaded: true,
+      status: 'ENTRY UNAVAILABLE',
+    },
+    {
+      label: 'an empty entry URL',
+      appEntries: [{
+        subscription_id: 'subscription-1', subscription_no: 'SUB-001', subscription_status: 'active' as const,
+        effective_to: '2027-08-01T00:00:00Z', product_service_code: 'WORKAGENT-AI-SOC', product_service_name: 'Argus',
+        entry_url: '  ', entry_source: 'app' as const,
+      }],
+      appEntriesLoading: false,
+      appEntriesError: '',
+      appEntriesLoaded: true,
+      status: 'ENTRY UNAVAILABLE',
+    },
+    {
+      label: 'a loading directory',
+      appEntries: [{
+        subscription_id: 'subscription-1', subscription_no: 'SUB-001', subscription_status: 'active' as const,
+        effective_to: '2027-08-01T00:00:00Z', product_service_code: 'WORKAGENT-AI-SOC', product_service_name: 'Argus',
+        entry_url: 'https://workagent.example.com', entry_source: 'app' as const,
+      }],
+      appEntriesLoading: true,
+      appEntriesError: '',
+      appEntriesLoaded: false,
+      status: 'ENTRY UNAVAILABLE · DIRECTORY LOADING',
+    },
+    {
+      label: 'a failed directory request',
+      appEntries: [{
+        subscription_id: 'subscription-1', subscription_no: 'SUB-001', subscription_status: 'active' as const,
+        effective_to: '2027-08-01T00:00:00Z', product_service_code: 'WORKAGENT-AI-SOC', product_service_name: 'Argus',
+        entry_url: 'https://workagent.example.com', entry_source: 'app' as const,
+      }],
+      appEntriesLoading: false,
+      appEntriesError: 'Portal unavailable',
+      appEntriesLoaded: false,
+      status: 'ENTRY UNAVAILABLE · DIRECTORY ERROR',
+    },
+  ])('keeps the tooltip and does not open for $label', ({ appEntries, appEntriesLoading, appEntriesError, appEntriesLoaded, status }) => {
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+
+    render(<StarmappingTopology topology={topology} error="" appEntries={appEntries} appEntriesLoading={appEntriesLoading} appEntriesError={appEntriesError} appEntriesLoaded={appEntriesLoaded} />);
+    const agent = screen.getByLabelText(/AI-SOC · Argus/);
+    fireEvent.click(agent);
+
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(screen.getByText('全天候、零死角威胁监控与感知')).toBeInTheDocument();
+    expect(screen.getByText(status)).toBeInTheDocument();
+  });
+
   it('requests native fullscreen mode from the topology control', () => {
     const requestFullscreen = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(HTMLElement.prototype, 'requestFullscreen', {
       configurable: true,
       value: requestFullscreen,
     });
-    render(<StarmappingTopology topology={topology} error="" />);
+    render(<StarmappingTopology topology={topology} error="" appEntries={[]} appEntriesLoading={false} appEntriesError="" appEntriesLoaded={false} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Enter topology fullscreen' }));
     expect(requestFullscreen).toHaveBeenCalledTimes(1);
@@ -83,7 +166,7 @@ describe('StarmappingTopology', () => {
   it('splits each 30 percent selection into overlapping waves without a dark gap', () => {
     vi.useFakeTimers();
     vi.spyOn(Math, 'random').mockReturnValue(0.25);
-    render(<StarmappingTopology topology={topology} error="" />);
+    render(<StarmappingTopology topology={topology} error="" appEntries={[]} appEntriesLoading={false} appEntriesError="" appEntriesLoaded={false} />);
 
     const firstWave = screen.getAllByTestId('topology-twinkle').map((node) => node.getAttribute('data-star-id'));
     expect(firstWave).toHaveLength(2);

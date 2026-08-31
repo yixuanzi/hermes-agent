@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import os
 import random
 import threading
 import time
@@ -28,6 +30,10 @@ _DELEGATE_FOREGROUND_INPUT_TIMEOUT_SECONDS = 25 * 60
 _DELEGATE_INPUT_TIMEOUT = object()
 _A2A_STOP_MESSAGE = "已按用户请求停止当前 A2A 委托，无需重试。"
 _A2A_INPUT_TIMEOUT_MESSAGE = "waitting user input timeout,close remote session, do not retry"
+_A2A_POLL_TIMEOUT_ENV = "A2A_POLL_TIMEOUT"
+_A2A_POLL_INTERVAL_ENV = "A2A_POLL_INTERVAL"
+_A2A_POLL_TIMEOUT_DEFAULT = 120.0
+_A2A_POLL_INTERVAL_DEFAULT = 1.0
 _A2A_CANCEL_STATUS_NOOP = "noop"
 _A2A_CANCEL_STATUS_SENT = "sent"
 _A2A_CANCEL_STATUS_COMPLETED = "completed"
@@ -712,6 +718,21 @@ def _build_a2a_stop_final_response(last_text: str | None) -> str:
     return f"{_A2A_STOP_MESSAGE}\n\n停止前最后输出：{cleaned}"
 
 
+def _read_a2a_poll_setting(env_name: str, default: float) -> float:
+    raw_value = os.getenv(env_name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid %s=%r; using %.3f", env_name, raw_value, default)
+        return default
+    if not math.isfinite(value) or value < 0:
+        logger.warning("Ignoring invalid %s=%r; using %.3f", env_name, raw_value, default)
+        return default
+    return value
+
+
 class _A2ADelegateSession:
     def __init__(
         self,
@@ -719,8 +740,8 @@ class _A2ADelegateSession:
         *,
         output=None,
         parent_agent=None,
-        timeout: float = 60.0,
-        poll_interval: float = 1.0,
+        timeout: float | None = None,
+        poll_interval: float | None = None,
         session_id: str | None = None,
         headers: dict[str, str] | None = None,
         response_path: str | None = None,
@@ -729,8 +750,16 @@ class _A2ADelegateSession:
         self.base_url = base_url
         self.output = output
         self.parent_agent = parent_agent
-        self.timeout = timeout
-        self.poll_interval = poll_interval
+        self.timeout = (
+            float(timeout)
+            if timeout is not None
+            else _read_a2a_poll_setting(_A2A_POLL_TIMEOUT_ENV, _A2A_POLL_TIMEOUT_DEFAULT)
+        )
+        self.poll_interval = (
+            float(poll_interval)
+            if poll_interval is not None
+            else _read_a2a_poll_setting(_A2A_POLL_INTERVAL_ENV, _A2A_POLL_INTERVAL_DEFAULT)
+        )
         self.context_id = session_id
         self.task_id: str | None = None
         self.headers = headers or {}
@@ -740,6 +769,7 @@ class _A2ADelegateSession:
         self._http_client = None
         self._rendered_tool_entries: set[str] = set()
         self._rendered_interactions: set[tuple[str, str]] = set()
+        self._pending_interactions: set[str] = set()
         self._tool_names_by_call_id: dict[str, str] = {}
         self._streamed_assistant_text = ""
         self._last_assistant_text = ""
@@ -827,6 +857,21 @@ class _A2ADelegateSession:
         with self._state_lock:
             self.task_id = task_id or self.task_id
             self.context_id = context_id or self.context_id
+
+    def _has_pending_interaction(self) -> bool:
+        with self._state_lock:
+            return bool(self._pending_interactions)
+
+    def _update_interaction_wait_state(self, kind: str, interaction_id: str) -> None:
+        with self._state_lock:
+            if kind.endswith("_request"):
+                self._pending_interactions.add(interaction_id)
+            elif kind.endswith("_resolved"):
+                self._pending_interactions.discard(interaction_id)
+
+    def _clear_pending_interactions(self) -> None:
+        with self._state_lock:
+            self._pending_interactions.clear()
 
     def _build_http_client(self):
         return httpx.AsyncClient(
@@ -1022,11 +1067,22 @@ class _A2ADelegateSession:
 
         current_task = task
         deadline = time.monotonic() + self.timeout
+        interaction_paused_at: float | None = None
         while True:
             self._emit_tool_messages(
                 _a2a_task_messages(current_task),
                 session_id=getattr(current_task, "context_id", None) or self.context_id,
             )
+            now = time.monotonic()
+            if self._has_pending_interaction():
+                # The user-controlled interaction may outlive the ordinary
+                # task polling deadline; pause that deadline until a matching
+                # resolved event arrives.
+                if interaction_paused_at is None:
+                    interaction_paused_at = now
+            elif interaction_paused_at is not None:
+                deadline += now - interaction_paused_at
+                interaction_paused_at = None
             state = _a2a_field(getattr(current_task, "status", None), "state", None)
             is_final = state in _a2a_final_task_states()
             self._emit_task_text_delta(
@@ -1035,8 +1091,9 @@ class _A2ADelegateSession:
                 is_final=is_final,
             )
             if is_final:
+                self._clear_pending_interactions()
                 return current_task
-            if time.monotonic() >= deadline:
+            if interaction_paused_at is None and now >= deadline:
                 raise TimeoutError(f"Timed out waiting for task {getattr(current_task, 'id', None)!r}.")
             await asyncio.sleep(self.poll_interval)
             current_task = await self._client.get_task(GetTaskRequest(id=current_task.id))
@@ -1108,6 +1165,7 @@ class _A2ADelegateSession:
         payload = dict(metadata)
         payload.setdefault("task_id", self.task_id)
         payload.setdefault("context_id", self.context_id)
+        self._update_interaction_wait_state(kind, interaction_id)
         _emit(self.output, event_type, _compact_json_text(payload), session_id)
 
     def _emit_text_deltas(self, task, *, session_id: str | None) -> None:

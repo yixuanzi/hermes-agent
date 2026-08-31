@@ -35,6 +35,10 @@ describe('OverviewTab delegation metrics', () => {
         statsError=""
         topology={null}
         topologyError=""
+        appEntries={[]}
+        appEntriesLoading={false}
+        appEntriesError=""
+        appEntriesLoaded={false}
       />,
     );
 
@@ -77,6 +81,10 @@ describe('OverviewTab delegation metrics', () => {
         statsError=""
         topology={null}
         topologyError=""
+        appEntries={[]}
+        appEntriesLoading={false}
+        appEntriesError=""
+        appEntriesLoaded={false}
       />,
     );
 

@@ -63,6 +63,9 @@ def build_overview_router(
 
         for agent in baseline["agent_ring"]:
             agent_payload = dict(agent)
+            agent_payload["product_service_code"] = agent.get("product_service_code") or (
+                f"WORKAGENT-{agent['business_domain']}"
+            )
             agent_payload["runtime"] = {
                 "status": runtime_status.get(agent["id"], "planned"),
                 "source": "a2a_registry" if agent["id"] in runtime_status else "starmapping_baseline",

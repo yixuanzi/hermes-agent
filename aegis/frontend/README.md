@@ -73,8 +73,9 @@ Vite 已经代理 `/api` 和 `/health` 到 `http://127.0.0.1:9130`。
 `http://127.0.0.1:9130/api/sso/callback`，回调成功后由前端处理
 `/sso/callback` 页面并进入 Overview。
 
-Lark SSO 还需要配置 `LARK_APP_ID`、`LARK_APP_SECRET` 和
-`LARK_REDIRECT_URI=http://127.0.0.1:9130/api/lark/callback`，并在 Lark
+Lark SSO 默认关闭。后端设置 `LARK_SSO_ENABLE=true` 后，登录页才显示
+Lark SSO 入口并允许发起授权；同时配置 `LARK_APP_ID`、`LARK_APP_SECRET`
+和 `LARK_REDIRECT_URI=http://127.0.0.1:9130/api/lark/callback`，并在 Lark
 开发者后台登记同一个完整回调地址、开启 `contact:user.email:readonly`
 权限。Lark 回调成功后同样进入 `/sso/callback`，由前端兑换现有 Aegis JWT。
 

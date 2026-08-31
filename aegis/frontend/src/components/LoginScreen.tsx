@@ -5,6 +5,7 @@ interface LoginScreenProps {
   onSubmit: (username: string, password: string) => Promise<void>;
   onAegisSsoLogin: () => void;
   onLarkSsoLogin: () => void;
+  larkSsoEnabled: boolean;
   onSwitchToRegister: () => void;
   pending: boolean;
 }
@@ -14,6 +15,7 @@ export default function LoginScreen({
   onSubmit,
   onAegisSsoLogin,
   onLarkSsoLogin,
+  larkSsoEnabled,
   onSwitchToRegister,
   pending,
 }: LoginScreenProps) {
@@ -86,13 +88,15 @@ export default function LoginScreen({
           >
             Aegis SSO
           </button>
-          <button
-            type="button"
-            onClick={onLarkSsoLogin}
-            className="w-full rounded-xl border border-sky-500/70 bg-sky-950/45 px-4 py-3 text-sm font-semibold text-sky-100 transition hover:border-sky-300 hover:bg-sky-900/55 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
-          >
-            Lark SSO
-          </button>
+          {larkSsoEnabled ? (
+            <button
+              type="button"
+              onClick={onLarkSsoLogin}
+              className="w-full rounded-xl border border-sky-500/70 bg-sky-950/45 px-4 py-3 text-sm font-semibold text-sky-100 transition hover:border-sky-300 hover:bg-sky-900/55 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
+            >
+              Lark SSO
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={onSwitchToRegister}

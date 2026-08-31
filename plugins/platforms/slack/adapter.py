@@ -6155,6 +6155,19 @@ class SlackAdapter(BasePlatformAdapter):
             body=payload,
         )
         user_id = event.get("user") or assistant_meta.get("user_id", "")
+        # Slack's ``bot_message`` subtype is the exception to the normal
+        # message shape: integration bot messages have no associated user,
+        # while ``bot_id`` identifies the bot that posted them. Preserve that
+        # stable sender identity for downstream SessionSource/<source>
+        # attribution. ``bot_id`` is itself an explicit Slack bot marker, so
+        # this also tolerates app-originated message payloads that omit the
+        # subtype while ensuring ordinary user events cannot be reclassified.
+        bot_id = str(event.get("bot_id") or "").strip()
+        event_is_bot = bool(bot_id) or event.get("subtype") == "bot_message"
+        used_bot_id_fallback = False
+        if not user_id and bot_id:
+            user_id = bot_id
+            used_bot_id_fallback = True
         if not channel_id:
             channel_id = assistant_meta.get("channel_id", "")
         team_id = outer_team_id or assistant_meta.get("team_id", "")
@@ -6207,6 +6220,7 @@ class SlackAdapter(BasePlatformAdapter):
                 chat_type="dm" if is_dm else "group",
                 user_id=user_id,
                 user_name="",
+                is_bot=event_is_bot,
             )
             if not _auth_fn(_source):
                 logger.warning(
@@ -6858,10 +6872,26 @@ class SlackAdapter(BasePlatformAdapter):
             text = command_probe_text
             msg_type = MessageType.COMMAND
 
-        # Resolve user display name (cached after first lookup)
-        user_name = await self._resolve_user_name(
-            user_id, chat_id=channel_id, team_id=team_id
-        )
+        # ``bot_id`` is a bot ID, not a Slack user ID, so do not send it to
+        # users.info when it was used as the fallback identity above. Slack
+        # may provide the bot's display name directly on the event; use that
+        # before falling back to an empty name in the structured source
+        # header. Ordinary user messages keep the cached users.info path.
+        if used_bot_id_fallback:
+            bot_profile = event.get("bot_profile")
+            profile_name = (
+                bot_profile.get("name", "")
+                if isinstance(bot_profile, dict)
+                else ""
+            )
+            user_name = str(
+                event.get("username") or profile_name or ""
+            ).strip()
+        else:
+            # Resolve user display name (cached after first lookup)
+            user_name = await self._resolve_user_name(
+                user_id, chat_id=channel_id, team_id=team_id
+            )
 
         # Resolve channel display name (cached after first lookup) so logs
         # and agent context show #channel / peer names instead of raw IDs.
@@ -6891,7 +6921,7 @@ class SlackAdapter(BasePlatformAdapter):
             # subtype=bot_message with user=None; flag them so the
             # gateway SLACK_ALLOW_BOTS bypass can authorize them
             # (they carry no user_id to match against the allowlist).
-            is_bot=bool(event.get("bot_id")) or event.get("subtype") == "bot_message",
+            is_bot=event_is_bot,
         )
 
         delegate_routed_text = text

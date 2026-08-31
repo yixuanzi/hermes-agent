@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import PlatformConfig
+from gateway.config import GatewayConfig, PlatformConfig
+from gateway.platforms.base import MessageEvent
+from gateway.run import GatewayRunner
 
 
 def _ensure_slack_mock():
@@ -129,6 +131,48 @@ def smoke_adapter():
 class TestSlackPeerAgentSmoke:
 
     @pytest.mark.asyncio
+    async def test_peer_bot_without_user_uses_bot_id_for_source_identity(self, smoke_adapter):
+        """Slack bot_message events may omit user; preserve bot_id as sender identity."""
+        event = _make_event(
+            text=f"<@{BOT_USER_ID}> please continue",
+            user=PEER_USER_ID,
+            bot_id="B_PEER",
+            ts=REPLY_TS,
+        )
+        event.pop("user")
+        event["subtype"] = "bot_message"
+        event["username"] = "Peer Bot"
+
+        class AuthRunner:
+            def _is_user_authorized(self, source):
+                assert source.user_id == "B_PEER"
+                assert source.is_bot is True
+                return True
+
+        auth_runner = AuthRunner()
+        smoke_adapter._message_handler = auth_runner._is_user_authorized
+
+        await smoke_adapter._handle_slack_message(event)
+
+        smoke_adapter.handle_message.assert_awaited_once()
+        msg_event = smoke_adapter.handle_message.await_args.args[0]
+        assert msg_event.source.user_id == "B_PEER"
+        assert msg_event.source.user_name == "Peer Bot"
+        assert msg_event.source.is_bot is True
+
+        runner = object.__new__(GatewayRunner)
+        runner.config = GatewayConfig(thread_sessions_per_user=True)
+        prepared = await runner._prepare_inbound_message_text(
+            event=MessageEvent(text=msg_event.text, source=msg_event.source),
+            source=msg_event.source,
+            history=[],
+        )
+        assert prepared.startswith(
+            '<source>{"platform":"slack","channel":"C_SMOKE",'
+            '"uid":"B_PEER","uname":"Peer Bot"}</source>'
+        )
+
+    @pytest.mark.asyncio
     async def test_human_message_with_current_mention_routes(self, smoke_adapter):
         event = _make_event(
             text=f"<@{BOT_USER_ID}> summarize the deploy status",
@@ -171,4 +215,3 @@ class TestSlackPeerAgentSmoke:
             "routing_logic: strict peer-agent mode must not persist thread mentions after routing"
         )
         smoke_adapter._fetch_thread_context.assert_awaited_once()
-

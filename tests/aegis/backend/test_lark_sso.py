@@ -52,6 +52,7 @@ class _FakeLarkClient:
 
 @pytest.fixture
 def lark_client(monkeypatch, load_backend, hermes_home):
+    monkeypatch.setenv("LARK_SSO_ENABLE", "true")
     monkeypatch.setenv("LARK_APP_ID", "cli-lark-test")
     monkeypatch.setenv("LARK_APP_SECRET", "lark-test-secret")
     monkeypatch.setenv("LARK_REDIRECT_URI", "http://127.0.0.1:9130/api/lark/callback")
@@ -92,6 +93,7 @@ def test_lark_start_builds_authorize_url_with_state_and_pkce(lark_client):
 
 
 def test_lark_start_requires_credentials(load_backend, hermes_home, monkeypatch):
+    monkeypatch.setenv("LARK_SSO_ENABLE", "true")
     monkeypatch.delenv("LARK_APP_ID", raising=False)
     monkeypatch.delenv("LARK_APP_SECRET", raising=False)
     server = load_backend("aegis.backend.server")
@@ -102,6 +104,20 @@ def test_lark_start_requires_credentials(load_backend, hermes_home, monkeypatch)
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Lark SSO is not configured."}
+
+
+def test_lark_start_requires_enable_flag(load_backend, hermes_home, monkeypatch):
+    monkeypatch.delenv("LARK_SSO_ENABLE", raising=False)
+    monkeypatch.setenv("LARK_APP_ID", "cli-lark-test")
+    monkeypatch.setenv("LARK_APP_SECRET", "lark-test-secret")
+    server = load_backend("aegis.backend.server")
+    app = server.create_app()
+
+    with TestClient(app) as client:
+        response = client.get("/api/lark/start")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Lark SSO is disabled."}
 
 
 def test_lark_callback_exchanges_code_gets_email_and_reuses_ticket(lark_client, monkeypatch):
@@ -336,6 +352,7 @@ def test_lark_callback_rejects_user_info_upstream_error(lark_client, monkeypatch
 
 
 def test_lark_start_rejects_external_post_login_redirect(load_backend, hermes_home, monkeypatch):
+    monkeypatch.setenv("LARK_SSO_ENABLE", "true")
     monkeypatch.setenv("LARK_APP_ID", "cli-lark-test")
     monkeypatch.setenv("LARK_APP_SECRET", "lark-test-secret")
     monkeypatch.setenv("OIDC_POST_LOGIN_REDIRECT", "//evil.example/capture")

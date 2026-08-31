@@ -21,6 +21,24 @@ def test_load_settings_generates_token_when_env_missing(
     assert settings.jwt_expire_seconds == 28800
 
 
+def test_lark_sso_enable_defaults_false_and_accepts_truthy_values(
+    load_backend,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("LARK_SSO_ENABLE", raising=False)
+    config = load_backend("aegis.backend.config")
+
+    assert config.load_aegis_settings().lark_sso_enabled is False
+
+    for value in ("1", "true", "yes", "on", "TRUE"):
+        monkeypatch.setenv("LARK_SSO_ENABLE", value)
+        assert config.load_aegis_settings().lark_sso_enabled is True
+
+    for value in ("0", "false", "no", "off", "unexpected"):
+        monkeypatch.setenv("LARK_SSO_ENABLE", value)
+        assert config.load_aegis_settings().lark_sso_enabled is False
+
+
 def test_login_session_and_logout_routes(client: TestClient) -> None:
     login_response = client.post(
         "/api/auth/login",
@@ -187,7 +205,24 @@ def test_public_health_and_bootstrap_routes_are_accessible(client: TestClient) -
         "embedded_chat": False,
         "auth_scheme": "jwt-password",
         "admin_setup_required": False,
+        "lark_sso_enabled": False,
     }
+
+
+def test_bootstrap_reports_enabled_lark_sso(
+    load_backend,
+    hermes_home,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("LARK_SSO_ENABLE", "true")
+    server = load_backend("aegis.backend.server")
+    app = server.create_app()
+
+    with TestClient(app) as test_client:
+        response = test_client.get("/api/system/bootstrap")
+
+    assert response.status_code == 200
+    assert response.json()["lark_sso_enabled"] is True
 
 
 def test_missing_bootstrap_secret_requires_manual_setup(

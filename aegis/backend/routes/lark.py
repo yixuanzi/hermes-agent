@@ -47,6 +47,8 @@ def build_lark_sso_router(
 
     @router.get("/start")
     async def start():
+        if not settings.lark_sso_enabled:
+            return JSONResponse({"detail": "Lark SSO is disabled."}, status_code=503)
         if not lark_is_configured(settings):
             return JSONResponse({"detail": "Lark SSO is not configured."}, status_code=503)
         try:

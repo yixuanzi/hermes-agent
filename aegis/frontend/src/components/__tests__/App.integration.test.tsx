@@ -163,6 +163,14 @@ describe('Aegis App integration', () => {
 
     global.fetch = vi.fn(async (input) => {
       const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/system/bootstrap') {
+        return jsonResponse({
+          embedded_chat: false,
+          auth_scheme: 'jwt-password',
+          admin_setup_required: false,
+          lark_sso_enabled: true,
+        });
+      }
       if (url === '/api/auth/session') {
         return jsonResponse({ authenticated: false });
       }
@@ -178,6 +186,22 @@ describe('Aegis App integration', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Lark SSO' }));
     expect(assignSpy).toHaveBeenLastCalledWith('/api/lark/start');
+  });
+
+  it('fails closed and hides Lark SSO when bootstrap configuration is unavailable', async () => {
+    global.fetch = vi.fn(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/auth/session') {
+        return jsonResponse({ authenticated: false });
+      }
+      throw new Error(`Unhandled request: GET ${url}`);
+    }) as typeof global.fetch;
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: /sign in/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Lark SSO' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Aegis SSO' })).toBeInTheDocument();
   });
 
   it('supports register, login, agent/rule CRUD, and admin user management', async () => {
@@ -871,6 +895,102 @@ describe('Aegis App integration', () => {
     expect(mainViewport?.firstElementChild).not.toHaveClass('select-none');
   });
 
+  it('shares the App Entry directory between Overview and App Entry and refreshes it explicitly', async () => {
+    seedStoredAuth(analystUser);
+    window.history.replaceState({}, '', '/chat');
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    let appEntryCalls = 0;
+
+    global.fetch = vi.fn(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/auth/session') {
+        return jsonResponse({ authenticated: true, user: analystUser, expires_in: 28800 });
+      }
+      if (url === '/api/overview/agents') {
+        return jsonResponse({ agents: [] });
+      }
+      if (url === '/api/overview/stats') {
+        return jsonResponse({
+          window_start: '2026-07-15T00:00:00.000000Z',
+          window_end: '2026-07-22T00:00:00.000000Z',
+          executing_agent_count: 0,
+          source_platform_count: 0,
+          active_user_count: 0,
+          delegation_total: 0,
+          success_count: 0,
+          success_rate: null,
+          status_counts: { succ: 0, fail: 0, auth_denied: 0 },
+          comparison: {
+            previous_delegation_total: 0,
+            delegation_volume_change_percent: null,
+            previous_success_rate: null,
+            success_rate_change_percentage_points: null,
+          },
+        });
+      }
+      if (url === '/api/overview/topology') {
+        return jsonResponse({
+          schema_version: '1.0.0',
+          updated_at: '2026-07-22',
+          center: { id: 'aegis', symbol: 'aegis-connection' },
+          agents: [{
+            id: 'ai-soc',
+            layer: 'agent_ring',
+            business_domain: 'AI-SOC',
+            product_service_code: 'WORKAGENT-AI-SOC',
+            name: 'Argus',
+            display_name: 'AI-SOC · Argus',
+            marketing_name: '[ Argus ]',
+            symbol: 'argus-eyes',
+            cultural_origin: '希腊神话·百眼巨人',
+            business_fit: '全天候、零死角威胁监控与感知',
+            role: '安全运营',
+            layout: { ring_position: 0, angle_degrees: 270, radius: 'agent' },
+            star_nodes: [],
+            runtime: { status: 'active', source: 'a2a_registry' },
+          }],
+          edges: [{ source: 'aegis', target: 'ai-soc', mode: 'orchestrates' }],
+        });
+      }
+      if (url === '/api/app-entries') {
+        appEntryCalls += 1;
+        return jsonResponse({
+          organization_code: 'XINGHAI-SH',
+          entries: [{
+            subscription_id: 'subscription-1',
+            subscription_no: 'SUB-001',
+            subscription_status: 'active',
+            effective_to: '2027-08-01T00:00:00Z',
+            product_service_code: 'WORKAGENT-AI-SOC',
+            product_service_name: 'Argus Work Agent',
+            entry_url: 'https://workagent.example.com',
+            entry_source: 'app',
+          }],
+        });
+      }
+      throw new Error(`Unhandled request: GET ${url}`);
+    }) as typeof global.fetch;
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /aegis chat/i });
+    expect(appEntryCalls).toBe(0);
+
+    fireEvent.click(screen.getByRole('button', { name: /overview/i }));
+    await waitFor(() => expect(appEntryCalls).toBe(1));
+    fireEvent.click(await screen.findByLabelText(/AI-SOC · Argus/));
+    expect(openSpy).toHaveBeenCalledWith('https://workagent.example.com', '_blank', 'noopener,noreferrer');
+    expect(appEntryCalls).toBe(1);
+
+    fireEvent.click(screen.getByRole('button', { name: /app entry/i }));
+    expect(await screen.findByRole('heading', { name: 'App Entry' })).toBeInTheDocument();
+    expect(screen.getByText('Argus Work Agent')).toBeInTheDocument();
+    expect(appEntryCalls).toBe(1);
+
+    fireEvent.click(screen.getByRole('button', { name: /refresh entries/i }));
+    await waitFor(() => expect(appEntryCalls).toBe(2));
+  });
+
   it('refreshes Overview delegation stats every 60 seconds', async () => {
     vi.useFakeTimers();
     seedStoredAuth(analystUser);
@@ -920,5 +1040,63 @@ describe('Aegis App integration', () => {
       await vi.advanceTimersByTimeAsync(60_000);
     });
     expect(statsCalls).toBe(2);
+  });
+
+  it('does not refresh Overview delegation stats while another page is active', async () => {
+    vi.useFakeTimers();
+    seedStoredAuth(analystUser);
+    window.history.replaceState({}, '', '/app-entry');
+    let statsCalls = 0;
+
+    global.fetch = vi.fn(async (input) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/auth/session') {
+        return jsonResponse({ authenticated: true, user: analystUser, expires_in: 28800 });
+      }
+      if (url === '/api/overview/agents') {
+        return jsonResponse({ agents: [] });
+      }
+      if (url === '/api/overview/stats') {
+        statsCalls += 1;
+        return jsonResponse({
+          window_start: '2026-07-15T00:00:00.000000Z',
+          window_end: '2026-07-22T00:00:00.000000Z',
+          executing_agent_count: 0,
+          source_platform_count: 0,
+          active_user_count: 0,
+          delegation_total: statsCalls,
+          success_count: statsCalls,
+          success_rate: 1,
+          status_counts: { succ: statsCalls, fail: 0, auth_denied: 0 },
+          comparison: {
+            previous_delegation_total: 0,
+            delegation_volume_change_percent: null,
+            previous_success_rate: null,
+            success_rate_change_percentage_points: null,
+          },
+        });
+      }
+      if (url === '/api/overview/topology') {
+        return new Response('topology unavailable', { status: 503 });
+      }
+      if (url === '/api/app-entries') {
+        return jsonResponse({ organization_code: 'XINGHAI-SH', entries: [] });
+      }
+      throw new Error(`Unhandled request: GET ${url}`);
+    }) as typeof global.fetch;
+
+    render(<App />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(statsCalls).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(statsCalls).toBe(1);
   });
 });
