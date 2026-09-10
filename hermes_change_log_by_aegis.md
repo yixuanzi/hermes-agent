@@ -158,6 +158,11 @@ Intent: For top-level messages in regular groups and direct messages, use `FEISH
 Feature: Feishu automatic-topic lifecycle boundaries.
 Intent: Keep AIAgent cache eviction independent from session continuity, while making the reset/prune boundary explicit: once an automatic root session has been ended by `session_reset` or its routing entry has been pruned after restart, a later topic message may create a new session and retain the real `omt_*` route rather than incorrectly binding an unknown human topic to the old root session. Keep this lifecycle behavior independent from the `FEISHU_REPLY_THREAD` topic-creation switch.
 
+## File: `gateway/platforms/base.py`
+
+Feature: Feishu automatic-topic reply anchors.
+Intent: Distinguish an `om_*` prospective topic root from a real `omt_*` topic when selecting the outbound reply anchor, so a user message that quotes an earlier message creates its automatic topic under the current message while existing real-topic reply-context behavior remains unchanged.
+
 ## File: `gateway/run.py`
 
 Feature: Delegate runtime binding per gateway turn.

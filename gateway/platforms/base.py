@@ -162,7 +162,14 @@ def _reply_anchor_for_event(event) -> str | None:
         return getattr(event, "message_id", None) or getattr(event, "reply_to_message_id", None)
     if platform == "telegram" and thread_id:
         return None
-    if platform == "feishu" and thread_id and getattr(event, "reply_to_message_id", None):
+    if (
+        platform == "feishu"
+        and thread_id
+        # ``om_*`` is Feishu's message ID used as the prospective root for an
+        # automatic topic; real topics use ``omt_*`` and retain reply context.
+        and not str(thread_id).startswith("om_")
+        and getattr(event, "reply_to_message_id", None)
+    ):
         return getattr(event, "reply_to_message_id", None)
     return getattr(event, "message_id", None)
 
