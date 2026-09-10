@@ -42,3 +42,19 @@ optional_env:
     description: "Display name for the Feishu home channel"
     prompt: "Home channel display name"
     password: false
+  - name: FEISHU_CARD_OUTPUT
+    description: "Render replies as a three-element CardKit card (title / collapsible execution trace / streamed rich text). Default true; false uses text+post messages"
+    prompt: "Card output? (true/false)"
+    password: false
+  - name: FEISHU_CARD_TITLE
+    description: "Card header title for the main agent (default '🤖 Hermes')"
+    prompt: "Card title"
+    password: false
+  - name: FEISHU_CARD_DELEGATE_TITLE
+    description: "Card header title for a delegated remote agent; may contain {agent}"
+    prompt: "Delegate card title"
+    password: false
+  - name: FEISHU_CARD_TRACE_TITLE
+    description: "Title of the collapsible execution-trace panel (default '🔧 执行过程')"
+    prompt: "Execution panel title"
+    password: false

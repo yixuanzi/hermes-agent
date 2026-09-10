@@ -746,9 +746,14 @@ class _A2ADelegateSession:
         headers: dict[str, str] | None = None,
         response_path: str | None = None,
         interaction_supported: bool = False,
+        agent_name: str | None = None,
     ):
         self.base_url = base_url
         self.output = output
+        # Presentation only: platform output adapters that render a
+        # delegation as its own surface (e.g. the Feishu card) title it
+        # with this.  Never used for routing or authorization.
+        self.agent_name = agent_name
         self.parent_agent = parent_agent
         self.timeout = (
             float(timeout)
@@ -1403,6 +1408,7 @@ def _run_remote_delegate(
         headers=entry.get("headers") or {},
         response_path=response_path,
         interaction_supported=interaction_supported,
+        agent_name=agent_name,
     )
     bind_output = getattr(session, "bind_output_adapter", None)
     if callable(bind_output):

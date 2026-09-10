@@ -25802,6 +25802,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # reply anchor; carry it so progress joins that thread.
             _progress_metadata = {"reply_to_message_id": event_message_id}
         _progress_metadata = _non_conversational_metadata(_progress_metadata, platform=source.platform)
+        # Feishu renders a whole turn as one CardKit card, so it has to
+        # tell execution chrome (tool + thinking lines, which belong in the
+        # card's collapsible panel) from the reply itself (the streamed
+        # rich-text body).  Scoped to Feishu so no other platform's
+        # progress metadata changes shape; nothing here reaches history.
+        if source.platform == Platform.FEISHU:
+            _progress_metadata = {**(_progress_metadata or {}), "hermes_progress": True}
         _progress_reply_to = (
             event_message_id
             if (
