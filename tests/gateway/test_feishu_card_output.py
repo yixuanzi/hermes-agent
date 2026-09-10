@@ -176,13 +176,22 @@ def card_adapter(monkeypatch):
     adapter._card_manager._flush_interval = 0.0
 
     async def _run_blocking(func, *args):
+        # The real _run_blocking hands the blocking SDK call to a thread pool,
+        # so it always suspends.  Yield here too: a fixture that never
+        # suspends serializes every code path by accident and hides exactly
+        # the concurrency bugs these tests exist to catch.
+        await asyncio.sleep(0)
         return func(*args)
+
+    async def _deliver_card(**kwargs):
+        await asyncio.sleep(0)
+        return _Resp(message_id="om_card")
 
     monkeypatch.setattr(adapter, "_run_blocking", _run_blocking)
     monkeypatch.setattr(
         adapter,
         "_feishu_send_with_retry",
-        AsyncMock(return_value=_Resp(message_id="om_card")),
+        AsyncMock(side_effect=_deliver_card),
     )
     adapter._cardkit = cardkit
     return adapter
@@ -506,15 +515,34 @@ async def test_cards_disabled_keeps_the_legacy_path(card_adapter):
     assert card_adapter._feishu_send_with_retry.await_args.kwargs["msg_type"] == "text"
 
 
-def test_card_output_flag_reads_config_and_env(monkeypatch):
+def test_card_output_is_opt_in(monkeypatch):
+    """Unset means off: an unconfigured deployment keeps the text/post path."""
     monkeypatch.delenv("FEISHU_CARD_OUTPUT", raising=False)
-    assert FeishuAdapter._load_settings({}).card_output is True
-
-    monkeypatch.setenv("FEISHU_CARD_OUTPUT", "false")
     assert FeishuAdapter._load_settings({}).card_output is False
 
+    monkeypatch.setenv("FEISHU_CARD_OUTPUT", "")
+    assert FeishuAdapter._load_settings({}).card_output is False
+
+
+@pytest.mark.parametrize("raw", ["true", "1", "yes", "on", "TRUE", " true "])
+def test_card_output_accepts_the_usual_spellings_of_on(monkeypatch, raw):
+    """``FEISHU_CARD_OUTPUT=1`` must not silently read as off."""
+    monkeypatch.setenv("FEISHU_CARD_OUTPUT", raw)
+    assert FeishuAdapter._load_settings({}).card_output is True
+
+
+@pytest.mark.parametrize("raw", ["false", "0", "no", "off", "nonsense"])
+def test_card_output_stays_off_for_anything_else(monkeypatch, raw):
+    monkeypatch.setenv("FEISHU_CARD_OUTPUT", raw)
+    assert FeishuAdapter._load_settings({}).card_output is False
+
+
+def test_yaml_card_output_overrides_the_env(monkeypatch):
     monkeypatch.setenv("FEISHU_CARD_OUTPUT", "true")
     assert FeishuAdapter._load_settings({"card_output": False}).card_output is False
+
+    monkeypatch.delenv("FEISHU_CARD_OUTPUT", raising=False)
+    assert FeishuAdapter._load_settings({"card_output": True}).card_output is True
 
 
 @pytest.mark.asyncio
@@ -1005,3 +1033,302 @@ async def test_main_agent_output_after_a_loop_opens_its_own_card(card_adapter):
         copy.main_title,
     ]
     assert cardkit.body_texts()[-1] == "主 agent 汇总"
+
+
+# ---------------------------------------------------------------------------
+# Concurrent delta delivery
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_concurrent_deltas_land_in_one_body_block(card_adapter):
+    """Delegate events arrive as independent fire-and-forget tasks.
+
+    ``_FeishuDelegateOutputAdapter.emit`` schedules every event with
+    ``create_task`` / ``run_coroutine_threadsafe``, so a burst of deltas runs
+    concurrently.  Each one used to observe "no block yet" while the first was
+    still awaiting its network call, so each opened its own body block — and
+    body blocks join with a blank line, which rendered the head of the answer
+    as one fragment per paragraph.
+    """
+    _begin_turn(card_adapter)
+    output = _delegate_output(card_adapter)
+    fragments = ["我先", "加", "载该", "工具的", "schema，再真", "实", "调", "用。"]
+
+    await asyncio.gather(*[
+        output._emit_async("delegate", "ai_delta", fragment, session_id="ctx-1")
+        for fragment in fragments
+    ])
+    await _settle()
+
+    rendered = card_adapter._cardkit.body_texts()[-1]
+    assert rendered == "".join(fragments), "fragments must concatenate, not stack"
+    assert "\n" not in rendered, "a blank line here means one block per delta"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_deltas_keep_the_typewriter_prefix_property(card_adapter):
+    """Every streamed update must extend the previous one.
+
+    Feishu animates the difference only when the new text is a prefix superset
+    of the old; otherwise it replaces the element and the typewriter dies.
+    """
+    _begin_turn(card_adapter)
+    output = _delegate_output(card_adapter)
+
+    await asyncio.gather(*[
+        output._emit_async("delegate", "ai_delta", chunk, session_id="ctx-1")
+        for chunk in ("alpha ", "beta ", "gamma ", "delta")
+    ])
+    await _settle()
+
+    texts = card_adapter._cardkit.body_texts()
+    for earlier, later in zip(texts, texts[1:]):
+        assert later.startswith(earlier), f"{later!r} does not extend {earlier!r}"
+
+
+@pytest.mark.asyncio
+async def test_delta_burst_opens_exactly_one_card(card_adapter):
+    _begin_turn(card_adapter)
+    output = _delegate_output(card_adapter)
+
+    await asyncio.gather(*[
+        output._emit_async("delegate", "ai_delta", str(index), session_id="ctx-1")
+        for index in range(12)
+    ])
+    await _settle()
+
+    assert len(card_adapter._cardkit.creates) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_between_bursts_starts_a_new_paragraph(card_adapter):
+    """A tool boundary ends the text segment; the next deltas are a new block."""
+    _begin_turn(card_adapter)
+    output = _delegate_output(card_adapter)
+
+    await asyncio.gather(*[
+        output._emit_async("delegate", "ai_delta", part, session_id="ctx-1")
+        for part in ("先看", "一下。")
+    ])
+    await _settle()
+    await output._emit_async("delegate", "tool_call", "WebSearch cve", session_id="ctx-1")
+    await _settle()
+    await asyncio.gather(*[
+        output._emit_async("delegate", "ai_delta", part, session_id="ctx-1")
+        for part in ("结果", "如下。")
+    ])
+    await _settle()
+
+    assert card_adapter._cardkit.body_texts()[-1] == "先看一下。\n\n结果如下。"
+
+
+@pytest.mark.asyncio
+async def test_final_event_does_not_repeat_text_streamed_before_a_tool(card_adapter):
+    """A tool boundary ends the text segment, not the exchange.
+
+    ``states[owner]`` is cleared at a tool call, so using it to answer "did
+    this delegate stream anything?" made a streamed-then-tool-then-answer
+    exchange look like it had never streamed — and the turn-final event
+    appended the whole response on top of the text already on screen.
+    """
+    _begin_turn(card_adapter)
+    output = _delegate_output(card_adapter)
+
+    await output._emit_async("delegate", "ai_delta", "先看一下。", session_id="ctx-1")
+    await _settle()
+    await output._emit_async("delegate", "tool_call", "WebSearch cve", session_id="ctx-1")
+    await _settle()
+    await output._emit_async("delegate", "ai_delta", "结果如下。", session_id="ctx-1")
+    await _settle()
+    await output._emit_async(
+        "delegate", "ai", "先看一下。结果如下。", session_id="ctx-1"
+    )
+    await _settle()
+
+    rendered = card_adapter._cardkit.body_texts()[-1]
+    assert rendered == "先看一下。\n\n结果如下。"
+    assert rendered.count("结果如下。") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_non_streaming_delegate_still_gets_its_answer_after_a_tool(card_adapter):
+    """The append path is still needed when nothing streamed at all."""
+    _begin_turn(card_adapter)
+    output = _delegate_output(card_adapter)
+
+    await output._emit_async("delegate", "tool_call", "WebSearch cve", session_id="ctx-1")
+    await _settle()
+    await output._emit_async("delegate", "ai", "只有最终答案。", session_id="ctx-1")
+    await _settle()
+
+    assert card_adapter._cardkit.body_texts()[-1] == "只有最终答案。"
+
+
+@pytest.mark.asyncio
+async def test_the_streamed_flag_resets_between_exchanges(card_adapter):
+    """Exchange two must not inherit exchange one's "already streamed"."""
+    _begin_turn(card_adapter)
+    output = _delegate_output(card_adapter)
+
+    await output._emit_async("delegate", "ai_delta", "第一轮", session_id="ctx-loop")
+    await output._emit_async("delegate", "ai", "第一轮", session_id="ctx-loop")
+    await _settle()
+    # Second exchange never streams — its answer arrives only as the final event.
+    await output._emit_async("delegate", "ai", "第二轮答案", session_id="ctx-loop")
+    await _settle()
+
+    assert len(card_adapter._cardkit.creates) == 2
+    assert card_adapter._cardkit.body_texts()[-1] == "第二轮答案"
+
+
+# ---------------------------------------------------------------------------
+# Transient status notices bypass the card
+# ---------------------------------------------------------------------------
+
+HEARTBEAT = "⏳ Working — 3 min — iteration 1/90, a2a_delegate"
+
+
+@pytest.mark.asyncio
+async def test_a_heartbeat_does_not_splice_into_a_live_answer(card_adapter):
+    """The liveness heartbeat is not part of the reply.
+
+    Appended to the card it lands in the middle of whatever answer is
+    streaming, which is what "异常插入委派agent消息流" looks like.
+    """
+    _begin_turn(card_adapter)
+    output = _delegate_output(card_adapter)
+    await output._emit_async("delegate", "ai_delta", "远程答案。", session_id="ctx-1")
+    await _settle()
+
+    result = await card_adapter.send(
+        CHAT_ID, HEARTBEAT, metadata={"hermes_card_bypass": True}
+    )
+    await _settle()
+
+    assert result.success is True
+    # Delivered as an ordinary message, not a card block handle.
+    assert not card_adapter._card_manager.owns_message(result.message_id)
+    assert card_adapter._feishu_send_with_retry.await_args.kwargs["msg_type"] == "text"
+    # The card kept only the delegate's answer, and stayed open.
+    assert card_adapter._cardkit.body_texts()[-1] == "远程答案。"
+    assert len(card_adapter._cardkit.creates) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_conversational_sends_bypass_the_card_too(card_adapter):
+    """The gateway's existing name for a lifecycle send is honoured as well."""
+    _begin_turn(card_adapter)
+    await card_adapter.send(CHAT_ID, "the answer")
+    await _settle()
+
+    result = await card_adapter.send(
+        CHAT_ID, "🔄 Restarting…", metadata={"non_conversational": True}
+    )
+    await _settle()
+
+    assert not card_adapter._card_manager.owns_message(result.message_id)
+    assert card_adapter._cardkit.body_texts()[-1] == "the answer"
+
+
+@pytest.mark.asyncio
+async def test_tool_progress_still_goes_into_the_panel(card_adapter):
+    """Execution chrome has a home in the card and must not be bypassed.
+
+    A progress send can carry both markers (the gateway builds its progress
+    metadata through the same non-conversational helper), so the progress
+    marker has to win.
+    """
+    _begin_turn(card_adapter)
+
+    await card_adapter.send(
+        CHAT_ID,
+        "⚙️ Bash",
+        metadata={"hermes_progress": True, "non_conversational": True},
+    )
+    await _settle()
+
+    assert card_adapter._cardkit.trace_texts()[-1] == "- ⚙️ Bash"
+
+
+@pytest.mark.asyncio
+async def test_delegate_interaction_ack_is_a_plain_message(card_adapter):
+    """"✅ Delegate interaction resolved." acknowledges a button, not an answer."""
+    _begin_turn(card_adapter)
+    output = _delegate_output(card_adapter)
+    await output._emit_async("delegate", "ai_delta", "正在处理。", session_id="ctx-1")
+    await _settle()
+
+    card_adapter._delegate_interactions["i-1"] = {
+        "interaction_id": "i-1",
+        "kind": "approval",
+        "chat_id": CHAT_ID,
+        "thread_id": None,
+    }
+    await card_adapter.resolve_delegate_interaction({"interaction_id": "i-1"})
+    await _settle()
+
+    sent = card_adapter._feishu_send_with_retry.await_args.kwargs
+    assert "Delegate interaction resolved" in sent["payload"]
+    assert sent["msg_type"] == "text"
+    assert card_adapter._cardkit.body_texts()[-1] == "正在处理。"
+
+
+@pytest.mark.asyncio
+async def test_a_bypassed_notice_keeps_thread_routing(card_adapter):
+    """Skipping the card must not drop the topic the notice belongs to."""
+    _begin_turn(card_adapter, thread_id="omt_topic")
+    card_adapter._delegate_interactions["i-2"] = {
+        "interaction_id": "i-2",
+        "kind": "approval",
+        "chat_id": CHAT_ID,
+        "thread_id": "omt_topic",
+    }
+
+    await card_adapter.resolve_delegate_interaction({"interaction_id": "i-2"})
+    await _settle()
+
+    assert card_adapter._feishu_send_with_retry.await_args.kwargs["metadata"] == {
+        "hermes_card_bypass": True,
+        "thread_id": "omt_topic",
+    }
+
+
+@pytest.mark.asyncio
+async def test_bypassed_notices_are_editable_as_real_messages(card_adapter):
+    """The heartbeat re-edits its own bubble; that must stay a real message."""
+    _begin_turn(card_adapter)
+
+    sent = await card_adapter.send(
+        CHAT_ID, HEARTBEAT, metadata={"hermes_card_bypass": True}
+    )
+    edited = await card_adapter.edit_message(
+        CHAT_ID, sent.message_id, "⏳ Working — 4 min"
+    )
+
+    assert edited.success is True
+    # Went through the im update path, not the card element path.
+    assert not card_adapter._cardkit.element_contents
+
+
+def test_bypass_decision_table():
+    """The one place that decides card vs. plain message.
+
+    Exercised directly because the callers are spread across the gateway and
+    the adapter, and every one of them depends on these four answers.
+    """
+    decide = FeishuAdapter._card_bypass_requested
+
+    # Ordinary content: the card owns it.
+    assert decide(None) is False
+    assert decide({}) is False
+    assert decide({"thread_id": "omt_1"}) is False
+
+    # Transient notices: explicit opt-out, or the gateway's lifecycle marker.
+    assert decide({"hermes_card_bypass": True}) is True
+    assert decide({"non_conversational": True}) is True
+
+    # Execution chrome has a home inside the card, so the progress marker
+    # wins even when a lifecycle marker rides along with it.
+    assert decide({"hermes_progress": True}) is False
+    assert decide({"hermes_progress": True, "non_conversational": True}) is False
+    assert decide({"hermes_progress": True, "hermes_card_bypass": True}) is False

@@ -65,6 +65,9 @@ Intent: Pause the caller-side polling deadline while a supported approval or cla
 Feature: Configurable A2A polling timing.
 Intent: Use a 120-second client polling deadline by default and allow process-level overrides through `A2A_POLL_TIMEOUT` and `A2A_POLL_INTERVAL`, while preserving explicit session arguments and leaving HTTP and remote approval/clarify timeouts unchanged.
 
+Feature: Delegate agent name for platform presentation.
+Intent: Carry the resolved `agent_name` onto the delegate session so a platform output adapter that renders a delegation as its own surface can title it. Presentation only: this attribute must never participate in routing, session identity, or authorization.
+
 ## File: `toolsets.py`
 
 Feature: Toolset catalog.
@@ -158,6 +161,43 @@ Intent: For top-level messages in regular groups and direct messages, use `FEISH
 Feature: Feishu automatic-topic lifecycle boundaries.
 Intent: Keep AIAgent cache eviction independent from session continuity, while making the reset/prune boundary explicit: once an automatic root session has been ended by `session_reset` or its routing entry has been pruned after restart, a later topic message may create a new session and retain the real `omt_*` route rather than incorrectly binding an unknown human topic to the old root session. Keep this lifecycle behavior independent from the `FEISHU_REPLY_THREAD` topic-creation switch.
 
+Feature: Feishu card output mode.
+Intent: Behind opt-in `FEISHU_CARD_OUTPUT` (default false; yaml `feishu.card_output` takes precedence), intercept `send`, `edit_message`, and `delete_message` so one agent turn renders as one CardKit card instead of a fan of text/post bubbles, with the card bracketed to the turn by `on_processing_start` / `on_processing_complete`. Classify each send by outbound metadata: `hermes_progress` is execution chrome and belongs in the collapsible panel, anything else is the reply body. Only output produced inside a turn becomes a card, so a slash-command reply or cron push does not create a card whose panel is permanently empty, and any CardKit failure returns the route to the existing text/post path rather than costing the user a reply.
+
+Feature: Feishu delegate card rendering.
+Intent: Render each delegated remote agent into its own card keyed by A2A context ID, sealed on that delegate's turn-final event so a foreground loop produces one card per exchange rather than piling every follow-up answer into the first card. Accumulate streamed deltas synchronously before any await and serialize the open-or-extend decision per owner, because delegate events are scheduled as independent fire-and-forget tasks and would otherwise each open their own body block and fragment the head of the answer. Track whether an exchange streamed separately from the current text segment, so a tool boundary cannot make the turn-final event re-append text already on screen. Drop transport-level `status` events in card mode, since they describe the delegation machinery and the agent narrates the real outcome itself; keep `error` visible.
+
+Feature: Feishu transient notice delivery.
+Intent: Keep liveness signals and acknowledgements out of the answer card. `hermes_card_bypass` and the gateway's existing `non_conversational` marker both route a send to the plain text/post path, with `hermes_progress` taking precedence so tool chrome still reaches the panel. The delegate interaction-resolved acks and the expired-approval correction set the marker at their own call sites, so a button press cannot splice a notice into the middle of a streaming answer. A bypassed notice keeps a real Feishu message ID, so its own edit and delete paths continue to work.
+
+## File: `plugins/platforms/feishu/feishu_cardkit.py`
+
+Feature: CardKit three-element card engine.
+Intent: Own the card lifecycle for Feishu card output: create the JSON 2.0 entity, deliver it as `msg_type=interactive` carrying `type=card` plus `card_id`, then mutate it in place — full-element replace for the collapsible execution trace, the streaming `content` endpoint for the rich-text body, and a panel patch plus settings patch to finalize. Keep `update_multi=true`, because JSON 2.0 supports shared cards only and the streaming endpoint refuses an exclusive card, and keep `sequence` strictly increasing per card.
+
+Feature: Streaming body text contract.
+Intent: Send the element's complete text to `PUT /elements/:id/content` as a plain string. A JSON wrapper such as `{"text": ...}` is accepted with code 0 and then rendered literally, so the wrapper braces and escaped newlines appear in the chat — a successful response code is not evidence of correct rendering. Keep each update a prefix superset of the previous one, which is what produces the native typewriter animation instead of a whole-element replace.
+
+Feature: Card size budgeting.
+Intent: Measure the 30 KB card limit in UTF-8 bytes, not characters: CJK text costs three bytes per character, so a character-based cap allowed a long Chinese answer to exceed the real limit and have the whole update rejected. Truncate on a character boundary, keep the body's head so its prefix stays stable for the typewriter, keep the trace's tail so recent steps survive, and roll an overflowing body onto a continuation card instead of silently clipping the answer.
+
+Feature: Markdown fidelity for the Feishu renderer.
+Intent: De-indent fenced code-block markers so a fence indented inside a list item still renders as code, and render each execution-trace step as an explicit list item because a single newline is a soft break the renderer may collapse. Leave the reply body unmodified: it is the agent's own markdown, where headings, lists, tables, and fences all depend on the exact line structure arriving intact.
+
+Feature: Card update resilience.
+Intent: Re-queue a rejected element update instead of dropping it — bounded, so a permanent failure cannot spin — and re-open `streaming_mode` before retrying once when Feishu closes it after an idle period, so a turn that pauses on a slow tool does not lose the remainder of its answer. Serialize card creation per route so concurrent progress and content writers cannot each open a card for the same turn.
+
+Feature: Card speaker and exchange boundaries.
+Intent: Give each card exactly one owner and seal it when the owner changes, and expose an owner-scoped close for the case owner change cannot cover: a delegate foreground loop keeps one A2A context, and therefore one owner tag, across every turn.
+
+Feature: Card block addressing.
+Intent: Represent each send as an editable block within an area and return a synthetic `hermes-card:` handle rather than the real card message ID, so the gateway's send-then-edit streaming pattern maps onto card regions and the gateway can never reach the card through the `im` message API. Support retracting a block, so a superseded preview does not remain on screen beside its replacement.
+
+## File: `plugins/platforms/feishu/plugin.yaml`
+
+Feature: Feishu card output env contract.
+Intent: Declare `FEISHU_CARD_OUTPUT` and the card title overrides as optional env so operators can discover and opt into card rendering, and state the default explicitly: card output is off unless enabled, and text/post delivery remains what an unconfigured deployment gets.
+
 ## File: `gateway/platforms/base.py`
 
 Feature: Feishu automatic-topic reply anchors.
@@ -171,6 +211,8 @@ Intent: Bind adapter-provided delegate output and input factories onto both fres
 Feature: Slack / Feishu source identity envelope for agent-bound messages.
 Intent: Prefix Slack and Feishu DM/channel/group messages that become agent-bound turns with compact structured metadata after gateway command handling and all inbound-context assembly, including Slack shared channels and threads whenever a trusted user ID is available. Map Feishu `chat_id` to the shared `channel` field, keep the user ID and optional display name on the first line, preserve Slack's human-readable shared-session participant prefix, and avoid affecting command parsing or other-platform attribution. This main-Agent envelope is intentionally distinct from the remote A2A envelope, which carries only parent platform/user identity and does not automatically receive the channel.
 
+Feature: Feishu card output stream classification.
+Intent: Mark Feishu tool-progress sends with `hermes_progress` and the long-running heartbeat with `hermes_card_bypass`, so an adapter that renders a whole turn as one card can tell execution chrome, the reply itself, and a transient status notice apart. Both markers are scoped to Feishu so no other platform's progress or status metadata changes shape, and neither is presentation state that reaches conversation history.
 
 ## File: `tools/user_env_store.py`
 

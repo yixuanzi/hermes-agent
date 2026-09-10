@@ -170,6 +170,12 @@ _DEFAULT_CARD_FLUSH_INTERVAL = 0.4
 # adapter can tell execution chrome from the reply itself.  Absent means
 # "this is content", which keeps every other caller on the body path.
 _CARD_PROGRESS_METADATA_KEY = "hermes_progress"
+# Metadata key a caller sets to keep a send out of the card entirely.  For
+# transient status notices — a liveness heartbeat, an interaction ack — which
+# are not the agent's reply and would otherwise splice themselves into the
+# middle of whatever answer is streaming.  The platform-neutral
+# ``non_conversational`` marker is honoured the same way.
+_CARD_BYPASS_METADATA_KEY = "hermes_card_bypass"
 _card_output_module: Any = None
 
 # ---------------------------------------------------------------------------
@@ -449,9 +455,9 @@ class FeishuAdapterSettings:
     require_mention: bool = True
     reply_thread: bool = True
     # Render agent output as a three-element CardKit card instead of
-    # text/post messages.  On by default; the legacy path stays as the
-    # automatic fallback whenever a card call fails.
-    card_output: bool = True
+    # text/post messages.  Opt-in: the text/post path stays the default, and
+    # remains the automatic fallback whenever a card call fails.
+    card_output: bool = False
 
 
 @dataclass
@@ -794,6 +800,26 @@ def _card_copy_from_env() -> Any:
     from dataclasses import replace as _dc_replace
 
     return _dc_replace(defaults, **overrides)
+
+
+def _env_boolean_default_false(name: str) -> bool:
+    """Parse a user-facing boolean environment flag that is off by default.
+
+    Mirrors :func:`_env_boolean_default_true` so an operator can spell the
+    value any of the usual ways.  Not expressible with ``_to_boolean``, which
+    only accepts the literal string ``"true"`` — ``FEISHU_CARD_OUTPUT=1``
+    would silently read as off.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return False
+    normalized = raw.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    logger.warning("[Feishu] Invalid %s=%r; defaulting to false", name, raw)
+    return False
 
 
 def _is_style_enabled(style: Dict[str, Any] | None, key: str) -> bool:
@@ -1886,6 +1912,15 @@ class FeishuAdapter(BasePlatformAdapter):
         # CardKit streaming endpoint takes the element's complete text on
         # every call, so the accumulated string is kept here.
         self._delegate_card_blocks: Dict[str, Dict[str, Any]] = {}
+        # Delegate events arrive as independent fire-and-forget tasks, so the
+        # "open a block or extend the existing one" decision needs a critical
+        # section of its own — see handle_delegate_card_event.
+        self._delegate_card_locks: Dict[str, asyncio.Lock] = {}
+        # Owners that have streamed any body text during the current exchange.
+        # Kept apart from _delegate_card_blocks, which a tool boundary clears:
+        # "did this delegate stream?" is a property of the exchange, not of
+        # the current text segment.
+        self._delegate_card_streamed: set = set()
         self._load_seen_message_ids()
 
     @staticmethod
@@ -2067,7 +2102,7 @@ class FeishuAdapter(BasePlatformAdapter):
             card_output=(
                 _to_boolean(extra["card_output"])
                 if "card_output" in extra
-                else _env_boolean_default_true("FEISHU_CARD_OUTPUT")
+                else _env_boolean_default_false("FEISHU_CARD_OUTPUT")
             ),
         )
 
@@ -2650,6 +2685,8 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.debug("[Feishu] card teardown failed", exc_info=True)
         finally:
             getattr(self, "_delegate_card_blocks", {}).clear()
+            getattr(self, "_delegate_card_locks", {}).clear()
+            getattr(self, "_delegate_card_streamed", set()).clear()
 
     async def _cancel_pending_tasks(self, tasks: Dict[str, asyncio.Task]) -> None:
         pending = [task for task in tasks.values() if task and not task.done()]
@@ -2814,11 +2851,18 @@ class FeishuAdapter(BasePlatformAdapter):
     _EA_CMD_BUDGET = 3000
 
     async def _send_delegate_resolution(self, state: Dict[str, Any], text: str) -> None:
+        # "✅ Delegate interaction resolved." / "✅ Clarification response
+        # sent." acknowledge a button press on an interaction card.  They are
+        # not the delegate's answer, so they must not be appended to the card
+        # that answer is streaming into.
+        metadata: Dict[str, Any] = {_CARD_BYPASS_METADATA_KEY: True}
+        if state.get("thread_id"):
+            metadata["thread_id"] = state.get("thread_id")
         try:
             await self.send(
                 str(state.get("chat_id") or ""),
                 text,
-                metadata={"thread_id": state.get("thread_id")} if state.get("thread_id") else None,
+                metadata=metadata,
             )
         except Exception:
             logger.debug("[Feishu] delegate resolution notice failed", exc_info=True)
@@ -3219,6 +3263,27 @@ class FeishuAdapter(BasePlatformAdapter):
         manager = getattr(self, "_card_manager", None)
         return manager is not None and manager.available()
 
+    @staticmethod
+    def _card_bypass_requested(metadata: Optional[Dict[str, Any]]) -> bool:
+        """Whether this send asked to skip the card and go out as a message.
+
+        ``hermes_card_bypass`` is the explicit opt-out.  ``non_conversational``
+        is the gateway's existing name for a lifecycle/status send, which is
+        the same thing by another route — a notice about the session rather
+        than a turn of the conversation.
+
+        Tool-progress sends are excluded: those are execution chrome and have
+        a home inside the card's collapsible panel.
+        """
+        if not metadata:
+            return False
+        if metadata.get(_CARD_PROGRESS_METADATA_KEY):
+            return False
+        return bool(
+            metadata.get(_CARD_BYPASS_METADATA_KEY)
+            or metadata.get("non_conversational")
+        )
+
     async def _send_via_card(
         self,
         *,
@@ -3238,6 +3303,13 @@ class FeishuAdapter(BasePlatformAdapter):
         rewrites exactly that text.
         """
         if not self._card_output_active():
+            return None
+        # Transient status notices stay out of the card: they are not part of
+        # the answer, and appending them would interleave a heartbeat or an
+        # acknowledgement into the text the user is reading.  ``kind`` being
+        # set means an internal caller has already decided where this belongs
+        # (delegate trace / body), so the opt-out does not apply to it.
+        if kind is None and self._card_bypass_requested(metadata):
             return None
         manager = self._card_manager
         resolved_kind = kind or (
@@ -3304,6 +3376,30 @@ class FeishuAdapter(BasePlatformAdapter):
             return False
         return bool(removed)
 
+    def _delegate_card_streamed_owners(self) -> set:
+        """Owners that streamed body text during the current exchange."""
+        streamed = getattr(self, "_delegate_card_streamed", None)
+        if streamed is None:
+            streamed = set()
+            self._delegate_card_streamed = streamed
+        return streamed
+
+    def _delegate_card_lock(self, owner: str) -> asyncio.Lock:
+        """Serialize card writes for one delegate.
+
+        Every delegate event is scheduled as its own task, so without this an
+        opening burst of deltas each opens its own body block.
+        """
+        locks = getattr(self, "_delegate_card_locks", None)
+        if locks is None:
+            locks = {}
+            self._delegate_card_locks = locks
+        lock = locks.get(owner)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[owner] = lock
+        return lock
+
     def _card_delegate_owner(self, session_id: Any) -> str:
         """Owner tag for a delegated remote agent.
 
@@ -3353,37 +3449,65 @@ class FeishuAdapter(BasePlatformAdapter):
         if event_type == "ai_delta":
             if not content:
                 return True
+            # Accumulate BEFORE awaiting anything.  This runs to completion
+            # without yielding, so concurrent delta tasks cannot interleave
+            # here and every render below writes the full accumulation — no
+            # fragment is lost or reordered, and each update stays a prefix
+            # superset of the last, which is what animates the typewriter.
             state = states.get(owner)
             if state is None:
-                result = await self._send_via_card(
-                    chat_id=chat_id, content=content, reply_to=None, metadata=metadata,
-                    owner=owner, title=title, kind="body",
-                )
-                if result is None or not result.success:
-                    return False
-                states[owner] = {"block_id": result.message_id, "text": content}
-                return True
+                state = {"block_id": None, "text": ""}
+                states[owner] = state
             state["text"] += content
-            edited = await self._edit_via_card(state["block_id"], state["text"])
-            return edited is not None and edited.success
+            self._delegate_card_streamed_owners().add(owner)
+
+            async with self._delegate_card_lock(owner):
+                # Re-read under the lock: a task that queued behind the one
+                # that opened the block must extend it, not open another.
+                live = states.get(owner)
+                if live is not state:
+                    # A segment boundary (tool call / turn end) landed while
+                    # this task waited; the text it carried is already
+                    # rendered, so there is nothing left to do.
+                    return True
+                if live["block_id"] is None:
+                    result = await self._send_via_card(
+                        chat_id=chat_id, content=live["text"], reply_to=None,
+                        metadata=metadata, owner=owner, title=title, kind="body",
+                    )
+                    if result is None or not result.success:
+                        states.pop(owner, None)
+                        return False
+                    live["block_id"] = result.message_id
+                    return True
+                edited = await self._edit_via_card(live["block_id"], live["text"])
+                return edited is not None and edited.success
 
         if event_type == "ai":
-            # Turn-final for this delegate.  Deltas already streamed the text
-            # into the body; only a delegate that never streamed needs the
-            # final text appended here.
-            state = states.pop(owner, None)
-            if state is None and content:
-                await _append(content, "body")
-            # Seal the card: one card per exchange with the remote agent.  A
-            # foreground loop holds a single A2A context for all its turns, so
-            # the owner tag never changes and nothing else would close it —
-            # every follow-up answer would pile into the first card.
-            await manager.close_owner(chat_id=chat_id, metadata=metadata, owner=owner)
+            async with self._delegate_card_lock(owner):
+                # Turn-final for this delegate.  Deltas already streamed the
+                # text into the body, so appending the final response on top
+                # of them would show the answer twice — only a delegate that
+                # never streamed at all needs it appended here.
+                states.pop(owner, None)
+                streamed = self._delegate_card_streamed_owners()
+                if content and owner not in streamed:
+                    await _append(content, "body")
+                streamed.discard(owner)
+                # Seal the card: one card per exchange with the remote agent.
+                # A foreground loop holds a single A2A context for all its
+                # turns, so the owner tag never changes and nothing else would
+                # close it — every follow-up answer would pile into the first
+                # card.
+                await manager.close_owner(chat_id=chat_id, metadata=metadata, owner=owner)
             return True
 
         if event_type == "tool_call":
-            states.pop(owner, None)  # tool boundary ends the text segment
-            return await _append(_FeishuDelegateOutputAdapter._format_tool_call(content), "trace")
+            async with self._delegate_card_lock(owner):
+                states.pop(owner, None)  # tool boundary ends the text segment
+                return await _append(
+                    _FeishuDelegateOutputAdapter._format_tool_call(content), "trace"
+                )
 
         if event_type == "status":
             # Transport plumbing — "entered foreground loop", "return to main"
@@ -3396,8 +3520,9 @@ class FeishuAdapter(BasePlatformAdapter):
             return True
 
         if event_type == "error":
-            states.pop(owner, None)
-            return await _append(f"⚠️ `delegate error`: {content}", "body")
+            async with self._delegate_card_lock(owner):
+                states.pop(owner, None)
+                return await _append(f"⚠️ `delegate error`: {content}", "body")
 
         return False
 
@@ -4288,6 +4413,9 @@ class FeishuAdapter(BasePlatformAdapter):
                             _chat,
                             "⌛ That approval had already expired — the command "
                             "was not run (it timed out or was resolved elsewhere).",
+                            # A correction fired from a button press, not part
+                            # of any answer — keep it out of the live card.
+                            metadata={_CARD_BYPASS_METADATA_KEY: True},
                         )
                     except Exception:
                         logger.debug("[Feishu] expired-approval notice failed", exc_info=True)
@@ -4638,6 +4766,8 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.debug("[Feishu] card finish_turn failed", exc_info=True)
         finally:
             getattr(self, "_delegate_card_blocks", {}).clear()
+            getattr(self, "_delegate_card_locks", {}).clear()
+            getattr(self, "_delegate_card_streamed", set()).clear()
 
     async def on_processing_complete(
         self, event: MessageEvent, outcome: ProcessingOutcome

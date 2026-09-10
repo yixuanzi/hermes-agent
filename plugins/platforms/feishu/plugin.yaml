@@ -43,7 +43,7 @@ optional_env:
     prompt: "Home channel display name"
     password: false
   - name: FEISHU_CARD_OUTPUT
-    description: "Render replies as a three-element CardKit card (title / collapsible execution trace / streamed rich text). Default true; false uses text+post messages"
+    description: "Render replies as a three-element CardKit card (title / collapsible execution trace / streamed rich text). Default false; set true to opt in, otherwise replies are text+post messages"
     prompt: "Card output? (true/false)"
     password: false
   - name: FEISHU_CARD_TITLE

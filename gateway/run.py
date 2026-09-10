@@ -26216,10 +26216,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             logger.debug("Heartbeat edit failed: %s", _ee)
                             _notify_res = None
                     if not (_notify_res and getattr(_notify_res, "success", False)):
+                        _heartbeat_metadata = _non_conversational_metadata(
+                            _status_thread_metadata, platform=source.platform
+                        )
+                        if source.platform == Platform.FEISHU:
+                            # Feishu renders a turn as one card.  The
+                            # heartbeat is a liveness signal, not part of the
+                            # answer, so it must not be appended into the
+                            # card the reply is streaming into — send it as an
+                            # ordinary message, the way it arrived before card
+                            # output existed.
+                            _heartbeat_metadata = {
+                                **(_heartbeat_metadata or {}),
+                                "hermes_card_bypass": True,
+                            }
                         _notify_res = await _notify_adapter.send(
                             source.chat_id,
                             _heartbeat_text,
-                            metadata=_non_conversational_metadata(_status_thread_metadata, platform=source.platform),
+                            metadata=_heartbeat_metadata,
                         )
                         if getattr(_notify_res, "success", False) and getattr(
                             _notify_res, "message_id", None
