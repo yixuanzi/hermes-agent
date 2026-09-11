@@ -298,7 +298,7 @@ class FeishuCardSession:
 
 
 def _count_trace_steps(text: str) -> int:
-    return len([line for line in str(text or "").splitlines() if line.strip()])
+    return len(_split_trace_steps(text))
 
 
 def _byte_len(text: str) -> int:
@@ -309,30 +309,118 @@ def _byte_len(text: str) -> int:
 #: them again would nest a list inside a list.
 _BLOCK_PREFIXES = ("-", "*", "+", ">", "#", "|", "```", "~~~")
 _ORDERED_ITEM_RE = re.compile(r"^\d{1,9}[.)]\s")
+_FENCE_RE = re.compile(r"^(?:```|~~~)")
 
 
-def format_trace_lines(text: str) -> str:
-    """Turn accumulated progress lines into an explicit markdown list.
+def _inline_code(text: str) -> str:
+    """Wrap ``text`` in inline code with a delimiter the text can't break."""
+    longest = 0
+    run = 0
+    for char in text:
+        if char == "`":
+            run += 1
+            longest = max(longest, run)
+        else:
+            run = 0
+    ticks = "`" * (longest + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{ticks}{pad}{text}{pad}{ticks}"
+
+
+def _consume_fence(lines: List[str], start: int, fence: str) -> Tuple[List[str], int]:
+    """Collect the body of the fenced block opening at ``lines[start]``.
+
+    Returns the body lines (outer blank lines dropped, inner indentation kept)
+    and the index just past the closing fence.
+    """
+    body: List[str] = []
+    index = start + 1
+    while index < len(lines):
+        line = lines[index].rstrip()
+        if line.lstrip().startswith(fence):
+            index += 1
+            break
+        body.append(line)
+        index += 1
+    while body and not body[0].strip():
+        body.pop(0)
+    while body and not body[-1].strip():
+        body.pop()
+    return body, index
+
+
+def _split_trace_steps(text: str) -> List[str]:
+    """Split accumulated progress text into rendered execution-trace steps.
 
     Each tool / thinking line the gateway produced is one step, and steps are
     separated by single newlines — which Feishu treats as soft breaks it may
     collapse.  A list item per step makes the separation structural rather
     than whitespace-dependent.
 
+    One progress message can span several lines: on a markdown-capable
+    platform the gateway renders a ``terminal`` call as a header line plus a
+    fenced command block.  Treating those lines independently produced two
+    defects in the panel — the command was bulleted *inside* the fence (it
+    rendered as ``- <command>`` in the code box) and each of its lines counted
+    as its own step, so a single shell call inflated the "N 步" summary.  A
+    command that fits on one line is therefore folded onto its tool line as
+    inline code, the way the delegate adapter already renders a tool call; a
+    genuine multi-line script keeps its block but stays attached to that same
+    step.
+
     Lines that are already a markdown block (a list item, quote, heading,
-    table row or code fence) are passed through untouched.
+    table row) are passed through untouched.
     """
-    out: List[str] = []
-    for raw_line in str(text or "").split("\n"):
-        line = raw_line.rstrip()
-        if not line.strip():
-            continue
+    steps: List[str] = []
+    # True when the previous source line became a step that a code block on
+    # the very next line belongs to. Reset by blank lines and by a block that
+    # has already been folded, so a headerless fence (the gateway drops the
+    # repeated header for back-to-back terminal calls) never attaches itself
+    # to the preceding command.
+    foldable = False
+    lines = str(text or "").split("\n")
+    index = 0
+    while index < len(lines):
+        line = lines[index].rstrip()
         stripped = line.lstrip()
+        if not stripped:
+            foldable = False
+            index += 1
+            continue
+        if _FENCE_RE.match(stripped):
+            body, index = _consume_fence(lines, index, stripped[:3])
+            if not body:
+                foldable = False
+                continue
+            if len(body) == 1:
+                rendered = _inline_code(body[0].strip())
+                if foldable:
+                    head = steps[-1].rstrip()
+                    joiner = " " if head.endswith(":") else ": "
+                    steps[-1] = f"{head}{joiner}{rendered}"
+                else:
+                    steps.append(f"- {rendered}")
+            else:
+                fence = stripped[:3]
+                block = "\n".join([fence, *body, fence])
+                if foldable:
+                    steps[-1] = f"{steps[-1]}\n{block}"
+                else:
+                    steps.append(block)
+            foldable = False
+            continue
         if stripped.startswith(_BLOCK_PREFIXES) or _ORDERED_ITEM_RE.match(stripped):
-            out.append(line)
+            steps.append(line)
         else:
-            out.append(f"- {stripped}")
-    return "\n".join(out)
+            steps.append(f"- {stripped}")
+        foldable = True
+        index += 1
+    return steps
+
+
+def format_trace_lines(text: str) -> str:
+    """Render accumulated progress text as the card's execution-trace list."""
+    return "\n".join(_split_trace_steps(text))
 
 
 def normalize_markdown(text: str) -> str:

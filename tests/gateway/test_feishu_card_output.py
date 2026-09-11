@@ -875,6 +875,59 @@ def test_trace_formatting_does_not_double_bullet_existing_blocks():
     ]
 
 
+def test_a_one_line_command_folds_onto_its_tool_line():
+    """The gateway renders a terminal call as a header line plus a fence.
+
+    Bulleting those lines independently put the command *inside* the code box
+    as "- <command>" and counted every fence line as its own step. The command
+    belongs on the tool's own line, the way the delegate adapter renders it.
+    """
+    raw = "💻 terminal\n```\nmcporter call 'exa.web_search_exa'\n```"
+
+    assert feishu_cardkit.format_trace_lines(raw) == (
+        "- 💻 terminal: `mcporter call 'exa.web_search_exa'`"
+    )
+    assert feishu_cardkit._count_trace_steps(raw) == 1
+
+
+def test_a_headerless_command_block_does_not_attach_to_the_previous_step():
+    """Back-to-back terminal calls: the gateway drops the repeated header.
+
+    That second block is its own call, so folding it onto the first command's
+    line would claim one step ran two commands.
+    """
+    rendered = feishu_cardkit.format_trace_lines(
+        "💻 terminal\n```\nls\n```\n```\npwd\n```"
+    )
+
+    assert rendered.split("\n") == ["- 💻 terminal: `ls`", "- `pwd`"]
+
+
+def test_a_multi_line_command_keeps_its_block_as_one_step():
+    """Verbose mode streams the full command; a script can't fit on a line.
+
+    It stays a code block — but attached to its tool line and, critically,
+    with its own lines left alone instead of bulleted into the code box.
+    """
+    raw = "💻 terminal\n```\nfor f in *.py; do\n  echo $f\ndone\n```"
+
+    assert feishu_cardkit.format_trace_lines(raw).split("\n") == [
+        "- 💻 terminal",
+        "```",
+        "for f in *.py; do",
+        "  echo $f",
+        "done",
+        "```",
+    ]
+    assert feishu_cardkit._count_trace_steps(raw) == 1
+
+
+def test_a_command_containing_backticks_still_renders_as_inline_code():
+    rendered = feishu_cardkit.format_trace_lines("💻 terminal\n```\necho `date`\n```")
+
+    assert rendered == "- 💻 terminal: `` echo `date` ``"
+
+
 def test_card_copy_honours_env_overrides(monkeypatch):
     """Deployments rebrand the card without touching code."""
     import plugins.platforms.feishu.adapter as feishu_adapter

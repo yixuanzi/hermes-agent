@@ -2,6 +2,7 @@
  
 改造依据：`~/wiki/01-Raw/AIAgent/hermes-feishu-card-output.md`
 落地日期：2026-09-10（含真机截图反馈后的富文本渲染修正、委派卡片粒度调整、流式并发竞态修复、瞬态通知绕过卡片）
+　　　　　2026-09-11 追加：折叠区把主 agent 的 terminal 命令折回工具行（见「富文本渲染细节」）
 首个提交：`335002eccf feishu card output 0.1`
  
 > **当前为 opt-in**：`FEISHU_CARD_OUTPUT` 默认 **false**，不配置就完全走原来的 text/post 路径。要用卡片需显式置 true。
@@ -16,7 +17,7 @@
 | `gateway/run.py` | progress metadata 打 `hermes_progress`；心跳 metadata 打 `hermes_card_bypass`（**均仅 Feishu 平台**） |
 | `tools/a2a_delegate_tool.py` | `_A2ADelegateSession` 增加 `agent_name`（仅用于卡片标题展示） |
 | `.env.example` | 三个 FEISHU_CARD_* 示例项 |
-| `tests/gateway/test_feishu_card_output.py` | **新增** 71 个测试 |
+| `tests/gateway/test_feishu_card_output.py` | **新增** 75 个测试 |
  
 ## 卡片结构（JSON 2.0，走 CardKit API）
  
@@ -89,7 +90,12 @@
 ## 富文本渲染细节
  
 - **代码块围栏必须行首**：官方「若 content 中含有代码块，你需将代码块前后的空格去掉，否则可能导致代码渲染失败」。agent 常把围栏缩进在列表项里，`normalize_markdown()` 把围栏行 de-indent（代码内容本身的缩进保留）。
-- **单个 `\n` 是软换行，渲染时可能被忽略**（官方原话）。所以 trace 区不能靠 `\n` 分行 —— `format_trace_lines()` 把每个步骤渲染成 `- ` 列表项，已经是 markdown 块的行（`-`/`>`/`#`/`|`/`1.`/围栏）原样透传。body 区**不做任何改写**：那是 agent 自己的 markdown，标题/列表/表格/代码全依赖原始行结构。
+- **单个 `\n` 是软换行，渲染时可能被忽略**（官方原话）。所以 trace 区不能靠 `\n` 分行 —— `format_trace_lines()` 把每个步骤渲染成 `- ` 列表项，已经是 markdown 块的行（`-`/`>`/`#`/`|`/`1.`）原样透传。body 区**不做任何改写**：那是 agent 自己的 markdown，标题/列表/表格/代码全依赖原始行结构。
+- **一条 progress 消息 = 一个步骤，即使它跨多行**。主 agent 的 terminal 调用在 gateway 侧渲染成「`💻 terminal` 标题行 + 围栏命令块」（`gateway/run.py` 的 `_code_block_short` / `_code_block_full`），委派侧则是单行 `` `tool` terminal: cmd ``。逐行处理会有两个后果：命令行被当普通行加上 `- ` 前缀**落进代码框里**（真机截图里的 `- mcporter call 'exa.…'`），以及围栏的每一行各算一步，让「执行过程 · N 步」把一次 shell 调用算成 3~4 步。`_split_trace_steps()` 因此做围栏感知的切分：
+  - 单行命令 → 折叠到工具行做行内代码：``- 💻 terminal: `cmd` ``（与委派侧一致）；行内代码的反引号数按命令内最长反引号串加一，命令里含 `` ` `` 也不会破格；
+  - 多行脚本（verbose 模式）→ 保留代码块，但挂在同一个步骤下，块内各行不再被加前缀；
+  - 无标题的裸围栏（连续 terminal 调用时 gateway 会省掉重复标题）→ **不**折叠进上一条命令，自成一步，否则一步会显示成执行了两条命令。
+  `_count_trace_steps()` 直接数切分后的步骤，所以标题里的步数与看到的条目数一致。
 - markdown 元素支持完整 CommonMark（除 HTMLBlock）+ 部分 HTML；表格除表头外最多显示 5 行、单个元素最多 4 个表格。
 - `element_id` 规则：仅字母数字下划线、字母开头、**≤20 字符**（现有三个 id 均合规，有测试守着）。
 ## 卡片边界规则
@@ -145,8 +151,8 @@
  
 ## 验证状态
  
-- `tests/gateway/test_feishu_card_output.py` 71 passed
-- `tests/gateway -k "feishu or stream_consumer or stream_events or delegate"` 426 passed，2 failed
+- `tests/gateway/test_feishu_card_output.py` 75 passed（含 trace 围栏折叠的 4 个新测试）
+- `tests/gateway -k "feishu or stream_consumer or stream_events or delegate"` 430 passed，2 failed
   （`test_feishu_channel_prompts.py::test_inbound_event_carries_channel_prompt`、
   `test_stream_consumer_thread_routing.py::TestFeishuFallbackThreadRouting::test_create_uses_thread_id_when_available`
   —— 已用改前基线复现，属临时验证环境未 bind lark SDK 全局的既有失败，非本次回归）

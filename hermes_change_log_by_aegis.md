@@ -184,6 +184,9 @@ Intent: Measure the 30 KB card limit in UTF-8 bytes, not characters: CJK text co
 Feature: Markdown fidelity for the Feishu renderer.
 Intent: De-indent fenced code-block markers so a fence indented inside a list item still renders as code, and render each execution-trace step as an explicit list item because a single newline is a soft break the renderer may collapse. Leave the reply body unmodified: it is the agent's own markdown, where headings, lists, tables, and fences all depend on the exact line structure arriving intact.
 
+Feature: Execution-trace step segmentation.
+Intent: Treat one progress message as one step even when it spans several lines. The gateway renders a main-agent `terminal` call as a header line plus a fenced command block, so a line-by-line pass bulleted the command inside the code box and counted each fence line as its own step, inflating the step summary. Fold a single-line command onto its tool line as inline code — matching how the delegate adapter already renders a tool call — keep a genuine multi-line script as a block attached to that same step with its own lines untouched, and do not fold a headerless block (emitted for back-to-back terminal calls) onto the preceding command, because it is a separate call.
+
 Feature: Card update resilience.
 Intent: Re-queue a rejected element update instead of dropping it — bounded, so a permanent failure cannot spin — and re-open `streaming_mode` before retrying once when Feishu closes it after an idle period, so a turn that pauses on a slow tool does not lose the remainder of its answer. Serialize card creation per route so concurrent progress and content writers cannot each open a card for the same turn.
 
