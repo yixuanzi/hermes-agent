@@ -34,5 +34,8 @@ describe("WikiPage structure", () => {
     expect(html).toContain("wiki-detail-pane");
     expect(html).toContain("wiki-tree-scroll");
     expect(html).toContain("wiki-detail-head");
+    expect(html).toContain("Document view mode");
+    expect(html).toContain("Browse mode");
+    expect(html).toContain("Code mode");
   });
 });

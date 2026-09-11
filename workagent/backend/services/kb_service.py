@@ -105,3 +105,44 @@ def read_document(path: str) -> dict[str, Any]:
         "modified": int(target.stat().st_mtime),
         "content": content,
     }
+
+
+def write_document(path: str, content: str) -> dict[str, Any]:
+    """Write UTF-8 text to an existing file inside the wiki root."""
+    if not path:
+        raise HTTPException(status_code=400, detail="File path is required.")
+
+    root = _wiki_root()
+    target = _safe_resolve(path, root)
+
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    if target.is_dir():
+        raise HTTPException(status_code=400, detail=f"Path is a directory, not a file: {path}")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail=f"Path is not a regular file: {path}")
+
+    try:
+        content_bytes = content.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise HTTPException(status_code=400, detail="Content must be valid UTF-8 text.") from exc
+    if len(content_bytes) > _MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Content too large ({len(content_bytes)} bytes, max {_MAX_FILE_SIZE}).",
+        )
+
+    try:
+        target.write_bytes(content_bytes)
+        stat = target.stat()
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=f"Permission denied: {exc}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Failed to write knowledge base document.") from exc
+
+    return {
+        "ok": True,
+        "path": str(target.relative_to(root)),
+        "size": stat.st_size,
+        "modified": int(stat.st_mtime),
+    }

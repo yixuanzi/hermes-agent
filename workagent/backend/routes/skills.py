@@ -22,6 +22,17 @@ def build_skills_router() -> APIRouter:
         except skill_service.SkillNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @router.delete("/{skill_name}")
+    async def delete_skill(skill_name: str):
+        try:
+            return skill_service.delete_skill(skill_name)
+        except skill_service.SkillNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except skill_service.SkillDeleteForbiddenError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except skill_service.SkillDeleteFailedError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     @router.get("/{skill_name}/appendix")
     async def get_skill_appendix(skill_name: str, path: str = Query(default="", alias="path")):
         try:

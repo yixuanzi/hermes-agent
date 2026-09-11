@@ -7,7 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fetchJSON } from "../lib/api";
+import { ApiError, fetchJSON } from "../lib/api";
 import { SkillsPage } from "./SkillsPage";
 
 vi.mock("../lib/api", () => ({
@@ -40,6 +40,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   if (rootRef && containerRef) {
     await act(async () => {
       rootRef?.unmount();
@@ -68,6 +69,57 @@ async function mountSkillsPage() {
 }
 
 describe("SkillsPage behavior", () => {
+  it("shows disabled counts for the inventory, categories, and search results", async () => {
+    fetchJSONMock.mockImplementation((url: string) => {
+      if (url === "/api/skills") {
+        return Promise.resolve([
+          { name: "enabled-skill", description: "enabled", enabled: true, category: "ops", path: "/tmp/enabled" },
+          { name: "disabled-one", description: "disabled one", enabled: false, category: "ops", path: "/tmp/one" },
+          { name: "disabled-two", description: "disabled two", enabled: false, category: "docs", path: "/tmp/two" },
+          { name: "always-enabled", description: "always enabled", enabled: true, category: "qa", path: "/tmp/qa" },
+        ]) as Promise<unknown>;
+      }
+      if (url === "/api/skills/enabled-skill") {
+        return Promise.resolve({
+          name: "enabled-skill",
+          path: "/tmp/enabled",
+          content: "# enabled-skill",
+          appendix: [],
+        }) as Promise<unknown>;
+      }
+      throw new Error(`Unexpected URL in test: ${url}`);
+    });
+
+    await mountSkillsPage();
+
+    await waitForAssert(() => {
+      const countLabels = Array.from(
+        (containerRef as HTMLElement).querySelectorAll<HTMLElement>(".skills-disabled-count"),
+      ).map((node) => node.textContent);
+      expect(countLabels).toContain("2 disabled");
+      expect(countLabels).toContain("0 disabled");
+      expect(countLabels).toContain("1 disabled");
+    });
+
+    const searchInput = (containerRef as HTMLElement).querySelector(
+      'input[aria-label="Search skills"]',
+    ) as HTMLInputElement | null;
+    expect(searchInput).not.toBeNull();
+
+    await act(async () => {
+      if (!searchInput) return;
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      valueSetter?.call(searchInput, "enabled-skill");
+      searchInput.dispatchEvent(new Event("input", { bubbles: true }));
+      searchInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    await waitForAssert(() => {
+      expect((containerRef as HTMLElement).querySelector(".skills-counts")?.textContent).toContain("0 disabled");
+    });
+  });
+
   it("loads detail and appendix content from the new skills APIs", async () => {
     fetchJSONMock.mockImplementation((url: string) => {
       if (url === "/api/skills") {
@@ -181,6 +233,109 @@ describe("SkillsPage behavior", () => {
       expect(text).toContain("Updated threat-hunt, but failed to refresh skills from /api/skills.");
       expect(text).not.toContain("Operation Completed");
       expect(text).not.toContain("threat-hunt enabled successfully.");
+    });
+  });
+
+  it("confirms, deletes the selected skill, and selects the next skill", async () => {
+    let deleted = false;
+    fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/api/skills/s1" && init?.method === "DELETE") {
+        deleted = true;
+        return Promise.resolve({ ok: true, name: "s1" }) as Promise<unknown>;
+      }
+      if (url === "/api/skills") {
+        return Promise.resolve(
+          deleted
+            ? [{ name: "s2", description: "skill two", enabled: true, category: "devops", path: "/tmp/s2" }]
+            : [
+                { name: "s1", description: "skill one", enabled: true, category: "", path: "/tmp/s1" },
+                { name: "s2", description: "skill two", enabled: true, category: "devops", path: "/tmp/s2" },
+              ],
+        ) as Promise<unknown>;
+      }
+      if (url === "/api/skills/s1") {
+        return Promise.resolve({ name: "s1", path: "/tmp/s1", content: "# S1", appendix: [] }) as Promise<unknown>;
+      }
+      if (url === "/api/skills/s2") {
+        return Promise.resolve({ name: "s2", path: "/tmp/s2", content: "# S2", appendix: [] }) as Promise<unknown>;
+      }
+      throw new Error(`Unexpected URL in test: ${url}`);
+    });
+
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await mountSkillsPage();
+
+    await waitForAssert(() => {
+      expect((containerRef as HTMLElement).querySelector('button[aria-label="Delete skill s1"]')).not.toBeNull();
+    });
+
+    const deleteButton = (containerRef as HTMLElement).querySelector(
+      'button[aria-label="Delete skill s1"]',
+    ) as HTMLButtonElement | null;
+    await act(async () => {
+      deleteButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    await waitForAssert(() => {
+      expect(confirmSpy).toHaveBeenCalledWith(
+        'Delete skill "s1" and everything in its folder? This cannot be undone.',
+      );
+      expect(fetchJSONMock).toHaveBeenCalledWith("/api/skills/s1", { method: "DELETE" });
+      expect((containerRef as HTMLElement).textContent).toContain("# S2");
+      expect((containerRef as HTMLElement).querySelector('button[aria-label="Delete skill s1"]')).toBeNull();
+    });
+  });
+
+  it("does not delete when confirmation is cancelled and surfaces protected-path errors", async () => {
+    fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/api/skills") {
+        return Promise.resolve([
+          { name: "protected-skill", description: "protected", enabled: true, category: "", path: "/tmp/protected" },
+        ]) as Promise<unknown>;
+      }
+      if (url === "/api/skills/protected-skill") {
+        if (init?.method === "DELETE") {
+          return Promise.reject(
+            new Error(JSON.stringify({ detail: "Only skills inside the current profile's local skills directory can be deleted." })),
+          ) as Promise<unknown>;
+        }
+        return Promise.resolve({
+          name: "protected-skill",
+          path: "/tmp/protected",
+          content: "# protected-skill",
+          appendix: [],
+        }) as Promise<unknown>;
+      }
+      throw new Error(`Unexpected URL in test: ${url}`);
+    });
+
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await mountSkillsPage();
+
+    await waitForAssert(() => {
+      expect((containerRef as HTMLElement).querySelector('button[aria-label="Delete skill protected-skill"]')).not.toBeNull();
+    });
+
+    const deleteButton = (containerRef as HTMLElement).querySelector(
+      'button[aria-label="Delete skill protected-skill"]',
+    ) as HTMLButtonElement | null;
+    await act(async () => {
+      deleteButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(fetchJSONMock).not.toHaveBeenCalledWith("/api/skills/protected-skill", { method: "DELETE" });
+
+    confirmSpy.mockReturnValue(true);
+    await act(async () => {
+      deleteButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    await waitForAssert(() => {
+      expect((containerRef as HTMLElement).textContent).toContain(
+        "Only skills inside the current profile's local skills directory can be deleted.",
+      );
     });
   });
 });

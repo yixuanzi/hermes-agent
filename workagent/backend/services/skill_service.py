@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from typing import Any
 
 from hermes_cli.config import load_config
@@ -12,6 +13,14 @@ _MAX_APPENDIX_SIZE = 2 * 1024 * 1024  # 2 MB read limit for appendix files
 
 class SkillNotFoundError(Exception):
     """Raised when a skill cannot be resolved by name."""
+
+
+class SkillDeleteForbiddenError(Exception):
+    """Raised when a skill directory is not safe to delete from Workagent."""
+
+
+class SkillDeleteFailedError(Exception):
+    """Raised when the skill directory cannot be removed."""
 
 
 def _iter_skill_roots() -> list[Path]:
@@ -129,6 +138,99 @@ def get_skill_detail(skill_name: str) -> dict[str, Any]:
         "content": content,
         "appendix": _list_appendix_files(skill_dir),
     }
+
+
+def _has_path_redirect(path: Path, root: Path) -> bool:
+    """Return whether any component of *path* is a symlink or junction."""
+    try:
+        relative = path.absolute().relative_to(root.absolute())
+    except ValueError:
+        return False
+
+    current = root
+    for component in relative.parts:
+        current = current / component
+        try:
+            if current.is_symlink() or (
+                hasattr(current, "is_junction") and current.is_junction()
+            ):
+                return True
+        except OSError:
+            return True
+    return False
+
+
+def _validate_local_delete_target(skill_dir: Path) -> None:
+    """Validate a discovered skill directory before recursively deleting it."""
+    from agent.skill_utils import is_org_mirror_path
+    from tools.skills_tool import SKILLS_DIR
+
+    local_root = Path(SKILLS_DIR)
+    try:
+        resolved_root = local_root.resolve()
+        resolved_skill_dir = skill_dir.resolve()
+    except OSError as exc:
+        raise SkillDeleteForbiddenError(
+            f"Cannot safely delete skill directory '{skill_dir}': path resolution failed."
+        ) from exc
+
+    if _has_path_redirect(skill_dir, local_root):
+        raise SkillDeleteForbiddenError(
+            "Cannot delete a skill reached through a symlink or junction."
+        )
+    if resolved_skill_dir == resolved_root:
+        raise SkillDeleteForbiddenError(
+            "Cannot delete the active skills root itself."
+        )
+    try:
+        resolved_skill_dir.relative_to(resolved_root)
+    except ValueError as exc:
+        raise SkillDeleteForbiddenError(
+            "Only skills inside the current profile's local skills directory can be deleted."
+        ) from exc
+
+    if is_org_mirror_path(skill_dir, local_root):
+        raise SkillDeleteForbiddenError(
+            "Cannot delete an organisation-shared skill from this profile."
+        )
+
+
+def delete_skill(skill_name: str) -> dict[str, Any]:
+    """Hard-delete a skill package from the current profile's local skills root."""
+    entry = _resolve_skill_entry(skill_name)
+    skill_dir = Path(entry["path"])
+    _validate_local_delete_target(skill_dir)
+
+    if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").is_file():
+        raise SkillNotFoundError(f"Skill '{skill_name}' not found.")
+
+    try:
+        shutil.rmtree(skill_dir)
+    except OSError as exc:
+        raise SkillDeleteFailedError(
+            f"Failed to delete skill '{skill_name}'."
+        ) from exc
+
+    # Avoid leaving an empty category directory behind, while never removing
+    # the profile's skills root itself.
+    from tools.skills_tool import SKILLS_DIR
+
+    parent = skill_dir.parent
+    local_root = Path(SKILLS_DIR)
+    try:
+        if parent.resolve() != local_root.resolve() and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:
+        pass
+
+    try:
+        from agent.prompt_builder import clear_skills_system_prompt_cache
+
+        clear_skills_system_prompt_cache(clear_snapshot=True)
+    except Exception:
+        pass
+
+    return {"ok": True, "name": skill_name}
 
 
 def get_skill_appendix_content(skill_name: str, appendix_path: str) -> dict[str, Any]:

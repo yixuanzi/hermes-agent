@@ -256,6 +256,7 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 - `GET /` （skill item 含 `path` 字段）
 - `GET /{skill_name}` （返回 `content` + `appendix[]`）
 - `GET /{skill_name}/appendix?path={path}` （返回附件文本内容）
+- `DELETE /{skill_name}` （删除当前 profile 本地 skills root 下的整个 skill 文件夹）
 - `PUT /toggle`
 - `POST /reload`
 
@@ -274,6 +275,10 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 前缀：`/api/kb`
 - `GET /tree?cwd=` （列出指定目录下的文件和文件夹，`cwd` 为空时列出根目录）
 - `GET /documents?path=` （返回指定文件的文本内容）
+- `PUT /documents` （写回已存在的文件，JSON 请求体为 `{"path":"relative/path.md","content":"..."}`）
+
+`PUT /documents` 成功返回 `{"ok":true,"path":"...","size":123,"modified":1720000000}`。
+写入仅允许知识库 root 下的现有普通文件，沿用 2 MB 限制；路径遍历、root 外路径、目录和外部符号链接会被拒绝。
 
 环境变量：`WORKAGENT_WIKI_PATH` 指定知识库根目录，未设置或路径不存在时返回 503。
 

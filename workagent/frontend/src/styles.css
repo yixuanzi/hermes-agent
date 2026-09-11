@@ -2100,6 +2100,24 @@ select:focus {
   gap: calc(8px * var(--density-scale));
 }
 
+.skills-counts,
+.skills-detail-head-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: calc(8px * var(--density-scale));
+  min-width: 0;
+}
+
+.skills-disabled-count {
+  color: var(--workagent-danger);
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  font-size: calc(11px * var(--density-scale));
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
 .skills-search {
   display: flex;
   align-items: center;
@@ -2205,6 +2223,12 @@ select:focus {
   min-width: calc(48px * var(--density-scale));
   color: #dff8ff;
   background: linear-gradient(180deg, rgba(16, 53, 67, 0.92), rgba(10, 31, 42, 0.96));
+}
+
+.skills-delete-button {
+  min-height: calc(30px * var(--density-scale));
+  padding: calc(4px * var(--density-scale)) calc(10px * var(--density-scale));
+  font-size: calc(12px * var(--density-scale));
 }
 
 .skills-detail-pane {
@@ -2470,8 +2494,157 @@ select:focus {
   gap: calc(8px * var(--density-scale));
 }
 
-.wiki-detail-content {
+.wiki-detail-head-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: calc(8px * var(--density-scale));
+  min-width: 0;
+}
+
+.wiki-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--workagent-border);
+  border-radius: var(--workagent-radius-sm);
+  background: rgba(3, 12, 22, 0.72);
+}
+
+.wiki-mode-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: calc(28px * var(--density-scale));
+  padding: calc(3px * var(--density-scale)) calc(8px * var(--density-scale));
+  border: 1px solid transparent;
+  border-radius: calc(var(--workagent-radius-sm) - 2px);
+  background: transparent;
+  color: var(--workagent-muted);
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  font-size: calc(11px * var(--density-scale));
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.wiki-mode-button:hover:not(:disabled) {
+  color: var(--workagent-text);
+  border-color: var(--workagent-border-strong);
+}
+
+.wiki-mode-button.active {
+  color: var(--workagent-accent);
+  border-color: rgba(45, 255, 222, 0.42);
+  background: rgba(45, 255, 222, 0.09);
+  box-shadow: 0 0 12px rgba(45, 255, 222, 0.08);
+}
+
+.wiki-mode-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.wiki-editor-shell,
+.wiki-preview-shell {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
   margin-top: 10px;
+}
+
+.wiki-editor-label {
+  margin-bottom: 6px;
+  color: var(--workagent-muted);
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  font-size: calc(11px * var(--density-scale));
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.wiki-document-editor {
+  flex: 1;
+  min-height: 260px;
+  width: 100%;
+  resize: none;
+  box-sizing: border-box;
+  padding: 16px 18px;
+  border: 1px solid var(--workagent-accent-strong);
+  border-radius: var(--workagent-radius-md);
+  outline: none;
+  background: rgba(3, 11, 21, 0.86);
+  color: var(--workagent-text);
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.65;
+  caret-color: var(--workagent-accent);
+  box-shadow: inset 0 0 24px rgba(45, 255, 222, 0.025);
+}
+
+.wiki-document-editor:focus {
+  box-shadow: 0 0 0 1px rgba(45, 255, 222, 0.22), inset 0 0 24px rgba(45, 255, 222, 0.04);
+}
+
+.wiki-document-editor:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.wiki-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 10px;
+}
+
+.wiki-dirty-status,
+.wiki-preview-status {
+  color: var(--workagent-warning, #ffd166);
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  font-size: calc(11px * var(--density-scale));
+  font-weight: 600;
+}
+
+.wiki-saved-status,
+.wiki-save-success {
+  color: var(--workagent-accent);
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  font-size: calc(11px * var(--density-scale));
+}
+
+.wiki-save-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: calc(30px * var(--density-scale));
+  padding: calc(4px * var(--density-scale)) calc(11px * var(--density-scale));
+  border: 1px solid var(--workagent-accent-strong);
+  border-radius: var(--workagent-radius-sm);
+  background: rgba(45, 255, 222, 0.12);
+  color: var(--workagent-accent);
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  font-size: calc(11px * var(--density-scale));
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.wiki-save-button:hover:not(:disabled) {
+  background: rgba(45, 255, 222, 0.2);
+}
+
+.wiki-save-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.wiki-preview-status {
+  margin-bottom: 6px;
+}
+
+.wiki-detail-content {
   flex: 1;
   min-height: 0;
   overflow-y: auto;

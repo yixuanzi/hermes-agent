@@ -70,3 +70,8 @@ class SkillToggleRequest(BaseModel):
 
 class MemoryWriteRequest(BaseModel):
     content: str
+
+
+class KbDocumentWriteRequest(BaseModel):
+    path: str = Field(description="File path relative to the knowledge base root")
+    content: str

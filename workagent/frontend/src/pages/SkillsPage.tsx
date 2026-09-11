@@ -23,6 +23,12 @@ type SkillDetail = {
   appendix: SkillAppendixItem[];
 };
 
+type SkillGroup = {
+  category: string;
+  items: SkillRow[];
+  disabledCount: number;
+};
+
 type SkillAppendixContent = {
   name: string;
   path: string;
@@ -34,6 +40,16 @@ function normalizeCategory(category: string | undefined): string {
   return cleaned.length > 0 ? cleaned : "misc";
 }
 
+function getApiErrorDetail(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  try {
+    const payload = JSON.parse(error.message) as { detail?: unknown };
+    return typeof payload.detail === "string" && payload.detail ? payload.detail : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function SkillsPage() {
   const [skills, setSkills] = useState<SkillRow[]>([]);
   const [error, setError] = useState("");
@@ -41,6 +57,7 @@ export function SkillsPage() {
   const [selectedSkillName, setSelectedSkillName] = useState("");
 
   const [pendingSkill, setPendingSkill] = useState("");
+  const [pendingDeleteSkill, setPendingDeleteSkill] = useState("");
   const [actionError, setActionError] = useState("");
   const [actionSuccess, setActionSuccess] = useState("");
 
@@ -130,6 +147,36 @@ export function SkillsPage() {
     }
   }
 
+  async function deleteSkill(name: string) {
+    if (!name) return;
+    const confirmed = window.confirm(
+      `Delete skill "${name}" and everything in its folder? This cannot be undone.`,
+    );
+    if (!confirmed) return;
+
+    setPendingDeleteSkill(name);
+    setActionError("");
+    setActionSuccess("");
+    try {
+      await fetchJSON(`/api/skills/${encodeURIComponent(name)}`, { method: "DELETE" });
+      setDetail(null);
+      setSelectedAppendixPath("");
+      setAppendixContent(null);
+      const refreshSucceeded = await loadSkills();
+      if (!refreshSucceeded) {
+        setSkills((current) => current.filter((skill) => skill.name !== name));
+        setSelectedSkillName((current) => (current === name ? "" : current));
+        setActionError(`Deleted ${name}, but failed to refresh skills from /api/skills.`);
+        return;
+      }
+      setActionSuccess(`${name} deleted successfully.`);
+    } catch (error) {
+      setActionError(getApiErrorDetail(error, `Failed to delete ${name}.`));
+    } finally {
+      setPendingDeleteSkill("");
+    }
+  }
+
   useEffect(() => {
     void loadSkills();
   }, []);
@@ -160,7 +207,7 @@ export function SkillsPage() {
     });
   }, [skills, normalizedQuery]);
 
-  const groupedSkills = useMemo(() => {
+  const groupedSkills = useMemo<SkillGroup[]>(() => {
     const groups = new Map<string, SkillRow[]>();
     for (const skill of filteredSkills) {
       const category = normalizeCategory(skill.category);
@@ -172,6 +219,7 @@ export function SkillsPage() {
       .map(([category, items]) => ({
         category,
         items: items.sort((a, b) => a.name.localeCompare(b.name)),
+        disabledCount: items.filter((skill) => !skill.enabled).length,
       }))
       .sort((a, b) => a.category.localeCompare(b.category));
   }, [filteredSkills]);
@@ -189,6 +237,7 @@ export function SkillsPage() {
   }, [groupedSkills]);
 
   const selectedSkill = skills.find((skill) => skill.name === selectedSkillName) || null;
+  const disabledSkillCount = filteredSkills.filter((skill) => !skill.enabled).length;
 
   return (
     <section className="skills-workbench-page">
@@ -197,9 +246,12 @@ export function SkillsPage() {
         <article className="detail-panel skills-list-pane">
           <div className="skills-list-head">
             <h3>Skills</h3>
-            <span className="status-badge">
-              {isSearching ? `${filteredSkills.length} / ${skills.length}` : `${skills.length} total`}
-            </span>
+            <div className="skills-counts" aria-label="Skill counts">
+              <span className="status-badge">
+                {isSearching ? `${filteredSkills.length} / ${skills.length}` : `${skills.length} total`}
+              </span>
+              <span className="skills-disabled-count">{disabledSkillCount} disabled</span>
+            </div>
           </div>
           <div className="skills-search">
             <input
@@ -248,6 +300,7 @@ export function SkillsPage() {
                   <h4>{group.category}</h4>
                   <span className="skills-category-head-right">
                     <span className="status-badge">{group.items.length}</span>
+                    <span className="skills-disabled-count">{group.disabledCount} disabled</span>
                     <span className="skills-category-chevron" aria-hidden="true">
                       {isSearching || !collapsedCategories[group.category] ? "▾" : "▸"}
                     </span>
@@ -273,7 +326,7 @@ export function SkillsPage() {
                           <button
                             type="button"
                             className="ghost-button skills-mini-toggle"
-                            disabled={pendingSkill === skill.name}
+                            disabled={pendingSkill === skill.name || pendingDeleteSkill === skill.name}
                             onClick={(event) => {
                               event.stopPropagation();
                               void toggleSkill(skill.name, !skill.enabled);
@@ -297,7 +350,19 @@ export function SkillsPage() {
           <div className="skills-detail-head">
             <h3>{selectedSkillName || "Skill Detail"}</h3>
             {selectedSkill ? (
-              <span className="status-badge">{selectedSkill.enabled ? "Enabled" : "Disabled"}</span>
+              <div className="skills-detail-head-actions">
+                <span className="status-badge">{selectedSkill.enabled ? "Enabled" : "Disabled"}</span>
+                <button
+                  type="button"
+                  className="ghost-button danger-button skills-delete-button"
+                  disabled={Boolean(pendingSkill || pendingDeleteSkill)}
+                  onClick={() => void deleteSkill(selectedSkill.name)}
+                  aria-label={`Delete skill ${selectedSkill.name}`}
+                  title="Delete skill"
+                >
+                  {pendingDeleteSkill === selectedSkill.name ? "Deleting..." : "Delete"}
+                </button>
+              </div>
             ) : null}
           </div>
           {selectedSkill?.path ? (
@@ -383,6 +448,13 @@ export function SkillsPage() {
               kind="loading"
               title="Applying Toggle"
               message={`Updating ${pendingSkill} via /api/skills/toggle.`}
+            />
+          ) : null}
+          {pendingDeleteSkill ? (
+            <StateBlock
+              kind="loading"
+              title="Deleting Skill"
+              message={`Deleting ${pendingDeleteSkill} and its folder.`}
             />
           ) : null}
           {actionSuccess ? <StateBlock kind="success" title="Operation Completed" message={actionSuccess} /> : null}
