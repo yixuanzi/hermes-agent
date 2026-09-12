@@ -63,8 +63,7 @@ const ROUTING_STATUS_TO_API: Record<RoutingRuleStatus, BackendRoutingStatus> = {
 };
 
 export function backendAgentToUi(agent: BackendAgent | BackendOverviewAgent): Agent {
-  const headerEntries = Object.entries(agent.headers || {});
-  const [authHeaderKey = 'Authorization', authHeaderValue = ''] = headerEntries[0] || [];
+  const headers = Object.entries(agent.headers || {}).map(([key, value]) => ({ key, value }));
   return {
     id: agent.agent_id,
     name: agent.agent_id,
@@ -75,17 +74,20 @@ export function backendAgentToUi(agent: BackendAgent | BackendOverviewAgent): Ag
     lastUpdated: 'Synced',
     skillDescription: agent.extcapabilities.join('\n'),
     a2aAddr: agent.url,
-    authHeaderKey,
-    authHeaderValue,
+    headers,
     extCapabilities: agent.extcapabilities,
   };
 }
 
 export function uiAgentDraftToApi(agent: AgentDraft): Omit<BackendAgent, 'agent_id'> {
-  const headers =
-    agent.authHeaderValue.trim().length > 0
-      ? { [agent.authHeaderKey.trim() || 'Authorization']: agent.authHeaderValue.trim() }
-      : {};
+  const headers: Record<string, string> = {};
+  for (const entry of agent.headers) {
+    const key = entry.key.trim();
+    const value = entry.value.trim();
+    if (key && value) {
+      headers[key] = value;
+    }
+  }
 
   return {
     url: agent.url.trim(),

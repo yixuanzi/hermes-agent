@@ -100,6 +100,11 @@ export interface A2AContext {
   refresh_error: string | null;
 }
 
+export interface AgentHeaderEntry {
+  key: string;
+  value: string;
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -110,8 +115,7 @@ export interface Agent {
   lastUpdated: string;
   skillDescription?: string;
   a2aAddr?: string;
-  authHeaderKey?: string;
-  authHeaderValue?: string;
+  headers?: AgentHeaderEntry[];
   extCapabilities?: string[];
 }
 
@@ -131,8 +135,7 @@ export interface AgentDraft {
   url: string;
   description: string;
   status: AgentStatus;
-  authHeaderKey: string;
-  authHeaderValue: string;
+  headers: AgentHeaderEntry[];
   extCapabilities: string[];
 }
 

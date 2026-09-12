@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Activity, AlertCircle, Edit2, Plus, RefreshCw, Search, Trash2, Users, X } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import { alertApiError } from '../lib/api';
-import { Agent, AgentDraft } from '../types';
+import { Agent, AgentDraft, AgentHeaderEntry } from '../types';
 
 interface AgentTabProps {
   agents: Agent[];
@@ -32,8 +32,7 @@ export default function AgentTab({
   const [formStatus, setFormStatus] = useState<'Active' | 'Idle' | 'Offline'>('Active');
   const [formDesc, setFormDesc] = useState('');
   const [formA2aAddr, setFormA2aAddr] = useState('');
-  const [formAuthHeaderKey, setFormAuthHeaderKey] = useState('Authorization');
-  const [formAuthHeaderValue, setFormAuthHeaderValue] = useState('');
+  const [formHeaders, setFormHeaders] = useState<AgentHeaderEntry[]>([{ key: 'Authorization', value: '' }]);
   const [formCapabilities, setFormCapabilities] = useState<string[]>([]);
 
   const total = agents.length;
@@ -57,8 +56,7 @@ export default function AgentTab({
     setFormStatus('Active');
     setFormDesc('');
     setFormA2aAddr('');
-    setFormAuthHeaderKey('Authorization');
-    setFormAuthHeaderValue('');
+    setFormHeaders([{ key: 'Authorization', value: '' }]);
     setFormCapabilities([]);
     setError('');
   }
@@ -75,8 +73,11 @@ export default function AgentTab({
     setFormStatus(agent.status);
     setFormDesc(agent.description);
     setFormA2aAddr(agent.a2aAddr || '');
-    setFormAuthHeaderKey(agent.authHeaderKey || 'Authorization');
-    setFormAuthHeaderValue(agent.authHeaderValue || '');
+    setFormHeaders(
+      agent.headers && agent.headers.length > 0
+        ? agent.headers.map((header) => ({ ...header }))
+        : [{ key: 'Authorization', value: '' }],
+    );
     setFormCapabilities([...(agent.extCapabilities || [])]);
     setError('');
     setIsModalOpen(true);
@@ -93,6 +94,26 @@ export default function AgentTab({
     } catch (caughtError) {
       alertApiError(caughtError, '删除智能体失败。');
     }
+  }
+
+  function handleAddHeader() {
+    setFormHeaders((current) => [...current, { key: '', value: '' }]);
+  }
+
+  function handleChangeHeaderKey(index: number, value: string) {
+    setFormHeaders((current) => current.map((header, currentIndex) => (
+      currentIndex === index ? { ...header, key: value } : header
+    )));
+  }
+
+  function handleChangeHeaderValue(index: number, value: string) {
+    setFormHeaders((current) => current.map((header, currentIndex) => (
+      currentIndex === index ? { ...header, value } : header
+    )));
+  }
+
+  function handleRemoveHeader(index: number) {
+    setFormHeaders((current) => current.filter((_, currentIndex) => currentIndex !== index));
   }
 
   function handleAddCapability() {
@@ -124,8 +145,7 @@ export default function AgentTab({
       url: formA2aAddr.trim(),
       description: formDesc.trim(),
       status: formStatus,
-      authHeaderKey: formAuthHeaderKey.trim() || 'Authorization',
-      authHeaderValue: formAuthHeaderValue.trim(),
+      headers: formHeaders,
       extCapabilities: formCapabilities,
     };
 
@@ -357,26 +377,48 @@ export default function AgentTab({
                     />
                   </div>
 
-                  <div className="space-y-1">
-                    <label className="text-[9px] font-mono font-bold uppercase tracking-wider text-slate-500">验证头字段</label>
-                    <input
-                      type="text"
-                      value={formAuthHeaderKey}
-                      onChange={(event) => setFormAuthHeaderKey(event.target.value)}
-                      placeholder="Authorization"
-                      className="w-full rounded border border-slate-800 bg-[#020408] px-2.5 py-1.5 font-mono text-xs text-white placeholder-slate-700 focus:border-cyan-500 focus:outline-none"
-                    />
-                  </div>
-
-                  <div className="space-y-1">
-                    <label className="text-[9px] font-mono font-bold uppercase tracking-wider text-slate-500">验证字段值</label>
-                    <input
-                      type="text"
-                      value={formAuthHeaderValue}
-                      onChange={(event) => setFormAuthHeaderValue(event.target.value)}
-                      placeholder="Bearer token"
-                      className="w-full rounded border border-slate-800 bg-[#020408] px-2.5 py-1.5 font-mono text-xs text-white placeholder-slate-700 focus:border-cyan-500 focus:outline-none"
-                    />
+                  <div className="col-span-2 space-y-1">
+                    <div className="flex items-center justify-between gap-3">
+                      <label className="text-[9px] font-mono font-bold uppercase tracking-wider text-slate-500">验证头字段</label>
+                      <button
+                        type="button"
+                        onClick={handleAddHeader}
+                        aria-label="添加验证头"
+                        className="flex items-center gap-1 rounded border border-cyan-900/60 bg-cyan-950/20 px-2 py-1 text-[10px] font-mono font-semibold text-cyan-300 transition-colors hover:border-cyan-500 hover:bg-cyan-950/50 hover:text-cyan-100"
+                      >
+                        <Plus className="h-3 w-3" /> 添加验证头
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {formHeaders.map((header, index) => (
+                        <div key={index} className="flex items-stretch gap-2">
+                          <input
+                            type="text"
+                            value={header.key}
+                            onChange={(event) => handleChangeHeaderKey(index, event.target.value)}
+                            aria-label={`验证头字段名 ${index + 1}`}
+                            placeholder="Authorization"
+                            className="w-2/5 rounded border border-slate-800 bg-[#020408] px-2.5 py-1.5 font-mono text-xs text-white placeholder-slate-700 focus:border-cyan-500 focus:outline-none"
+                          />
+                          <input
+                            type="text"
+                            value={header.value}
+                            onChange={(event) => handleChangeHeaderValue(index, event.target.value)}
+                            aria-label={`验证头字段值 ${index + 1}`}
+                            placeholder="Bearer token"
+                            className="flex-1 rounded border border-slate-800 bg-[#020408] px-2.5 py-1.5 font-mono text-xs text-white placeholder-slate-700 focus:border-cyan-500 focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveHeader(index)}
+                            aria-label={`删除验证头 ${index + 1}`}
+                            className="shrink-0 rounded p-1.5 text-slate-600 transition-colors hover:bg-rose-950/40 hover:text-rose-300"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
 
                   <div className="col-span-2 space-y-1">
