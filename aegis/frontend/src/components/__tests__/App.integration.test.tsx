@@ -52,6 +52,7 @@ const adminUser: AuthenticatedUser = {
   status: 'enabled',
   create_time: '2026-06-17T00:00:00Z',
   last_login: '2026-06-17T01:00:00Z',
+  role: 'admin',
   is_admin: true,
 };
 
@@ -62,6 +63,7 @@ const analystUser: AuthenticatedUser = {
   status: 'enabled',
   create_time: '2026-06-17T00:00:00Z',
   last_login: '2026-06-17T01:00:00Z',
+  role: 'user',
   is_admin: false,
 };
 
@@ -299,6 +301,7 @@ describe('Aegis App integration', () => {
           status: 'enabled',
           create_time: '2026-06-17T02:00:00Z',
           last_login: null,
+          role: 'user',
           is_admin: false,
         });
         return jsonResponse(users[users.length - 1], 201);
@@ -347,6 +350,9 @@ describe('Aegis App integration', () => {
     await screen.findByRole('button', { name: /agent orchestration/i });
     expect(window.location.pathname).toBe('/overview');
     expect(screen.getByText('Administrator')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'User Menu' }));
+    expect(screen.getByText('ROLE')).toBeInTheDocument();
+    expect(within(screen.getByText('ROLE').parentElement as HTMLElement).getByText('admin')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /agent orchestration/i }));
     fireEvent.click(await screen.findByRole('button', { name: /注册智能体/i }));

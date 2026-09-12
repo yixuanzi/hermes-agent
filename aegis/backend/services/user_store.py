@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS users (
     email TEXT UNIQUE NOT NULL,
     oidc_subject TEXT UNIQUE,
     status TEXT NOT NULL CHECK(status IN ('enabled', 'disabled')),
+    role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user', 'operator', 'admin')),
     create_time TEXT NOT NULL,
     last_login TEXT
 );
@@ -80,6 +81,14 @@ class AegisUserStore:
             }
             if "oidc_subject" not in columns:
                 conn.execute("ALTER TABLE users ADD COLUMN oidc_subject TEXT")
+            if "role" not in columns:
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' "
+                    "CHECK(role IN ('user', 'operator', 'admin'))"
+                )
+            # Keep the protected bootstrap account as an administrator when
+            # an existing pre-role database is upgraded in place.
+            conn.execute("UPDATE users SET role = 'admin' WHERE username = 'admin'")
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_oidc_subject "
                 "ON users (oidc_subject) WHERE oidc_subject IS NOT NULL"
@@ -89,7 +98,7 @@ class AegisUserStore:
     def list_users(self) -> list[dict[str, Any]]:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT uid, username, passwd, email, oidc_subject, status, create_time, last_login "
+                "SELECT uid, username, passwd, email, oidc_subject, status, role, create_time, last_login "
                 "FROM users ORDER BY username ASC"
             ).fetchall()
         return [dict(row) for row in rows]
@@ -97,7 +106,7 @@ class AegisUserStore:
     def get_user_by_uid(self, uid: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT uid, username, passwd, email, oidc_subject, status, create_time, last_login "
+                "SELECT uid, username, passwd, email, oidc_subject, status, role, create_time, last_login "
                 "FROM users WHERE uid = ?",
                 (uid,),
             ).fetchone()
@@ -106,7 +115,7 @@ class AegisUserStore:
     def get_user_by_username(self, username: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT uid, username, passwd, email, oidc_subject, status, create_time, last_login "
+                "SELECT uid, username, passwd, email, oidc_subject, status, role, create_time, last_login "
                 "FROM users WHERE username = ?",
                 (username,),
             ).fetchone()
@@ -115,7 +124,7 @@ class AegisUserStore:
     def get_user_by_oidc_subject(self, subject: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT uid, username, passwd, email, oidc_subject, status, create_time, last_login "
+                "SELECT uid, username, passwd, email, oidc_subject, status, role, create_time, last_login "
                 "FROM users WHERE oidc_subject = ?",
                 (subject,),
             ).fetchone()
@@ -124,7 +133,7 @@ class AegisUserStore:
     def get_user_by_email(self, email: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT uid, username, passwd, email, oidc_subject, status, create_time, last_login "
+                "SELECT uid, username, passwd, email, oidc_subject, status, role, create_time, last_login "
                 "FROM users WHERE lower(email) = lower(?)",
                 (email,),
             ).fetchone()
@@ -133,8 +142,8 @@ class AegisUserStore:
     def create_user(self, record: dict[str, Any]) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(
-                "INSERT INTO users (uid, username, passwd, email, oidc_subject, status, create_time, last_login) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO users (uid, username, passwd, email, oidc_subject, status, role, create_time, last_login) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record["uid"],
                     record["username"],
@@ -142,6 +151,7 @@ class AegisUserStore:
                     record["email"],
                     record.get("oidc_subject"),
                     record["status"],
+                    record.get("role", "user"),
                     record["create_time"],
                     record.get("last_login"),
                 ),
@@ -293,6 +303,11 @@ class AegisUserStore:
     def update_status(self, uid: str, status: str) -> None:
         with self._lock, self._connect() as conn:
             conn.execute("UPDATE users SET status = ? WHERE uid = ?", (status, uid))
+            conn.commit()
+
+    def update_role(self, uid: str, role: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("UPDATE users SET role = ? WHERE uid = ?", (role, uid))
             conn.commit()
 
     def update_last_login(self, uid: str, last_login: str) -> None:

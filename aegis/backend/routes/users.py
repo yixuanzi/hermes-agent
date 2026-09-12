@@ -12,6 +12,7 @@ from aegis.backend.models import (
     UserListResponse,
     UserPasswordUpdateRequest,
     UserPasswordUpdateResponse,
+    UserRoleUpdateRequest,
     UserResponse,
     UserStatusUpdateRequest,
 )
@@ -43,6 +44,15 @@ def build_users_router(settings: AegisSettings, user_service: UserService) -> AP
     ) -> UserResponse:
         _ensure_admin(request)
         return user_service.update_status(uid, body.status)
+
+    @router.put("/{uid}/role", response_model=UserResponse)
+    async def update_role(
+        uid: str,
+        body: UserRoleUpdateRequest,
+        request: Request,
+    ) -> UserResponse:
+        _ensure_admin(request)
+        return user_service.update_role(uid, body.role)
 
     @router.put("/{uid}/password", response_model=UserPasswordUpdateResponse)
     async def update_password(

@@ -74,15 +74,22 @@ def test_existing_users_database_is_migrated_without_recreating_users(tmp_path):
             "INSERT INTO users(uid, username, passwd, email, status, create_time) "
             "VALUES ('legacy-uid', 'legacy', 'hash', 'legacy@example.com', 'enabled', '2026-01-01T00:00:00Z')"
         )
+        connection.execute(
+            "INSERT INTO users(uid, username, passwd, email, status, create_time) "
+            "VALUES ('admin-uid', 'admin', 'hash', 'admin@example.com', 'enabled', '2026-01-01T00:00:00Z')"
+        )
         connection.commit()
 
     store = AegisUserStore(database_path)
 
     assert store.get_user_by_uid("legacy-uid")["username"] == "legacy"
+    assert store.get_user_by_uid("legacy-uid")["role"] == "user"
+    assert store.get_user_by_username("admin")["role"] == "admin"
     with sqlite3.connect(database_path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "oidc_subject" in columns
+    assert "role" in columns
     assert {"oidc_login_transactions", "sso_login_tickets"}.issubset(tables)
 
 
@@ -175,6 +182,7 @@ def test_callback_validates_oidc_and_exchanges_ticket_once(oidc_client, monkeypa
     payload = exchange.json()
     assert payload["authenticated"] is True
     assert payload["user"]["email"] == "sso@example.com"
+    assert payload["user"]["role"] == "user"
     assert payload["user"]["is_admin"] is False
     assert payload["user"]["username"].startswith("oidc_")
 

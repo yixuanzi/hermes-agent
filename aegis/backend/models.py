@@ -22,6 +22,7 @@ class UserResponse(BaseModel):
     status: UserStatus
     create_time: str
     last_login: str | None = None
+    role: UserRoleName
     is_admin: bool
 
 
@@ -81,6 +82,7 @@ class UserCreateRequest(BaseModel):
     password: str = Field(min_length=8, max_length=256)
     email: str = Field(min_length=5, max_length=320)
     status: UserStatus
+    role: UserRoleName = "user"
 
 
 class UserListResponse(BaseModel):
@@ -91,6 +93,12 @@ class UserStatusUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: UserStatus
+
+
+class UserRoleUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: UserRoleName
 
 
 class UserPasswordUpdateRequest(BaseModel):

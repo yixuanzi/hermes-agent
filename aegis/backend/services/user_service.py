@@ -15,6 +15,7 @@ from aegis.backend.auth import hash_password, verify_password
 from aegis.backend.models import (
     AuthRegisterRequest,
     UserCreateRequest,
+    UserRoleName,
     UserResponse,
     UserStatus,
 )
@@ -69,6 +70,7 @@ class UserService:
                 "passwd": hash_password(password),
                 "email": DEFAULT_ADMIN_EMAIL,
                 "status": "enabled",
+                "role": "admin",
                 "create_time": _utc_timestamp(),
                 "last_login": None,
             }
@@ -104,6 +106,7 @@ class UserService:
             password=body.password,
             email=body.email,
             status=body.status,
+            role=body.role,
         )
         return self._build_user_response(stored)
 
@@ -175,6 +178,7 @@ class UserService:
                 "email": normalized_email,
                 "oidc_subject": normalized_subject,
                 "status": "enabled",
+                "role": "user",
                 "create_time": _utc_timestamp(),
                 "last_login": _utc_timestamp(),
             }
@@ -213,6 +217,7 @@ class UserService:
             "passwd": hash_password(secrets.token_urlsafe(32)),
             "email": normalized_email,
             "status": "enabled",
+            "role": "user",
             "create_time": _utc_timestamp(),
             "last_login": _utc_timestamp(),
         }
@@ -236,6 +241,15 @@ class UserService:
         assert refreshed is not None
         return self._build_user_response(refreshed)
 
+    def update_role(self, uid: str, role: UserRoleName) -> UserResponse:
+        user = self._require_user_row(uid)
+        if user["username"] == DEFAULT_ADMIN_USERNAME and role != "admin":
+            raise HTTPException(status_code=400, detail="The bootstrap admin role cannot be changed.")
+        self._store.update_role(uid, role)
+        refreshed = self._store.get_user_by_uid(uid)
+        assert refreshed is not None
+        return self._build_user_response(refreshed)
+
     def delete_user(self, uid: str) -> None:
         user = self._require_user_row(uid)
         if user["username"] == DEFAULT_ADMIN_USERNAME:
@@ -249,6 +263,7 @@ class UserService:
         password: str,
         email: str,
         status: UserStatus,
+        role: UserRoleName = "user",
     ) -> dict[str, Any]:
         normalized_username = _normalize_username(username)
         normalized_email = _normalize_email(email)
@@ -270,6 +285,7 @@ class UserService:
             "passwd": hash_password(password),
             "email": normalized_email,
             "status": status,
+            "role": role,
             "create_time": _utc_timestamp(),
             "last_login": None,
         }
@@ -321,7 +337,8 @@ class UserService:
             "status": payload["status"],
             "create_time": payload["create_time"],
             "last_login": payload.get("last_login"),
-            "is_admin": payload["username"] == DEFAULT_ADMIN_USERNAME,
+            "role": payload.get("role", "user"),
+            "is_admin": payload.get("role", "user") == "admin",
         }
         try:
             return UserResponse.model_validate(candidate)

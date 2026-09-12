@@ -1,7 +1,7 @@
 import { Fragment, FormEvent, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { KeyRound, Power, PowerOff, Trash2 } from 'lucide-react';
 import { alertApiError } from '../lib/api';
-import { AuthenticatedUser, UserDraft } from '../types';
+import { AuthenticatedUser, UserDraft, UserRoleName } from '../types';
 import UserRoleManagementTab from './UserRoleManagementTab';
 
 interface UserManagementTabProps {
@@ -12,6 +12,7 @@ interface UserManagementTabProps {
   onRefresh: () => Promise<void>;
   onResetPassword: (uid: string, password: string) => Promise<void>;
   onUpdateStatus: (uid: string, status: 'enabled' | 'disabled') => Promise<void>;
+  onUpdateRole: (uid: string, role: UserRoleName) => Promise<void>;
   onAuthExpired?: () => void;
 }
 
@@ -20,7 +21,14 @@ const EMPTY_DRAFT: UserDraft = {
   password: '',
   email: '',
   status: 'enabled',
+  role: 'user',
 };
+
+const ROLE_OPTIONS: UserRoleName[] = ['admin', 'operator', 'user'];
+
+function getUserRole(user: AuthenticatedUser): UserRoleName {
+  return user.role ?? (user.is_admin ? 'admin' : 'user');
+}
 
 export default function UserManagementTab({
   busy,
@@ -30,6 +38,7 @@ export default function UserManagementTab({
   onRefresh,
   onResetPassword,
   onUpdateStatus,
+  onUpdateRole,
   onAuthExpired,
 }: UserManagementTabProps) {
   const [draft, setDraft] = useState<UserDraft>(EMPTY_DRAFT);
@@ -37,6 +46,7 @@ export default function UserManagementTab({
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [resetPasswordUid, setResetPasswordUid] = useState('');
   const [resetPasswordValue, setResetPasswordValue] = useState('');
+  const [updatingRoleUid, setUpdatingRoleUid] = useState('');
   const [activeView, setActiveView] = useState<'users' | 'roles'>('users');
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
@@ -118,6 +128,22 @@ export default function UserManagementTab({
     }
   }
 
+  async function handleRoleChange(user: AuthenticatedUser, role: UserRoleName) {
+    if (user.username === 'admin' || role === getUserRole(user)) {
+      return;
+    }
+    setUpdatingRoleUid(user.uid);
+    setError('');
+    try {
+      await onUpdateRole(user.uid, role);
+    } catch (nextError) {
+      alertApiError(nextError, 'Failed to update user role.');
+      setError('Failed to update user role.');
+    } finally {
+      setUpdatingRoleUid('');
+    }
+  }
+
   return (
     <main className="aegis-admin-page" aria-labelledby="user-management-heading">
       <div className="aegis-admin-page__inner">
@@ -135,7 +161,7 @@ export default function UserManagementTab({
 
         <div className="aegis-page-tabs aegis-page-tabs--compact" role="tablist" aria-label="用户页面视图">
           <button ref={(element) => { tabRefs.current[0] = element; }} type="button" id="user-management-tab" role="tab" tabIndex={activeView === 'users' ? 0 : -1} aria-selected={activeView === 'users'} aria-controls="user-management-panel" data-index="0" onClick={() => setActiveView('users')} onKeyDown={handleTabKeyDown} className="aegis-page-tab">用户管理</button>
-          <button ref={(element) => { tabRefs.current[1] = element; }} type="button" id="role-management-tab" role="tab" tabIndex={activeView === 'roles' ? 0 : -1} aria-selected={activeView === 'roles'} aria-controls="role-management-panel" data-index="1" onClick={() => setActiveView('roles')} onKeyDown={handleTabKeyDown} className="aegis-page-tab">角色管理</button>
+          <button ref={(element) => { tabRefs.current[1] = element; }} type="button" id="role-management-tab" role="tab" tabIndex={activeView === 'roles' ? 0 : -1} aria-selected={activeView === 'roles'} aria-controls="role-management-panel" data-index="1" onClick={() => setActiveView('roles')} onKeyDown={handleTabKeyDown} className="aegis-page-tab">rbac guard 角色管理</button>
         </div>
 
         {activeView === 'roles' ? <UserRoleManagementTab onAuthExpired={onAuthExpired} /> : <section id="user-management-panel" role="tabpanel" aria-labelledby="user-management-tab" className="aegis-page-content">
@@ -155,7 +181,7 @@ export default function UserManagementTab({
           </header>
 
           {showCreateForm ? (
-            <form className="aegis-page-filter-bar grid gap-3 border-b border-slate-800 md:grid-cols-5" onSubmit={handleCreate}>
+            <form className="aegis-page-filter-bar grid gap-3 border-b border-slate-800 md:grid-cols-6" onSubmit={handleCreate}>
           <input
             aria-label="Create Username"
             value={draft.username}
@@ -188,6 +214,14 @@ export default function UserManagementTab({
             <option value="enabled">enabled</option>
             <option value="disabled">disabled</option>
           </select>
+          <select
+            aria-label="Create Role"
+            value={draft.role}
+            onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value as UserRoleName }))}
+            className="aegis-page-field px-3 py-2 text-sm"
+          >
+            {ROLE_OPTIONS.map((role) => <option key={role} value={role}>{role}</option>)}
+          </select>
           <button
             type="submit"
             disabled={busy}
@@ -207,16 +241,18 @@ export default function UserManagementTab({
           <div className="aegis-page-content__body overflow-x-auto">
             <table className="w-full min-w-[780px] table-fixed border-collapse border-b border-slate-800 text-left">
               <colgroup>
-                <col className="w-[20%]" />
-                <col className="w-[28%]" />
-                <col className="w-[14%]" />
-                <col className="w-[21%]" />
+                <col className="w-[18%]" />
+                <col className="w-[23%]" />
+                <col className="w-[12%]" />
+                <col className="w-[12%]" />
+                <col className="w-[18%]" />
                 <col className="w-[17%]" />
               </colgroup>
               <thead>
                 <tr className="border-b border-slate-800 bg-[#03060C] font-mono text-[9px] uppercase tracking-wider text-slate-500">
                   <th className="p-3">Username &amp; ID</th>
                   <th className="p-3">Email</th>
+                  <th className="p-3">Role</th>
                   <th className="p-3">Status</th>
                   <th className="p-3">Last Login</th>
                   <th className="p-3 text-center">Actions</th>
@@ -225,7 +261,7 @@ export default function UserManagementTab({
               <tbody className="divide-y divide-slate-800/60">
                 {sortedUsers.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="p-8 text-center font-mono text-xs text-slate-500">
+                    <td colSpan={6} className="p-8 text-center font-mono text-xs text-slate-500">
                       No accounts in the current directory.
                     </td>
                   </tr>
@@ -243,6 +279,17 @@ export default function UserManagementTab({
                       </td>
                       <td className="p-3 text-slate-400">
                         <div className="truncate" title={user.email}>{user.email}</div>
+                      </td>
+                      <td className="p-3">
+                        <select
+                          aria-label={`Role for ${user.username}`}
+                          value={getUserRole(user)}
+                          disabled={user.username === 'admin' || updatingRoleUid === user.uid}
+                          onChange={(event) => void handleRoleChange(user, event.target.value as UserRoleName)}
+                          className="aegis-page-field w-full min-w-0 px-2 py-1.5 text-xs uppercase disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {ROLE_OPTIONS.map((role) => <option key={role} value={role}>{role}</option>)}
+                        </select>
                       </td>
                       <td className="p-3">
                         <span className={`aegis-status-badge ${
@@ -280,7 +327,7 @@ export default function UserManagementTab({
                           >
                             <KeyRound className="h-3.5 w-3.5" />
                           </button>
-                          {!user.is_admin ? (
+                          {user.username !== 'admin' ? (
                             <button
                               type="button"
                               aria-label={`Delete ${user.username}`}
@@ -296,7 +343,7 @@ export default function UserManagementTab({
                     </tr>
                     {resetPasswordUid === user.uid ? (
                       <tr className="bg-[#03060C]">
-                        <td colSpan={5} className="px-4 py-3">
+                        <td colSpan={6} className="px-4 py-3">
                           <div className="flex flex-wrap items-center justify-between gap-3">
                             <div className="font-mono text-[10px] font-bold uppercase tracking-wider text-slate-500">
                               Reset password · {user.username}

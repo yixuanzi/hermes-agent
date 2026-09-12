@@ -17,6 +17,7 @@ const user = {
   status: 'enabled' as const,
   create_time: '2026-01-01T00:00:00Z',
   last_login: null,
+  role: 'user' as const,
   is_admin: false,
 };
 
@@ -27,6 +28,32 @@ afterEach(() => {
 });
 
 describe('UserManagementTab', () => {
+  it('creates users with a selected role and updates existing user roles', async () => {
+    const onCreate = vi.fn().mockResolvedValue(undefined);
+    const onUpdateRole = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <UserManagementTab
+        busy={false}
+        users={[user]}
+        onCreate={onCreate}
+        onDelete={vi.fn()}
+        onRefresh={vi.fn()}
+        onResetPassword={vi.fn()}
+        onUpdateStatus={vi.fn()}
+        onUpdateRole={onUpdateRole}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '新增用户' }));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Create Role' }), { target: { value: 'operator' } });
+    fireEvent.submit(screen.getByRole('button', { name: 'Create User' }).closest('form') as HTMLFormElement);
+    await waitFor(() => expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ role: 'operator' })));
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Role for alice' }), { target: { value: 'admin' } });
+    await waitFor(() => expect(onUpdateRole).toHaveBeenCalledWith('user-1', 'admin'));
+  });
+
   it('provides accessible user and role tabs with role CRUD interaction', async () => {
     const requests: Array<{ url: string; method: string; body?: unknown }> = [];
     let roles: Array<Record<string, string>> = [{
@@ -65,12 +92,13 @@ describe('UserManagementTab', () => {
         onRefresh={vi.fn()}
         onResetPassword={vi.fn()}
         onUpdateStatus={vi.fn()}
+        onUpdateRole={vi.fn()}
       />,
     );
 
     const tablist = screen.getByRole('tablist');
     const userTab = within(tablist).getByRole('tab', { name: '用户管理' });
-    const roleTab = within(tablist).getByRole('tab', { name: '角色管理' });
+    const roleTab = within(tablist).getByRole('tab', { name: 'rbac guard 角色管理' });
     expect(userTab).toHaveAttribute('aria-selected', 'true');
     expect(userTab).toHaveAttribute('aria-controls', 'user-management-panel');
     expect(screen.getByRole('tabpanel')).toHaveAttribute('id', 'user-management-panel');

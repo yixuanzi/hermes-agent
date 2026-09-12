@@ -25,6 +25,7 @@ describe('SsoCallbackScreen', () => {
         status: 'enabled',
         create_time: '2026-01-01T00:00:00Z',
         last_login: null,
+        role: 'user',
         is_admin: false,
       },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as typeof global.fetch;

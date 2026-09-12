@@ -13,6 +13,7 @@ export interface AuthenticatedUser {
   status: UserStatus;
   create_time: string;
   last_login?: string | null;
+  role: UserRoleName;
   is_admin: boolean;
 }
 
@@ -21,6 +22,7 @@ export interface UserDraft {
   password: string;
   email: string;
   status: UserStatus;
+  role: UserRoleName;
 }
 
 export interface UserRole {

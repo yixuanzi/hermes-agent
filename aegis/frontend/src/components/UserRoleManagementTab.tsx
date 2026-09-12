@@ -139,8 +139,8 @@ export default function UserRoleManagementTab({ onAuthExpired }: UserRoleManagem
     <section id="role-management-panel" role="tabpanel" aria-labelledby="role-management-tab" className="aegis-page-content">
       <header className="aegis-page-content__header aegis-page-content__header--compact">
         <div>
-          <h2 className="aegis-page-content__title">角色管理</h2>
-          <p className="aegis-page-content__description">维护平台用户的角色数据。角色记录仅用于数据管理。</p>
+          <h2 className="aegis-page-content__title">rbac guard 角色管理</h2>
+          <p className="aegis-page-content__description">维护 RBAC Guard 的平台用户角色规则。</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <button type="button" onClick={() => void loadRoles()} disabled={loading} className="aegis-btn aegis-btn--secondary inline-flex items-center gap-1.5 px-4 py-2 text-sm">

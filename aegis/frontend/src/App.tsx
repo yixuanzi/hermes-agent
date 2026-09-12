@@ -31,7 +31,7 @@ import {
   uiAgentDraftToApi,
   uiRoutingDraftToApi,
 } from './lib/adapters';
-import { Agent, AgentDraft, AppEntryList, AuthenticatedUser, OverviewStats, RoutingRule, RoutingRuleDraft, StarmappingTopology, UserDraft } from './types';
+import { Agent, AgentDraft, AppEntryList, AuthenticatedUser, OverviewStats, RoutingRule, RoutingRuleDraft, StarmappingTopology, UserDraft, UserRoleName } from './types';
 
 type AppTab = 'overview' | 'chat' | 'prompt_templates' | 'user_manual' | 'app_entry' | 'orchestration' | 'policy' | 'users' | 'settings' | 'audit';
 
@@ -135,7 +135,8 @@ function getInitials(user?: AuthenticatedUser | null): string {
 }
 
 function getUserRoleLabel(user?: AuthenticatedUser | null): string {
-  return user?.is_admin ? 'Administrator' : 'User';
+  const role = user?.role ?? (user?.is_admin ? 'admin' : 'user');
+  return role === 'admin' ? 'Administrator' : role === 'operator' ? 'Operator' : 'User';
 }
 
 function AuthenticatedAppShell({
@@ -157,6 +158,7 @@ function AuthenticatedAppShell({
   onRefresh,
   onResetUserPassword,
   onToggleUserStatus,
+  onUpdateUserRole,
   onUpdateAgent,
   onUpdateRule,
   overviewAgents,
@@ -193,6 +195,7 @@ function AuthenticatedAppShell({
   onRefresh: () => Promise<void>;
   onResetUserPassword: (uid: string, password: string) => Promise<void>;
   onToggleUserStatus: (uid: string, status: 'enabled' | 'disabled') => Promise<void>;
+  onUpdateUserRole: (uid: string, role: UserRoleName) => Promise<void>;
   onUpdateAgent: (agentId: string, draft: AgentDraft) => Promise<void>;
   onUpdateRule: (ruleId: string, draft: RoutingRuleDraft) => Promise<void>;
   overviewAgents: Agent[];
@@ -311,6 +314,10 @@ function AuthenticatedAppShell({
                         <dd title={currentUser.uid} className="min-w-0 truncate text-right font-mono text-[10px] text-cyan-300">
                           {currentUser.uid}
                         </dd>
+                        <dt className="font-mono text-[9px] font-bold tracking-wider text-slate-500">ROLE</dt>
+                        <dd className="text-right text-[10px] font-semibold uppercase text-cyan-300">
+                          {currentUser.role ?? (currentUser.is_admin ? 'admin' : 'user')}
+                        </dd>
                       </dl>
                     </div>
                     <button
@@ -397,6 +404,7 @@ function AuthenticatedAppShell({
               onRefresh={onRefresh}
               onResetPassword={onResetUserPassword}
               onUpdateStatus={onToggleUserStatus}
+              onUpdateRole={onUpdateUserRole}
               onAuthExpired={onAuthExpired}
               users={users}
             />
@@ -1046,6 +1054,30 @@ export default function App() {
     }
   }
 
+  async function handleUpdateUserRole(uid: string, role: UserRoleName) {
+    try {
+      const updated = await fetchJSON<AuthenticatedUser>(
+        `/api/users/${encodeURIComponent(uid)}/role`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({ role }),
+        },
+      );
+      setUsers((current) => sortUsers(current.map((user) => (user.uid === uid ? updated : user))));
+      if (currentUser?.uid === uid) {
+        setCurrentUser(updated);
+        setStoredUser(updated);
+      }
+      setSyncError('');
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        handleAuthExpired();
+        return;
+      }
+      throw error;
+    }
+  }
+
   async function handleResetUserPassword(uid: string, password: string) {
     try {
       await fetchJSON<{ updated: boolean }>(
@@ -1138,6 +1170,7 @@ export default function App() {
           onRefresh={() => loadConsoleData(currentUser)}
           onResetUserPassword={handleResetUserPassword}
           onToggleUserStatus={handleToggleUserStatus}
+          onUpdateUserRole={handleUpdateUserRole}
           onUpdateAgent={handleUpdateAgent}
           onUpdateRule={handleUpdateRule}
           overviewAgents={overviewAgents}

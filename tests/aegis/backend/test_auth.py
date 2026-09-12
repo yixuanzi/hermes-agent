@@ -51,6 +51,7 @@ def test_login_session_and_logout_routes(client: TestClient) -> None:
     assert payload["token_type"] == "bearer"
     assert payload["expires_in"] == 28800
     assert payload["user"]["username"] == "admin"
+    assert payload["user"]["role"] == "admin"
     assert payload["user"]["is_admin"] is True
     assert payload["user"]["uid"] == "0000000000000001"
     assert len(payload["user"]["uid"]) == 16
