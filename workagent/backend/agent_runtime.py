@@ -214,7 +214,22 @@ def build_profile_agent_kwargs(
     )
 
     resolved_provider = str(runtime.get("provider") or requested_provider or "auto").strip()
-    resolved_model = str(runtime.get("model") or requested_model or "").strip()
+
+    # A named custom provider entry may carry its own baked-in default_model,
+    # which resolve_runtime_provider() returns via runtime["model"] so that
+    # e.g. `hermes chat --model <provider-name>` doesn't send the provider
+    # alias to the API as a model string. Only fall back to that baked-in
+    # model when the profile didn't already request one (or requested the
+    # provider's own name/slug) — otherwise it silently overrides an
+    # explicit model.default from config.yaml. Mirrors the equivalent guard
+    # in hermes_cli/cli_agent_setup_mixin.py.
+    runtime_model = str(runtime.get("model") or "").strip()
+    should_use_runtime_model = runtime_model and (
+        not requested_model
+        or requested_model == resolved_provider
+        or requested_model == str(runtime.get("name") or "").strip()
+    )
+    resolved_model = runtime_model if should_use_runtime_model else (requested_model or "")
     resolved_base_url = str(runtime.get("base_url") or "").strip()
     resolved_api_key = str(runtime.get("api_key") or "").strip()
     resolved_api_mode = str(runtime.get("api_mode") or "").strip()

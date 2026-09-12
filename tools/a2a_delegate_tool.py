@@ -814,6 +814,42 @@ class _A2ADelegateSession:
         with self._state_lock:
             return self._last_assistant_text
 
+    def _log_stream_return(self, state: Any, elapsed: float, is_final: bool) -> None:
+        try:
+            with open("/private/tmp/a2a_debug.log", "a") as f:
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                state_name = _a2a_state_name(state)
+                f.write(f"[{timestamp}] [STREAM_RETURN] state={state_name} is_final={is_final} elapsed={elapsed:.3f}s task_id={self.task_id}\n")
+        except Exception:
+            pass
+
+    def _log_polling_request(self, poll_num: int, state: Any, poll_elapsed: float, total_elapsed: float) -> None:
+        try:
+            with open("/private/tmp/a2a_debug.log", "a") as f:
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                state_name = _a2a_state_name(state)
+                f.write(f"[{timestamp}] [POLLING #{poll_num}] state={state_name} poll_time={poll_elapsed:.3f}s total={total_elapsed:.3f}s task_id={self.task_id}\n")
+        except Exception:
+            pass
+
+    def _log_polling_complete(self, state: Any, poll_count: int, elapsed: float, is_final: bool) -> None:
+        try:
+            with open("/private/tmp/a2a_debug.log", "a") as f:
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                state_name = _a2a_state_name(state)
+                f.write(f"[{timestamp}] [POLLING_COMPLETE] state={state_name} is_final={is_final} total_polls={poll_count} elapsed={elapsed:.3f}s task_id={self.task_id}\n")
+        except Exception:
+            pass
+
+    def _log_polling_timeout(self, state: Any, poll_count: int, elapsed: float) -> None:
+        try:
+            with open("/private/tmp/a2a_debug.log", "a") as f:
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                state_name = _a2a_state_name(state)
+                f.write(f"[{timestamp}] [POLLING_TIMEOUT] state={state_name} total_polls={poll_count} elapsed={elapsed:.3f}s task_id={self.task_id}\n")
+        except Exception:
+            pass
+
     def bind_output_adapter(self) -> None:
         binder = getattr(self.output, "bind_a2a_interaction_session", None)
         if callable(binder):
@@ -962,6 +998,13 @@ class _A2ADelegateSession:
         self._rendered_tool_entries.clear()
         self._tool_names_by_call_id.clear()
         self._streamed_assistant_text = ""
+        turn_start_time = time.monotonic()
+        try:
+            with open("/private/tmp/a2a_debug.log", "a") as f:
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                f.write(f"[{timestamp}] [SEND_TURN_START] agent={self.agent_name} context_id={self.context_id}\n")
+        except Exception:
+            pass
         task = await self._send_text(text)
         self.context_id = getattr(task, "context_id", None) or self.context_id
         self.task_id = getattr(task, "id", None) or self.task_id
@@ -974,6 +1017,14 @@ class _A2ADelegateSession:
         if is_delegate_output and final_response:
             _emit(self.output, "ai", final_response, self.context_id)
         state = _a2a_field(getattr(finished, "status", None), "state", None)
+        turn_elapsed = time.monotonic() - turn_start_time
+        try:
+            with open("/private/tmp/a2a_debug.log", "a") as f:
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                state_name = _a2a_state_name(state)
+                f.write(f"[{timestamp}] [SEND_TURN_COMPLETE] state={state_name} elapsed={turn_elapsed:.3f}s task_id={self.task_id}\n")
+        except Exception:
+            pass
         return {
             "task": finished,
             "final_response": final_response,
@@ -1041,6 +1092,7 @@ class _A2ADelegateSession:
         )
         last_task = None
         got_response = False
+        stream_start_time = time.monotonic()
         async for event in self._client.send_message(request):
             got_response = True
             self._emit_tool_messages(
@@ -1060,11 +1112,17 @@ class _A2ADelegateSession:
                     is_final=is_final,
                 )
                 if is_final:
+                    stream_elapsed = time.monotonic() - stream_start_time
+                    self._log_stream_return(state, stream_elapsed, is_final=True)
                     return last_task
         if not got_response:
             raise RuntimeError("A2A SDK returned no response events.")
         if last_task is None:
             raise RuntimeError("Unexpected A2A response without task or message.")
+        stream_elapsed = time.monotonic() - stream_start_time
+        state = _a2a_field(getattr(last_task, "status", None), "state", None)
+        is_final = state in _a2a_final_task_states()
+        self._log_stream_return(state, stream_elapsed, is_final=is_final)
         return last_task
 
     async def _wait_for_final(self, task):
@@ -1073,6 +1131,9 @@ class _A2ADelegateSession:
         current_task = task
         deadline = time.monotonic() + self.timeout
         interaction_paused_at: float | None = None
+        poll_count = 0
+        wait_start_time = time.monotonic()
+
         while True:
             self._emit_tool_messages(
                 _a2a_task_messages(current_task),
@@ -1097,11 +1158,21 @@ class _A2ADelegateSession:
             )
             if is_final:
                 self._clear_pending_interactions()
+                wait_elapsed = time.monotonic() - wait_start_time
+                self._log_polling_complete(state, poll_count, wait_elapsed, is_final=True)
                 return current_task
             if interaction_paused_at is None and now >= deadline:
+                wait_elapsed = time.monotonic() - wait_start_time
+                self._log_polling_timeout(state, poll_count, wait_elapsed)
                 raise TimeoutError(f"Timed out waiting for task {getattr(current_task, 'id', None)!r}.")
             await asyncio.sleep(self.poll_interval)
+            poll_count += 1
+            poll_start = time.monotonic()
             current_task = await self._client.get_task(GetTaskRequest(id=current_task.id))
+            poll_elapsed = time.monotonic() - poll_start
+            state = _a2a_field(getattr(current_task, "status", None), "state", None)
+            elapsed_since_start = time.monotonic() - wait_start_time
+            self._log_polling_request(poll_count, state, poll_elapsed, elapsed_since_start)
             self._touch_parent_activity_after_poll()
 
     def _touch_parent_activity_after_poll(self) -> None:
