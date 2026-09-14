@@ -170,6 +170,12 @@ Intent: Render each delegated remote agent into its own card keyed by A2A contex
 Feature: Feishu transient notice delivery.
 Intent: Keep liveness signals and acknowledgements out of the answer card. `hermes_card_bypass` and the gateway's existing `non_conversational` marker both route a send to the plain text/post path, with `hermes_progress` taking precedence so tool chrome still reaches the panel. The delegate interaction-resolved acks and the expired-approval correction set the marker at their own call sites, so a button press cannot splice a notice into the middle of a streaming answer. A bypassed notice keeps a real Feishu message ID, so its own edit and delete paths continue to work.
 
+Feature: Feishu card-mode attachment delivery.
+Intent: A file is never card content, and card mode must not change which files get delivered. The gateway strips attachments out of a reply before the adapter sees it, but card output adds text entry points that skip that pass — mid-turn commentary and delegate output reach `send` directly — so anything they carry is extracted here instead of rendering as a literal path inside the card. Extraction reuses the gateway's own `extract_media` / `extract_local_files` and their delivery filters rather than a local pattern, so explicit `MEDIA:` tags and bare deliverable paths behave exactly as they do with card output off, and a path inside a code fence still ships nothing. Each file leaves as its own message through the existing per-type senders, and the card body keeps a one-line receipt naming it, which also guarantees the body is never blank. A per-turn ledger, claimed before the upload and released when it fails, is what keeps the two entry points — the gateway's own dispatch and this safety net — from delivering the same file twice when a send is retried with identical content; it is scoped to the turn so a later request to resend the same file still works, and it is inert whenever no card turn is live.
+
+Feature: Feishu attachment delivery inside a topic.
+Intent: A file the user asks for in a Feishu topic has to arrive. The normal send path keys a message in a topic on `receive_id_type=thread_id`, which Feishu accepts for text and cards but rejects for every attachment kind — audio, file, media, image, and a post carrying one — with a bare field-validation code, so the upload succeeded and the message that would have carried it was dropped. `_send_attachment_message` reads that code as "re-anchor", not "give up": it re-sends through the reply API anchored on a message inside the topic, which places the same upload there without complaint, and only if that also fails does it drop the topic and post flat in the chat, on the grounds that a file in the wrong place beats no file. This replaces a narrower workaround that covered only audio, and leaves every other failure code reported to the caller unretried so a real rejection is still visible.
+
 ## File: `plugins/platforms/feishu/feishu_cardkit.py`
 
 Feature: CardKit three-element card engine.
@@ -199,7 +205,7 @@ Intent: Represent each send as an editable block within an area and return a syn
 ## File: `plugins/platforms/feishu/plugin.yaml`
 
 Feature: Feishu card output env contract.
-Intent: Declare `FEISHU_CARD_OUTPUT` and the card title overrides as optional env so operators can discover and opt into card rendering, and state the default explicitly: card output is off unless enabled, and text/post delivery remains what an unconfigured deployment gets.
+Intent: Declare `FEISHU_CARD_OUTPUT`, the card title overrides and the attachment-receipt line as optional env so operators can discover and opt into card rendering and localize its user-visible strings, and state the default explicitly: card output is off unless enabled, and text/post delivery remains what an unconfigured deployment gets.
 
 ## File: `gateway/platforms/base.py`
 

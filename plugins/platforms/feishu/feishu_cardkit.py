@@ -206,6 +206,10 @@ class CardCopy:
     summary_done: str = "✅ 已完成"
     summary_failed: str = "⚠️ 未完成"
     continuation_suffix: str = "（续）"
+    #: Marks a file that left the turn as its own message.  Attachments are
+    #: never card content — the card would render the upload as a literal
+    #: path — so the body keeps a one-line receipt instead.
+    attachment_note: str = "📎 已发送文件：{names}"
     template_running: str = "blue"
 
 

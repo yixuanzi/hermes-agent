@@ -66,7 +66,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Literal, Optional, Sequence
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -130,6 +130,7 @@ from gateway.platforms.base import (
     cache_image_from_url,
     cache_audio_from_bytes,
     cache_image_from_bytes,
+    should_send_media_as_audio,
 )
 from gateway.status import acquire_scoped_lock, release_scoped_lock
 from hermes_constants import get_hermes_home
@@ -229,6 +230,11 @@ _FEISHU_DOC_UPLOAD_TYPES = {
     ".ppt": "ppt",
     ".pptx": "ppt",
 }
+# Card-mode attachment routing.  Deliberately the same sets the gateway's own
+# dispatch loop uses, so a file leaves the turn as the same message type
+# whether card output is on or off.
+_CARD_ATTACHMENT_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}
+_CARD_ATTACHMENT_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 # ---------------------------------------------------------------------------
 # Connection, retry and batching tuning
 # ---------------------------------------------------------------------------
@@ -287,6 +293,12 @@ async def _read_limited_feishu_webhook_body(request: Any, max_bytes: int) -> byt
 
 _FEISHU_BOT_MSG_TRACK_SIZE = 512                   # LRU size for tracking sent message IDs
 _FEISHU_REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # reply target withdrawn/missing → create fallback
+#: A topic (``omt_*``) accepts text and cards as ``receive_id_type=thread_id``
+#: but rejects an attachment keyed that way with a bare field-validation
+#: error.  The reply API places the same upload inside the topic fine, so
+#: this code means "re-anchor", not "give up" — see
+#: ``_send_attachment_message``.
+_FEISHU_ATTACHMENT_THREAD_RECEIVE_CODE = 99992402
 
 # Feishu reactions render as prominent badges, unlike Discord/Telegram's
 # small footer emoji — a success badge on every message would add noise, so
@@ -783,7 +795,8 @@ def _card_copy_from_env() -> Any:
 
     Deployments localize or rebrand the card without touching code:
     ``FEISHU_CARD_TITLE``, ``FEISHU_CARD_DELEGATE_TITLE`` (may contain
-    ``{agent}``) and ``FEISHU_CARD_TRACE_TITLE``.
+    ``{agent}``), ``FEISHU_CARD_TRACE_TITLE`` and
+    ``FEISHU_CARD_ATTACHMENT_NOTE`` (may contain ``{names}``).
     """
     defaults = _cardkit_module().CardCopy()
     overrides: Dict[str, Any] = {}
@@ -791,6 +804,7 @@ def _card_copy_from_env() -> Any:
         ("FEISHU_CARD_TITLE", "main_title"),
         ("FEISHU_CARD_DELEGATE_TITLE", "delegate_title"),
         ("FEISHU_CARD_TRACE_TITLE", "trace_title"),
+        ("FEISHU_CARD_ATTACHMENT_NOTE", "attachment_note"),
     ):
         raw = os.getenv(env_name, "").strip()
         if raw:
@@ -1901,9 +1915,10 @@ class FeishuAdapter(BasePlatformAdapter):
         # Card output.  The manager owns one live card per route and seals
         # it whenever the speaker changes (main agent ↔ delegated remote
         # agent), which is what gives every a2a_delegate run its own card.
+        self._card_copy = _card_copy_from_env()
         self._card_manager = _cardkit_module().FeishuCardOutputManager(
             self,
-            copy=_card_copy_from_env(),
+            copy=self._card_copy,
             flush_interval=env_float(
                 "HERMES_FEISHU_CARD_FLUSH_INTERVAL", _DEFAULT_CARD_FLUSH_INTERVAL
             ),
@@ -1921,6 +1936,11 @@ class FeishuAdapter(BasePlatformAdapter):
         # "did this delegate stream?" is a property of the exchange, not of
         # the current text segment.
         self._delegate_card_streamed: set = set()
+        # Files already uploaded during the current card turn, per route.  A
+        # file can reach the uploader from two directions in one turn — the
+        # gateway's own extraction and the card-text safety net below — and
+        # the ledger is what keeps that from sending it twice.
+        self._card_media_dispatched: Dict[str, "OrderedDict[str, None]"] = {}
         self._load_seen_message_ids()
 
     @staticmethod
@@ -2687,6 +2707,7 @@ class FeishuAdapter(BasePlatformAdapter):
             getattr(self, "_delegate_card_blocks", {}).clear()
             getattr(self, "_delegate_card_locks", {}).clear()
             getattr(self, "_delegate_card_streamed", set()).clear()
+            getattr(self, "_card_media_dispatched", {}).clear()
 
     async def _cancel_pending_tasks(self, tasks: Dict[str, asyncio.Task]) -> None:
         pending = [task for task in tasks.values() if task and not task.done()]
@@ -2735,6 +2756,14 @@ class FeishuAdapter(BasePlatformAdapter):
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
+        # A file is never card content.  Anything the gateway's own extraction
+        # did not already take out (mid-turn commentary, delegate output) is
+        # pulled out here so it arrives as its own message instead of rendering
+        # as a literal path inside the card.  No-op outside a card turn.
+        content, _owed_attachments = self._split_card_mode_attachments(
+            chat_id=chat_id, content=content, metadata=metadata,
+        )
+
         # Card path first: inside an agent turn the reply and its execution
         # chrome belong to one card, not to a fan of separate bubbles.
         # ``None`` means "not card-eligible" (no turn, cards disabled, or a
@@ -2743,6 +2772,14 @@ class FeishuAdapter(BasePlatformAdapter):
             chat_id=chat_id, content=content, reply_to=reply_to, metadata=metadata,
         )
         if card_result is not None:
+            if _owed_attachments:
+                # Text first, then the files: the card names them, the bubbles
+                # below it carry them.
+                await self._dispatch_card_attachments(
+                    chat_id=chat_id,
+                    attachments=_owed_attachments,
+                    metadata=metadata,
+                )
             return card_result
 
         formatted = self.format_message(content)
@@ -2796,6 +2833,15 @@ class FeishuAdapter(BasePlatformAdapter):
                     )
                 last_response = response
 
+            if _owed_attachments:
+                # The card declined this send (CardKit cooldown after a
+                # failure) but the files were already taken out of the text,
+                # so they still have to reach the user.
+                await self._dispatch_card_attachments(
+                    chat_id=chat_id,
+                    attachments=_owed_attachments,
+                    metadata=metadata,
+                )
             return self._finalize_send_result(last_response, "send failed")
         except Exception as exc:
             logger.error("[Feishu] Send error: %s", exc, exc_info=True)
@@ -3335,6 +3381,187 @@ class FeishuAdapter(BasePlatformAdapter):
         block_id, _card_message_id = delivered
         return SendResult(success=True, message_id=block_id)
 
+    # -- attachments in card mode -----------------------------------------
+
+    #: Bound on the per-turn ledger.  A delegate foreground loop keeps one
+    #: turn open across many exchanges, so this cannot grow per-turn forever.
+    _CARD_MEDIA_LEDGER_MAX = 256
+
+    def _card_media_route(
+        self, chat_id: str, metadata: Optional[Dict[str, Any]]
+    ) -> Optional[str]:
+        """The card route for this send, or ``None`` when cards are not in play.
+
+        ``None`` is the backward-compatibility answer: with card output off, or
+        outside a turn, every attachment path below becomes a no-op and the
+        legacy behaviour is untouched.
+        """
+        manager = getattr(self, "_card_manager", None)
+        if manager is None or not self._card_output_active():
+            return None
+        try:
+            route = manager.resolve_route(chat_id, metadata)
+        except Exception:
+            return None
+        return route if manager.turn_active(route) else None
+
+    @staticmethod
+    def _card_media_key(path: str) -> str:
+        return os.path.abspath(os.path.expanduser(str(path or "")))
+
+    def _claim_card_media(self, chat_id: str, path: str, metadata) -> bool:
+        """Claim ``path`` for this turn; ``False`` when it was already sent.
+
+        One file can reach the uploader from two directions inside a single
+        turn: the gateway extracts attachments from the final reply and calls
+        the senders itself, while the card-text safety net extracts them from
+        text that never passed through that extraction.  Without a shared
+        ledger the two together deliver the same file twice.
+
+        The claim happens *before* the upload, not after it: ``_send_with_retry``
+        re-sends byte-identical content after a transient failure, so a claim
+        that waited for success would upload twice on the first hiccup.
+        """
+        route = self._card_media_route(chat_id, metadata)
+        if route is None:
+            return True
+        ledger = self._card_media_dispatched.setdefault(route, OrderedDict())
+        key = self._card_media_key(path)
+        if key in ledger:
+            logger.debug("[Feishu] attachment already sent this turn: %s", key)
+            return False
+        ledger[key] = None
+        while len(ledger) > self._CARD_MEDIA_LEDGER_MAX:
+            ledger.popitem(last=False)
+        return True
+
+    def _release_card_media(self, chat_id: str, path: str, metadata) -> None:
+        """Undo a claim whose upload failed, so a later attempt can retry."""
+        route = self._card_media_route(chat_id, metadata)
+        if route is None:
+            return
+        ledger = self._card_media_dispatched.get(route)
+        if ledger is not None:
+            ledger.pop(self._card_media_key(path), None)
+
+    async def _send_media_once(self, *, chat_id: str, path: str, metadata, send):
+        """Run ``send`` unless this file already left during this card turn.
+
+        A skip is reported as success: the user has the file, so the caller
+        must not render a delivery-failure notice for it.  Outside a card turn
+        the ledger is inert and every send goes through untouched.
+        """
+        if not self._claim_card_media(chat_id, path, metadata):
+            return SendResult(success=True)
+        result = await send()
+        if not getattr(result, "success", False):
+            self._release_card_media(chat_id, path, metadata)
+        return result
+
+    def _split_card_mode_attachments(
+        self,
+        *,
+        chat_id: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]],
+    ) -> Tuple[str, List[Tuple[str, bool]]]:
+        """Take file references out of text that is about to become card body.
+
+        The gateway normally strips attachments out of a reply long before it
+        reaches ``send``: ``_process_message_background`` extracts them, sends
+        the remaining prose, then uploads each file.  Card mode adds text entry
+        points that skip that pass — mid-turn commentary and delegate output go
+        straight to ``send`` — and a file reference arriving that way would be
+        rendered as a literal path inside the card instead of arriving as a
+        file.
+
+        Extraction reuses the gateway's own helpers rather than a local regex,
+        so the rule set here is *identical* to the non-card path: the same
+        extensions, the same code-fence and inline-code masking, the same
+        delivery allowlist.  A reply that merely explains ``MEDIA:`` syntax or
+        pastes a path inside a code block still uploads nothing.
+
+        Returns the text to put in the card and the files still owed.
+        """
+        text = str(content or "")
+        if "MEDIA:" not in text and "/" not in text and "\\" not in text:
+            return text, []
+        if self._card_media_route(chat_id, metadata) is None:
+            return text, []
+        if self._card_bypass_requested(metadata) or (metadata or {}).get(
+            _CARD_PROGRESS_METADATA_KEY
+        ):
+            # Lifecycle notices and tool chrome are not attachment requests.
+            return text, []
+
+        try:
+            media, cleaned = self.extract_media(text)
+            media = self.filter_media_delivery_paths(media)
+            cleaned = self.strip_media_directives_for_display(cleaned)
+            bare, cleaned = self.extract_local_files(cleaned)
+            bare = self.filter_local_delivery_paths(bare)
+        except Exception:
+            # Extraction must never cost the user their reply.
+            logger.debug("[Feishu] card attachment extraction failed", exc_info=True)
+            return text, []
+
+        owed = list(media) + [(path, False) for path in bare]
+        if not owed:
+            return text, []
+
+        names = "、".join(dict.fromkeys(os.path.basename(p) for p, _ in owed))
+        note = self._card_copy.attachment_note.format(names=names)
+        cleaned = cleaned.strip()
+        body = f"{cleaned}\n\n{note}" if cleaned else note
+        return body, owed
+
+    async def _dispatch_card_attachments(
+        self,
+        *,
+        chat_id: str,
+        attachments: List[Tuple[str, bool]],
+        metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        """Upload each owed file as its own message beside the card.
+
+        Routing mirrors the gateway's own dispatch — audio to a voice bubble,
+        video to a media message, images inline, everything else a file — so a
+        deliverable arrives the same way whether card output is on or off.
+        """
+        for path, is_voice in attachments:
+            ext = os.path.splitext(path)[1].lower()
+            try:
+                if should_send_media_as_audio(self.platform, ext, is_voice=is_voice):
+                    result = await self.send_voice(
+                        chat_id=chat_id, audio_path=path, metadata=metadata,
+                    )
+                elif ext in _CARD_ATTACHMENT_VIDEO_EXTS:
+                    result = await self.send_video(
+                        chat_id=chat_id, video_path=path, metadata=metadata,
+                    )
+                elif ext in _CARD_ATTACHMENT_IMAGE_EXTS:
+                    result = await self.send_image_file(
+                        chat_id=chat_id, image_path=path, metadata=metadata,
+                    )
+                else:
+                    result = await self.send_document(
+                        chat_id=chat_id, file_path=path, metadata=metadata,
+                    )
+            except Exception:
+                logger.warning(
+                    "[Feishu] card attachment upload raised for %s", path, exc_info=True,
+                )
+                continue
+            if not getattr(result, "success", False):
+                logger.warning(
+                    "[Feishu] card attachment upload failed for %s: %s",
+                    path,
+                    getattr(result, "error", None),
+                )
+                await self._notify_media_delivery_failure(
+                    chat_id, path, is_voice=is_voice, metadata=metadata,
+                )
+
     async def _edit_via_card(self, message_id: str, content: str) -> Optional[SendResult]:
         """Rewrite a card block.  ``None`` when ``message_id`` is not one."""
         manager = getattr(self, "_card_manager", None)
@@ -3536,13 +3763,18 @@ class FeishuAdapter(BasePlatformAdapter):
         **kwargs,
     ) -> SendResult:
         """Send audio to Feishu as a file attachment plus optional caption."""
-        return await self._send_uploaded_file_message(
+        return await self._send_media_once(
             chat_id=chat_id,
-            file_path=audio_path,
-            reply_to=reply_to,
+            path=audio_path,
             metadata=metadata,
-            caption=caption,
-            outbound_message_type="audio",
+            send=lambda: self._send_uploaded_file_message(
+                chat_id=chat_id,
+                file_path=audio_path,
+                reply_to=reply_to,
+                metadata=metadata,
+                caption=caption,
+                outbound_message_type="audio",
+            ),
         )
 
     async def send_document(
@@ -3556,13 +3788,18 @@ class FeishuAdapter(BasePlatformAdapter):
         **kwargs,
     ) -> SendResult:
         """Send a document/file attachment to Feishu."""
-        return await self._send_uploaded_file_message(
+        return await self._send_media_once(
             chat_id=chat_id,
-            file_path=file_path,
-            reply_to=reply_to,
+            path=file_path,
             metadata=metadata,
-            caption=caption,
-            file_name=file_name,
+            send=lambda: self._send_uploaded_file_message(
+                chat_id=chat_id,
+                file_path=file_path,
+                reply_to=reply_to,
+                metadata=metadata,
+                caption=caption,
+                file_name=file_name,
+            ),
         )
 
     async def send_video(
@@ -3575,13 +3812,18 @@ class FeishuAdapter(BasePlatformAdapter):
         **kwargs,
     ) -> SendResult:
         """Send a video file to Feishu."""
-        return await self._send_uploaded_file_message(
+        return await self._send_media_once(
             chat_id=chat_id,
-            file_path=video_path,
-            reply_to=reply_to,
+            path=video_path,
             metadata=metadata,
-            caption=caption,
-            outbound_message_type="media",
+            send=lambda: self._send_uploaded_file_message(
+                chat_id=chat_id,
+                file_path=video_path,
+                reply_to=reply_to,
+                metadata=metadata,
+                caption=caption,
+                outbound_message_type="media",
+            ),
         )
 
     async def send_image_file(
@@ -3594,6 +3836,28 @@ class FeishuAdapter(BasePlatformAdapter):
         **kwargs,
     ) -> SendResult:
         """Send a local image file to Feishu."""
+        return await self._send_media_once(
+            chat_id=chat_id,
+            path=image_path,
+            metadata=metadata,
+            send=lambda: self._send_image_file_impl(
+                chat_id=chat_id,
+                image_path=image_path,
+                caption=caption,
+                reply_to=reply_to,
+                metadata=metadata,
+            ),
+        )
+
+    async def _send_image_file_impl(
+        self,
+        *,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
         if not self._client:
             return SendResult(success=False, error="Not connected")
         if not os.path.exists(image_path):
@@ -3625,7 +3889,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     caption=caption,
                     media_tag={"tag": "img", "image_key": image_key},
                 )
-                message_response = await self._feishu_send_with_retry(
+                message_response = await self._send_attachment_message(
                     chat_id=chat_id,
                     msg_type="post",
                     payload=post_payload,
@@ -3633,7 +3897,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     metadata=metadata,
                 )
             else:
-                message_response = await self._feishu_send_with_retry(
+                message_response = await self._send_attachment_message(
                     chat_id=chat_id,
                     msg_type="image",
                     payload=json.dumps({"image_key": image_key}, ensure_ascii=False),
@@ -4768,6 +5032,9 @@ class FeishuAdapter(BasePlatformAdapter):
             getattr(self, "_delegate_card_blocks", {}).clear()
             getattr(self, "_delegate_card_locks", {}).clear()
             getattr(self, "_delegate_card_streamed", set()).clear()
+            # The attachment ledger is per-turn: "send me that file again"
+            # in a later turn has to upload it again.
+            getattr(self, "_card_media_dispatched", {}).clear()
 
     async def on_processing_complete(
         self, event: MessageEvent, outcome: ProcessingOutcome
@@ -6356,7 +6623,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     "file_key": file_key,
                     "file_name": display_name,
                 }
-                message_response = await self._feishu_send_with_retry(
+                message_response = await self._send_attachment_message(
                     chat_id=chat_id,
                     msg_type="post",
                     payload=self._build_media_post_payload(caption=caption, media_tag=media_tag),
@@ -6364,43 +6631,13 @@ class FeishuAdapter(BasePlatformAdapter):
                     metadata=metadata,
                 )
             else:
-                message_response = await self._feishu_send_with_retry(
+                message_response = await self._send_attachment_message(
                     chat_id=chat_id,
                     msg_type=resolved_message_type,
                     payload=json.dumps({"file_key": file_key}, ensure_ascii=False),
                     reply_to=reply_to,
                     metadata=metadata,
                 )
-                # Audio messages may fail with 99992402 when using thread_id routing.
-                # Try replying to the last message in the thread, then fall back to chat_id.
-                if (not self._response_succeeded(message_response)
-                        and getattr(message_response, "code", None) == 99992402
-                        and resolved_message_type == "audio"
-                        and (metadata or {}).get("thread_id")):
-                    # Try reply API with thread_id as reply anchor
-                    thread_msg_id = (metadata or {}).get("reply_to_message_id")
-                    if not thread_msg_id:
-                        thread_msg_id = await self._fetch_last_message_in_thread(
-                            (metadata or {}).get("thread_id")
-                        )
-                    if thread_msg_id:
-                        logger.info("[Feishu] Audio: retrying via reply API in thread")
-                        message_response = await self._feishu_send_with_retry(
-                            chat_id=chat_id,
-                            msg_type=resolved_message_type,
-                            payload=json.dumps({"file_key": file_key}, ensure_ascii=False),
-                            reply_to=thread_msg_id,
-                            metadata=metadata,
-                        )
-                    if not self._response_succeeded(message_response):
-                        logger.warning("[Feishu] Audio send failed in thread, retrying with chat_id")
-                        message_response = await self._feishu_send_with_retry(
-                            chat_id=chat_id,
-                            msg_type=resolved_message_type,
-                            payload=json.dumps({"file_key": file_key}, ensure_ascii=False),
-                            reply_to=None,
-                            metadata=None,
-                        )
             return self._finalize_send_result(message_response, "file send failed")
         except Exception as exc:
             logger.error("[Feishu] Failed to send file %s: %s", file_path, exc, exc_info=True)
@@ -6429,6 +6666,73 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.debug("[Feishu] Failed to fetch last message in thread %s: %s", thread_id, exc)
         return None
+
+    async def _send_attachment_message(
+        self,
+        *,
+        chat_id: str,
+        msg_type: str,
+        payload: str,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> Any:
+        """Deliver an already-uploaded attachment, surviving topic routing.
+
+        Inside a topic the normal send path keys the message on
+        ``receive_id_type=thread_id``.  Feishu accepts text and cards that
+        way but rejects every attachment kind — audio, file, media, image,
+        and a post carrying one — with a bare field-validation error, so a
+        file requested in a topic used to be lost while the same request in
+        the main chat worked.  The reply API places the same upload in the
+        topic without complaint, so re-anchor on a message inside the topic
+        first; only if that also fails do we drop the topic and post flat in
+        the chat, on the grounds that a file in the wrong place still beats
+        no file.
+        """
+        response = await self._feishu_send_with_retry(
+            chat_id=chat_id,
+            msg_type=msg_type,
+            payload=payload,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+        thread_id = (metadata or {}).get("thread_id")
+        if (
+            self._response_succeeded(response)
+            or getattr(response, "code", None) != _FEISHU_ATTACHMENT_THREAD_RECEIVE_CODE
+            or not thread_id
+        ):
+            return response
+
+        anchor_id = (metadata or {}).get("reply_to_message_id") or await self._fetch_last_message_in_thread(
+            str(thread_id)
+        )
+        if anchor_id and anchor_id != reply_to:
+            logger.info(
+                "[Feishu] %s rejected in topic %s; retrying as a reply to %s",
+                msg_type, thread_id, anchor_id,
+            )
+            response = await self._feishu_send_with_retry(
+                chat_id=chat_id,
+                msg_type=msg_type,
+                payload=payload,
+                reply_to=anchor_id,
+                metadata=metadata,
+            )
+            if self._response_succeeded(response):
+                return response
+        logger.warning(
+            "[Feishu] topic %s would not take a %s (no usable reply anchor, or the "
+            "reply was rejected too); delivering it flat in chat %s",
+            thread_id, msg_type, chat_id,
+        )
+        return await self._feishu_send_with_retry(
+            chat_id=chat_id,
+            msg_type=msg_type,
+            payload=payload,
+            reply_to=None,
+            metadata=None,
+        )
 
     async def _send_raw_message(
         self,

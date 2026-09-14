@@ -32,7 +32,7 @@ def _ensure_feishu_mocks():
 _ensure_feishu_mocks()
 
 from gateway.config import PlatformConfig  # noqa: E402
-from gateway.platforms.base import MessageEvent, ProcessingOutcome  # noqa: E402
+from gateway.platforms.base import MessageEvent, ProcessingOutcome, SendResult  # noqa: E402
 from plugins.platforms.feishu import feishu_cardkit  # noqa: E402
 from plugins.platforms.feishu.adapter import FeishuAdapter  # noqa: E402
 
@@ -1385,3 +1385,322 @@ def test_bypass_decision_table():
     assert decide({"hermes_progress": True}) is False
     assert decide({"hermes_progress": True, "non_conversational": True}) is False
     assert decide({"hermes_progress": True, "hermes_card_bypass": True}) is False
+
+
+# ---------------------------------------------------------------------------
+# Attachments in card mode
+# ---------------------------------------------------------------------------
+#
+# A file is never card content.  The gateway normally strips attachments out
+# of a reply before the adapter sees it, but card mode adds text entry points
+# that skip that pass (mid-turn commentary, delegate output), and anything
+# arriving that way used to render as a literal path inside the card.  These
+# pin the contract: same trigger rules as the non-card path, delivered as its
+# own message, never twice in one turn.
+
+
+@pytest.fixture
+def media_adapter(card_adapter, monkeypatch):
+    """``card_adapter`` with the uploaders stubbed and media env neutralized."""
+    # The delivery allowlist reads the environment; a developer's .env must not
+    # decide whether these pass — same reasoning as the card-title delenv above.
+    for env_name in (
+        "HERMES_MEDIA_DELIVERY_STRICT",
+        "HERMES_MEDIA_ALLOW_DIRS",
+        "HERMES_MEDIA_TRUST_RECENT_FILES",
+        "HERMES_MEDIA_TRUST_RECENT_SECONDS",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+    for name in ("send_document", "send_image_file", "send_video", "send_voice"):
+        monkeypatch.setattr(
+            card_adapter,
+            name,
+            AsyncMock(return_value=SendResult(success=True, message_id="om_file")),
+        )
+    return card_adapter
+
+
+def _deliverable(tmp_path, name="report.md", data=b"hello world"):
+    path = tmp_path / name
+    path.write_bytes(data)
+    return str(path)
+
+
+@pytest.mark.asyncio
+async def test_a_media_tag_in_card_text_is_uploaded_as_its_own_message(
+    media_adapter, tmp_path
+):
+    path = _deliverable(tmp_path)
+    _begin_turn(media_adapter)
+
+    await media_adapter.send(CHAT_ID, f"报告好了。\nMEDIA:{path}")
+    await _settle()
+
+    media_adapter.send_document.assert_awaited_once()
+    assert media_adapter.send_document.await_args.kwargs["file_path"] == path
+    body = media_adapter._cardkit.body_texts()[-1]
+    assert "MEDIA:" not in body
+    assert "报告好了。" in body
+    assert "report.md" in body  # the receipt line names the file
+
+
+@pytest.mark.asyncio
+async def test_a_bare_deliverable_path_is_uploaded_too(media_adapter, tmp_path):
+    """Card mode must not change *what* counts as a deliverable.
+
+    The non-card path auto-detects bare absolute paths; a reply that mentions
+    one has to produce the same attachment whether the card is on or off.
+    """
+    path = _deliverable(tmp_path, "notes.txt")
+    _begin_turn(media_adapter)
+
+    await media_adapter.send(CHAT_ID, f"写好了，文件在 {path}")
+    await _settle()
+
+    media_adapter.send_document.assert_awaited_once()
+    assert media_adapter.send_document.await_args.kwargs["file_path"] == path
+
+
+@pytest.mark.asyncio
+async def test_a_media_only_reply_still_gets_a_card_body(media_adapter, tmp_path):
+    """The receipt line is what keeps the body from being empty.
+
+    CardKit rejects a blank element, and an empty body would fall through to
+    the legacy path and post the raw tag as text.
+    """
+    path = _deliverable(tmp_path)
+    _begin_turn(media_adapter)
+
+    await media_adapter.send(CHAT_ID, f"MEDIA:{path}")
+    await _settle()
+
+    media_adapter.send_document.assert_awaited_once()
+    assert media_adapter._cardkit.body_texts()[-1].strip() == "📎 已发送文件：report.md"
+
+
+@pytest.fixture
+def uploads(card_adapter, monkeypatch):
+    """Record real uploads.
+
+    Stubbed *below* the per-turn ledger — stubbing the public senders would
+    skip the very check these tests exist to prove.
+    """
+    recorded: list = []
+
+    async def _record(**kwargs):
+        recorded.append(kwargs["file_path"])
+        return SendResult(success=True, message_id="om_file")
+
+    for env_name in (
+        "HERMES_MEDIA_DELIVERY_STRICT",
+        "HERMES_MEDIA_ALLOW_DIRS",
+        "HERMES_MEDIA_TRUST_RECENT_FILES",
+        "HERMES_MEDIA_TRUST_RECENT_SECONDS",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setattr(
+        card_adapter, "_send_uploaded_file_message", AsyncMock(side_effect=_record)
+    )
+    return recorded
+
+
+@pytest.mark.asyncio
+async def test_the_same_file_is_not_uploaded_twice_in_one_turn(
+    card_adapter, uploads, tmp_path
+):
+    """``_send_with_retry`` re-sends byte-identical content after a failure."""
+    path = _deliverable(tmp_path)
+    _begin_turn(card_adapter)
+
+    await card_adapter.send(CHAT_ID, f"Done. MEDIA:{path}")
+    await card_adapter.send(CHAT_ID, f"Done. MEDIA:{path}")
+    await _settle()
+
+    assert uploads == [path]
+
+
+@pytest.mark.asyncio
+async def test_the_gateways_own_upload_is_deduped_against_the_card_path(
+    card_adapter, uploads, tmp_path
+):
+    """Two entry points, one file.
+
+    Commentary can route a path through the card safety net while the final
+    reply routes the same path through the gateway's own extraction, which
+    calls the sender directly.  Only one upload may reach Feishu.
+    """
+    path = _deliverable(tmp_path)
+    _begin_turn(card_adapter)
+
+    await card_adapter.send(CHAT_ID, f"先看一下 MEDIA:{path}")
+    # The gateway's own dispatch loop, calling the sender directly.
+    await card_adapter.send_document(chat_id=CHAT_ID, file_path=path, metadata=None)
+    await _settle()
+
+    assert uploads == [path]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_upload_does_not_burn_the_file_for_the_turn(
+    card_adapter, tmp_path, monkeypatch
+):
+    """A claim is released when its upload fails, so a retry can still land."""
+    path = _deliverable(tmp_path)
+    monkeypatch.setattr(
+        card_adapter,
+        "_send_uploaded_file_message",
+        AsyncMock(side_effect=[
+            SendResult(success=False, error="upload rejected"),
+            SendResult(success=True, message_id="om_file"),
+        ]),
+    )
+    _begin_turn(card_adapter)
+
+    first = await card_adapter.send_document(chat_id=CHAT_ID, file_path=path)
+    second = await card_adapter.send_document(chat_id=CHAT_ID, file_path=path)
+
+    assert first.success is False
+    assert second.success is True
+
+
+@pytest.mark.asyncio
+async def test_a_later_turn_can_send_the_same_file_again(media_adapter, tmp_path):
+    """The ledger is per-turn: "send me that file again" has to work."""
+    path = _deliverable(tmp_path)
+    media_adapter._reactions_enabled = lambda: False
+
+    await media_adapter.on_processing_start(_event())
+    await media_adapter.send(CHAT_ID, f"MEDIA:{path}")
+    await _settle()
+    await media_adapter.on_processing_complete(_event(), ProcessingOutcome.SUCCESS)
+    await _settle()
+
+    await media_adapter.on_processing_start(_event(message_id="om_in2"))
+    await media_adapter.send(CHAT_ID, f"再发一次 MEDIA:{path}")
+    await _settle()
+
+    assert media_adapter.send_document.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name, sender, kwarg",
+    [
+        ("chart.png", "send_image_file", "image_path"),
+        ("clip.mp4", "send_video", "video_path"),
+        ("report.pdf", "send_document", "file_path"),
+    ],
+)
+async def test_attachments_route_by_kind(media_adapter, tmp_path, name, sender, kwarg):
+    """Same routing table as the gateway's dispatch loop."""
+    path = _deliverable(tmp_path, name)
+    _begin_turn(media_adapter)
+
+    await media_adapter.send(CHAT_ID, f"给你 MEDIA:{path}")
+    await _settle()
+
+    getattr(media_adapter, sender).assert_awaited_once()
+    assert getattr(media_adapter, sender).await_args.kwargs[kwarg] == path
+
+
+@pytest.mark.asyncio
+async def test_audio_marked_as_voice_routes_to_the_voice_sender(media_adapter, tmp_path):
+    path = _deliverable(tmp_path, "memo.ogg")
+    _begin_turn(media_adapter)
+
+    await media_adapter.send(CHAT_ID, f"[[audio_as_voice]] MEDIA:{path}")
+    await _settle()
+
+    media_adapter.send_voice.assert_awaited_once()
+    assert media_adapter.send_voice.await_args.kwargs["audio_path"] == path
+
+
+@pytest.mark.asyncio
+async def test_a_failed_upload_is_reported_not_swallowed(media_adapter, tmp_path):
+    """A silent drop is the one outcome worse than a failed send.
+
+    The notice lands at the end of the card (it goes out through ``send``,
+    like any other text) — what matters is that it is there at all.
+    """
+    path = _deliverable(tmp_path)
+    media_adapter.send_document = AsyncMock(
+        return_value=SendResult(success=False, error="upload rejected")
+    )
+    _begin_turn(media_adapter)
+
+    await media_adapter.send(CHAT_ID, f"MEDIA:{path}")
+    await _settle()
+
+    assert "Couldn't deliver" in media_adapter._cardkit.body_texts()[-1]
+
+
+@pytest.mark.asyncio
+async def test_progress_and_bypass_sends_never_upload(media_adapter, tmp_path):
+    """Execution chrome and lifecycle notices are not attachment requests."""
+    path = _deliverable(tmp_path)
+    _begin_turn(media_adapter)
+
+    await media_adapter.send(CHAT_ID, f"MEDIA:{path}", metadata={"hermes_progress": True})
+    await media_adapter.send(
+        CHAT_ID, f"MEDIA:{path}", metadata={"hermes_card_bypass": True}
+    )
+    await _settle()
+
+    media_adapter.send_document.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_media_tag_outside_a_turn_is_left_to_the_legacy_path(
+    media_adapter, tmp_path
+):
+    """No turn, no card — and therefore no card-side extraction either."""
+    path = _deliverable(tmp_path)
+
+    await media_adapter.send(CHAT_ID, f"MEDIA:{path}")
+    await _settle()
+
+    media_adapter.send_document.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_path_inside_a_code_block_is_not_an_attachment_request(
+    media_adapter, tmp_path
+):
+    """Reusing the gateway's extractors is what buys this.
+
+    A reply that documents the MEDIA syntax must not ship the file it names.
+    """
+    path = _deliverable(tmp_path)
+    _begin_turn(media_adapter)
+
+    await media_adapter.send(CHAT_ID, f"用法：\n```\nMEDIA:{path}\n```")
+    await _settle()
+
+    media_adapter.send_document.assert_not_awaited()
+    assert f"MEDIA:{path}" in media_adapter._cardkit.body_texts()[-1]
+
+
+@pytest.mark.asyncio
+async def test_files_still_ship_when_the_card_declines_the_text(
+    media_adapter, tmp_path, monkeypatch
+):
+    """CardKit can refuse a send mid-turn (cooldown after a delivery failure).
+
+    The text then falls back to the legacy text/post path — but the files were
+    already taken out of it, so this branch is the only thing left that can
+    deliver them.
+    """
+    path = _deliverable(tmp_path)
+    _begin_turn(media_adapter)
+    monkeypatch.setattr(
+        media_adapter._card_manager, "deliver", AsyncMock(return_value=None)
+    )
+
+    result = await media_adapter.send(CHAT_ID, f"报告好了。\nMEDIA:{path}")
+    await _settle()
+
+    assert result.success is True
+    media_adapter.send_document.assert_awaited_once()
+    payload = media_adapter._feishu_send_with_retry.await_args.kwargs["payload"]
+    assert "MEDIA:" not in payload
+    assert "report.md" in payload

@@ -1431,6 +1431,38 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertTrue(captured["request"].request_body.reply_in_thread)
 
+    @patch.dict(os.environ, {}, clear=True)
+    def test_media_handling_is_untouched_when_card_output_is_off(self):
+        """Card mode extracts attachments out of card text and dedupes uploads.
+
+        With ``FEISHU_CARD_OUTPUT`` off, neither may happen: the text goes out
+        exactly as given (tag included — the gateway strips it upstream on this
+        path) and the same file can be sent as many times as the caller asks.
+        """
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        self.assertFalse(adapter._card_output_enabled)
+
+        with tempfile.NamedTemporaryFile("wb", suffix=".pdf", delete=False) as tmp:
+            tmp.write(b"%PDF-1.4 test")
+            file_path = tmp.name
+
+        try:
+            text = f"see the report MEDIA:{file_path}"
+            body, owed = adapter._split_card_mode_attachments(
+                chat_id="oc_chat", content=text, metadata=None,
+            )
+            self.assertEqual(body, text)
+            self.assertEqual(owed, [])
+
+            # The per-turn ledger is inert too, so nothing is ever skipped.
+            self.assertTrue(adapter._claim_card_media("oc_chat", file_path, None))
+            self.assertTrue(adapter._claim_card_media("oc_chat", file_path, None))
+        finally:
+            os.unlink(file_path)
+
 
     @patch.dict(os.environ, {}, clear=True)
     def test_send_uses_post_for_every_chunk_of_multi_chunk_markdown(self):
@@ -1554,6 +1586,230 @@ class TestAdapterBehavior(unittest.TestCase):
                 [{"tag": "md", "text": "后续说明仍应保留。"}],
             ],
         )
+
+
+class TestFeishuAttachmentTopicRouting(unittest.TestCase):
+    """Attachments rejected by topic routing must be re-anchored, not dropped.
+
+    A message created with ``receive_id_type=thread_id`` is fine for text and
+    cards but comes back 99992402 for every attachment kind, so a file the user
+    asked for inside a Feishu topic used to be lost while the identical request
+    in the main chat worked.
+    """
+
+    def _adapter(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        return FeishuAdapter(PlatformConfig())
+
+    @staticmethod
+    def _rejected():
+        return SimpleNamespace(success=lambda: False, code=99992402, msg="field validation failed")
+
+    @staticmethod
+    def _accepted(message_id="om_sent"):
+        return SimpleNamespace(
+            success=lambda: True, code=0, data=SimpleNamespace(message_id=message_id)
+        )
+
+    def test_a_file_the_topic_rejects_is_resent_as_a_reply_inside_the_topic(self):
+        adapter = self._adapter()
+        adapter._send_raw_message = AsyncMock(side_effect=[self._rejected(), self._accepted()])
+        adapter._fetch_last_message_in_thread = AsyncMock(return_value="om_last_in_topic")
+
+        response = asyncio.run(
+            adapter._send_attachment_message(
+                chat_id="oc_chat",
+                msg_type="file",
+                payload=json.dumps({"file_key": "file_1"}),
+                reply_to=None,
+                metadata={"thread_id": "omt_topic"},
+            )
+        )
+
+        self.assertTrue(response.success())
+        self.assertEqual(adapter._send_raw_message.await_count, 2)
+        retry = adapter._send_raw_message.await_args_list[1].kwargs
+        self.assertEqual(retry["reply_to"], "om_last_in_topic")
+        # The retry keeps the thread metadata, so the file lands in the topic
+        # the user asked in rather than at the bottom of the chat.
+        self.assertEqual(retry["metadata"], {"thread_id": "omt_topic"})
+
+    def test_a_known_anchor_is_reused_instead_of_listing_the_topic(self):
+        adapter = self._adapter()
+        adapter._send_raw_message = AsyncMock(side_effect=[self._rejected(), self._accepted()])
+        adapter._fetch_last_message_in_thread = AsyncMock(return_value="om_listed")
+
+        asyncio.run(
+            adapter._send_attachment_message(
+                chat_id="oc_chat",
+                msg_type="file",
+                payload="{}",
+                reply_to=None,
+                metadata={"thread_id": "omt_topic", "reply_to_message_id": "om_known"},
+            )
+        )
+
+        adapter._fetch_last_message_in_thread.assert_not_awaited()
+        self.assertEqual(
+            adapter._send_raw_message.await_args_list[1].kwargs["reply_to"], "om_known"
+        )
+
+    def test_without_an_anchor_the_file_goes_out_flat_rather_than_not_at_all(self):
+        adapter = self._adapter()
+        adapter._send_raw_message = AsyncMock(side_effect=[self._rejected(), self._accepted()])
+        adapter._fetch_last_message_in_thread = AsyncMock(return_value=None)
+
+        response = asyncio.run(
+            adapter._send_attachment_message(
+                chat_id="oc_chat",
+                msg_type="file",
+                payload="{}",
+                reply_to=None,
+                metadata={"thread_id": "omt_topic"},
+            )
+        )
+
+        self.assertTrue(response.success())
+        self.assertEqual(adapter._send_raw_message.await_count, 2)
+        flat = adapter._send_raw_message.await_args_list[1].kwargs
+        self.assertIsNone(flat["reply_to"])
+        self.assertIsNone(flat["metadata"])
+
+    def test_a_rejected_reply_still_falls_back_to_the_flat_chat(self):
+        adapter = self._adapter()
+        adapter._send_raw_message = AsyncMock(
+            side_effect=[self._rejected(), self._rejected(), self._accepted()]
+        )
+        adapter._fetch_last_message_in_thread = AsyncMock(return_value="om_last_in_topic")
+
+        response = asyncio.run(
+            adapter._send_attachment_message(
+                chat_id="oc_chat",
+                msg_type="file",
+                payload="{}",
+                reply_to=None,
+                metadata={"thread_id": "omt_topic"},
+            )
+        )
+
+        self.assertTrue(response.success())
+        self.assertEqual(adapter._send_raw_message.await_count, 3)
+        self.assertIsNone(adapter._send_raw_message.await_args_list[2].kwargs["metadata"])
+
+    def test_some_other_rejection_is_reported_rather_than_retried(self):
+        adapter = self._adapter()
+        denied = SimpleNamespace(success=lambda: False, code=230011, msg="no permission")
+        adapter._send_raw_message = AsyncMock(return_value=denied)
+
+        response = asyncio.run(
+            adapter._send_attachment_message(
+                chat_id="oc_chat",
+                msg_type="file",
+                payload="{}",
+                reply_to=None,
+                metadata={"thread_id": "omt_topic"},
+            )
+        )
+
+        self.assertIs(response, denied)
+        self.assertEqual(adapter._send_raw_message.await_count, 1)
+
+    def test_outside_a_topic_there_is_nothing_to_re_anchor(self):
+        adapter = self._adapter()
+        rejected = self._rejected()
+        adapter._send_raw_message = AsyncMock(return_value=rejected)
+
+        response = asyncio.run(
+            adapter._send_attachment_message(
+                chat_id="oc_chat",
+                msg_type="file",
+                payload="{}",
+                reply_to=None,
+                metadata=None,
+            )
+        )
+
+        self.assertIs(response, rejected)
+        self.assertEqual(adapter._send_raw_message.await_count, 1)
+
+    def test_a_document_asked_for_inside_a_topic_is_delivered(self):
+        """End to end over the reported failure: a .txt requested in a topic."""
+        adapter = self._adapter()
+
+        class _FileAPI:
+            def create(self, request):
+                return SimpleNamespace(
+                    success=lambda: True, data=SimpleNamespace(file_key="file_123")
+                )
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(v1=SimpleNamespace(file=_FileAPI()))
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        adapter._send_raw_message = AsyncMock(side_effect=[self._rejected(), self._accepted()])
+        adapter._fetch_last_message_in_thread = AsyncMock(return_value="om_last_in_topic")
+
+        with tempfile.NamedTemporaryFile("wb", suffix=".txt", delete=False) as tmp:
+            tmp.write(b"hello world")
+            file_path = tmp.name
+
+        try:
+            with patch.object(adapter, "_run_blocking", side_effect=_direct):
+                result = asyncio.run(
+                    adapter.send_document(
+                        chat_id="oc_chat",
+                        file_path=file_path,
+                        metadata={"thread_id": "omt_topic"},
+                    )
+                )
+        finally:
+            os.unlink(file_path)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message_id, "om_sent")
+
+    def test_an_image_gets_the_same_ladder_as_a_file(self):
+        adapter = self._adapter()
+
+        class _ImageAPI:
+            def create(self, request):
+                return SimpleNamespace(
+                    success=lambda: True, data=SimpleNamespace(image_key="img_123")
+                )
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(v1=SimpleNamespace(image=_ImageAPI()))
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        adapter._send_raw_message = AsyncMock(side_effect=[self._rejected(), self._accepted()])
+        adapter._fetch_last_message_in_thread = AsyncMock(return_value="om_last_in_topic")
+
+        with tempfile.NamedTemporaryFile("wb", suffix=".png", delete=False) as tmp:
+            tmp.write(b"\x89PNG\r\n\x1a\n")
+            image_path = tmp.name
+
+        try:
+            with patch.object(adapter, "_run_blocking", side_effect=_direct):
+                result = asyncio.run(
+                    adapter.send_image_file(
+                        chat_id="oc_chat",
+                        image_path=image_path,
+                        metadata={"thread_id": "omt_topic"},
+                    )
+                )
+        finally:
+            os.unlink(image_path)
+
+        self.assertTrue(result.success)
+        self.assertEqual(adapter._send_raw_message.await_count, 2)
 
 
 @unittest.skipUnless(_HAS_LARK_OAPI, "lark-oapi not installed")

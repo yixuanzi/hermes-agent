@@ -58,3 +58,7 @@ optional_env:
     description: "Title of the collapsible execution-trace panel (default '🔧 执行过程')"
     prompt: "Execution panel title"
     password: false
+  - name: FEISHU_CARD_ATTACHMENT_NOTE
+    description: "Line added to the card body when a reply ships files; the files themselves arrive as separate messages. May contain {names} (default '📎 已发送文件：{names}')"
+    prompt: "Attachment note"
+    password: false

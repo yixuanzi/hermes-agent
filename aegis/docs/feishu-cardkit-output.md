@@ -3,6 +3,7 @@
 改造依据：`~/wiki/01-Raw/AIAgent/hermes-feishu-card-output.md`
 落地日期：2026-09-10（含真机截图反馈后的富文本渲染修正、委派卡片粒度调整、流式并发竞态修复、瞬态通知绕过卡片）
 　　　　　2026-09-11 追加：折叠区把主 agent 的 terminal 命令折回工具行（见「富文本渲染细节」）
+　　　　　2026-09-13 追加：卡片模式下的附件投递，以及话题内附件投递修复（见「附件：文件永远不进卡片」）
 首个提交：`335002eccf feishu card output 0.1`
  
 > **当前为 opt-in**：`FEISHU_CARD_OUTPUT` 默认 **false**，不配置就完全走原来的 text/post 路径。要用卡片需显式置 true。
@@ -12,12 +13,13 @@
 | 文件 | 说明 |
 |---|---|
 | `plugins/platforms/feishu/feishu_cardkit.py` | **新增**（~1280 行）。CardKit 卡片引擎：SDK 懒加载、`FeishuCardSession`、`FeishuCardOutputManager`、`build_card_json`、`normalize_markdown`、`format_trace_lines`、`close_owner` |
-| `plugins/platforms/feishu/adapter.py` | `send()` / `edit_message()` / `delete_message()` 卡片拦截；turn 括起（`on_processing_start` / `on_processing_complete`）；`handle_delegate_card_event`；`_card_bypass_requested`；`_env_boolean_default_false`；`card_output` 配置 |
-| `plugins/platforms/feishu/plugin.yaml` | 4 个新 optional_env |
+| `plugins/platforms/feishu/adapter.py` | `send()` / `edit_message()` / `delete_message()` 卡片拦截；turn 括起（`on_processing_start` / `on_processing_complete`）；`handle_delegate_card_event`；`_card_bypass_requested`；`_env_boolean_default_false`；`card_output` 配置；卡片模式附件（`_split_card_mode_attachments` / `_dispatch_card_attachments` / `_send_media_once`）；话题内附件重锚（`_send_attachment_message`） |
+| `plugins/platforms/feishu/plugin.yaml` | 5 个新 optional_env |
 | `gateway/run.py` | progress metadata 打 `hermes_progress`；心跳 metadata 打 `hermes_card_bypass`（**均仅 Feishu 平台**） |
 | `tools/a2a_delegate_tool.py` | `_A2ADelegateSession` 增加 `agent_name`（仅用于卡片标题展示） |
-| `.env.example` | 三个 FEISHU_CARD_* 示例项 |
-| `tests/gateway/test_feishu_card_output.py` | **新增** 75 个测试 |
+| `.env.example` | 四个 FEISHU_CARD_* 示例项 |
+| `tests/gateway/test_feishu_card_output.py` | **新增** 91 个测试 |
+| `tests/gateway/test_feishu.py` | 106 个测试（含话题内附件投递 8 个、卡片关闭时的向后兼容锚点 1 个） |
  
 ## 卡片结构（JSON 2.0，走 CardKit API）
  
@@ -98,6 +100,58 @@
   `_count_trace_steps()` 直接数切分后的步骤，所以标题里的步数与看到的条目数一致。
 - markdown 元素支持完整 CommonMark（除 HTMLBlock）+ 部分 HTML；表格除表头外最多显示 5 行、单个元素最多 4 个表格。
 - `element_id` 规则：仅字母数字下划线、字母开头、**≤20 字符**（现有三个 id 均合规，有测试守着）。
+## 附件：文件永远不进卡片
+
+**结论先行**：飞书的文件发送方法（`send_document` / `send_voice` / `send_video` / `send_image_file`）走的是 `im.v1.file.create` + `im.v1.message`，**根本不经过 `_send_via_card`**，所以附件天然是独立消息。网关主链路（`base.py` 的 `_process_message_background`）在卡片模式下也照常先抽取、再发正文（进卡片）、最后上传附件 —— 封卡的 `on_processing_complete` 在这之后才执行。也就是说：**卡片没有从架构上挡住文件发送**。
+
+卡片真正引入的缺口是另一件事：**卡片正文是一个新的文本入口，而它不跑附件抽取**。中途旁白（`stream_consumer._send_commentary`）和委派正文都是直接调 `adapter.send()` 进卡片的，它们携带的文件引用以前只会变成卡片里的一行字。
+
+`FeishuAdapter._split_card_mode_attachments()` 补上这个缺口，规则与非卡片模式**完全一致**（用的就是网关那套 helper，不是自己写的正则）：
+
+| 门 | 作用 |
+|---|---|
+| `_card_media_route()` 返回 `None` | 卡片关闭 / 不在回合内 → 整个特性 no-op，legacy 路径逐字节不变 |
+| `hermes_card_bypass` / `hermes_progress` | 生命周期通知和工具链路不是附件请求 |
+| `extract_media` + `filter_media_delivery_paths` | 显式 `MEDIA:` 标记，含 `[[audio_as_voice]]` / `[[as_document]]` |
+| `extract_local_files` + `filter_local_delivery_paths` | 裸路径（deliverable mode），与关闭卡片时一致 |
+
+复用这些 helper 的附带好处：代码块、行内代码、JSON 里的路径已经被屏蔽，所以一段**讲解** MEDIA 语法的回答不会误发文件；以后网关规则变了这边自动跟随。
+
+抽出来的文件经 `_dispatch_card_attachments()` 按类型分派（音频→voice、视频→media、图片→image、其余→file），**每个文件一条独立消息**；卡片正文换成清理后的文本 + 一行回执（`FEISHU_CARD_ATTACHMENT_NOTE`）。这行回执顺带保证正文非空 —— 纯 `MEDIA:` 的回复不会退化成空 block（`manager.deliver` 会拒绝空文本）。
+
+### 为什么需要一个「本回合已投递」账本
+
+同一个文件在一个回合里有**两个**入口：网关自己的抽取直接调发送器，安全网也调发送器。此外 `base._send_with_retry` 在瞬时失败后会用**完全相同的 content** 重调 `send()`。没有账本，这两种情况都会把同一个文件发两遍。
+
+`_send_media_once()` 包住四个发送器：
+
+- **上传前就占位**（否则重试窗口内会双发）；
+- **失败即释放**，所以一次失败不会把这个文件在本回合内「烧掉」；
+- 命中已投递时返回 `success=True` —— 用户已经有这个文件了，不该再收到一条失败告警；
+- 只在卡片回合活跃时生效，`FEISHU_CARD_OUTPUT=false` 时账本完全不介入；
+- **作用域只限一个回合**：下一轮用户再要同一个文件仍然能重发。
+
+### 上传失败
+
+失败时仍走 `_notify_media_delivery_failure`，告警经 `send()` 落在**卡片末尾**。这是现状、也是有意保留的：用户看得到失败，不需要额外一条独立消息。
+
+### 与卡片无关的一条：话题（topic）里发不出附件
+
+真机复现「卡片模式下文件发送失败」时，日志给出的其实是
+`[Feishu] Failed to send media (.txt): [99992402] field validation failed` ——
+文件已经上传成功（拿到了 `file_key`），失败的是**承载它的那条消息**。
+
+原因在 `_send_raw_message`：话题里的消息以 `receive_id_type=thread_id` 下发，
+飞书对**文本和卡片**接受这种键法，对**任何附件类型**（audio / file / media / image，
+以及带附件的 post）一律回 99992402。所以同一个文件在主会话里发得出去，在话题里就丢了。
+代码里原本只为 audio 打了一个补丁，file 没有。
+
+`_send_attachment_message()` 把这个补丁推广到全部附件类型：99992402 的含义是
+「换个锚点」而不是「放弃」—— 先用 reply API 挂在话题内某条消息上重发（文件仍落在话题里），
+仍失败才退到主会话平铺发送（文件发错位置也好过发不出去）。其他错误码原样上报、不重试。
+
+**这一条与 `FEISHU_CARD_OUTPUT` 无关**，关闭卡片同样会命中；只是本次排查时一起修了。
+
 ## 卡片边界规则
  
 一张卡片只属于一个「说话人」（owner），**且只装一次交互**：
@@ -145,14 +199,15 @@
 | `FEISHU_CARD_TITLE` | `🤖 Hermes` | 主卡标题（本机 `.env` 设为 `🤖 Aegis`） |
 | `FEISHU_CARD_DELEGATE_TITLE` | `🛰️ 委派 · {agent}` | 委派卡标题（本机 `.env` 追加了 `\| 输入 /main 返回主会话`） |
 | `FEISHU_CARD_TRACE_TITLE` | `🔧 执行过程` | 折叠区标题 |
+| `FEISHU_CARD_ATTACHMENT_NOTE` | `📎 已发送文件：{names}` | 附件回执行（见「附件」一节） |
 | `HERMES_FEISHU_CARD_FLUSH_INTERVAL` | `0.4` | 更新合并窗口（秒） |
  
 > 注意：`_to_boolean()` 只认字面量 `"true"`，所以 `FEISHU_CARD_OUTPUT=1` 用它解析会被读成 off。为此加了 `_env_boolean_default_false()`，与既有的 `_env_boolean_default_true()` 对称，接受同一组拼写。
  
 ## 验证状态
  
-- `tests/gateway/test_feishu_card_output.py` 75 passed（含 trace 围栏折叠的 4 个新测试）
-- `tests/gateway -k "feishu or stream_consumer or stream_events or delegate"` 430 passed，2 failed
+- `tests/gateway/test_feishu_card_output.py` + `tests/gateway/test_feishu.py` 197 passed
+- `tests/gateway -k "feishu or media or deliver"` 793 passed，2 failed
   （`test_feishu_channel_prompts.py::test_inbound_event_carries_channel_prompt`、
   `test_stream_consumer_thread_routing.py::TestFeishuFallbackThreadRouting::test_create_uses_thread_id_when_available`
   —— 已用改前基线复现，属临时验证环境未 bind lark SDK 全局的既有失败，非本次回归）
