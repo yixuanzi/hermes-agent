@@ -613,7 +613,15 @@ const LOCAL_PRIMARY_SCOPED_ROUTES = new Set([
   // Spawns a background action polled via /api/actions/{name}/status — must
   // live on the SAME backend as that poll family (below), or the poll asks a
   // backend that never registered the dynamic action name and 404s.
-  'POST /api/mcp/catalog/install'
+  'POST /api/mcp/catalog/install',
+  // Gateway lifecycle: the handlers take `?profile=` and already decide, per
+  // profile, whether X has its own gateway or is served by the default
+  // multiplexer (409 / restart the multiplexer). Spawning from the primary keeps
+  // the action on the backend the status poll asks AND outside the pooled
+  // backend's own shutdown, which SIGTERMs its gateway-restart child.
+  'POST /api/gateway/restart',
+  'POST /api/gateway/start',
+  'POST /api/gateway/stop'
 ])
 
 function localPrimaryRequestScope(opts: ProfileRouteOptions): boolean | null {
@@ -644,6 +652,14 @@ function localPrimaryRequestScope(opts: ProfileRouteOptions): boolean | null {
   // primary, so the poll family follows — a pooled-backend poll 404s with
   // "Unknown action" even though the install itself succeeded (#89xxx).
   if (pathname.startsWith('/api/actions/')) {
+    return true
+  }
+
+  // Session reads already accept `profile` and open that profile's state.db
+  // read-only. Keep ownership probes and transcript reads on the shared primary
+  // instead of spawning one local backend per profile. Writes remain pooled so
+  // their process-level profile scope and side effects are unchanged.
+  if (method === 'GET' && (pathname === '/api/sessions' || pathname.startsWith('/api/sessions/'))) {
     return true
   }
 
