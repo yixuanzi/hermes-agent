@@ -705,3 +705,40 @@ class TaskAuditListResponse(BaseModel):
     total: int = Field(ge=0)
     page: int = Field(ge=1)
     page_size: int = Field(ge=1, le=100)
+
+
+class UserEnvEntry(BaseModel):
+    """One user env variable with a masked value (plaintext never leaves the backend)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    masked_value: str
+
+
+class UserEnvListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    variables: list[UserEnvEntry]
+
+
+class UserEnvSetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(min_length=1, max_length=256)
+    value: str = Field(min_length=1, max_length=32_000)
+
+
+class UserEnvSetResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    updated: bool = True
+    key: str
+    variables: list[UserEnvEntry]
+
+
+class UserEnvDeleteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    deleted: bool
+    key: str

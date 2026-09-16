@@ -14,6 +14,7 @@ import SettingsTab from './components/SettingsTab';
 import AuditLogsTab from './components/AuditLogsTab';
 import PromptTemplateTab from './components/PromptTemplateTab';
 import UserManualTab from './components/UserManualTab';
+import UserEnvTab from './components/UserEnvTab';
 import AppEntryTab from './components/AppEntryTab';
 import ThemeDialog from './components/ThemeDialog';
 import { AegisChatProvider, useAegisChatRuntime } from './lib/chatRuntime';
@@ -33,7 +34,7 @@ import {
 } from './lib/adapters';
 import { Agent, AgentDraft, AppEntryList, AuthenticatedUser, OverviewStats, RoutingRule, RoutingRuleDraft, StarmappingTopology, UserDraft, UserRoleName } from './types';
 
-type AppTab = 'overview' | 'chat' | 'prompt_templates' | 'user_manual' | 'app_entry' | 'orchestration' | 'policy' | 'users' | 'settings' | 'audit';
+type AppTab = 'overview' | 'chat' | 'prompt_templates' | 'user_manual' | 'user_env' | 'app_entry' | 'orchestration' | 'policy' | 'users' | 'settings' | 'audit';
 
 type AuthLoginResponse = {
   authenticated: boolean;
@@ -67,6 +68,7 @@ const TAB_TO_PATH: Record<AppTab, string> = {
   chat: '/chat',
   prompt_templates: '/prompt-templates',
   user_manual: '/user-manual',
+  user_env: '/user-env',
   app_entry: '/app-entry',
   orchestration: '/orchestration',
   policy: '/policy',
@@ -93,6 +95,9 @@ function resolveTabFromPath(pathname: string): AppTab | null {
   }
   if (pathname === '/user-manual') {
     return 'user_manual';
+  }
+  if (pathname === '/user-env') {
+    return 'user_env';
   }
   if (pathname === '/app-entry') {
     return 'app_entry';
@@ -365,6 +370,7 @@ function AuthenticatedAppShell({
           {activeTab === 'chat' ? <ChatTab agents={agents} /> : null}
           {activeTab === 'prompt_templates' ? <PromptTemplateTab /> : null}
           {activeTab === 'user_manual' ? <UserManualTab /> : null}
+          {activeTab === 'user_env' ? <UserEnvTab /> : null}
           {activeTab === 'app_entry' ? (
             <AppEntryTab
               directory={appEntries}

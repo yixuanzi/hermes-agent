@@ -10,6 +10,7 @@ import {
   ChevronRight,
   FilePenLine,
   BookOpen,
+  KeyRound,
   UserRound,
   AppWindow,
   PanelLeftClose,
@@ -173,6 +174,14 @@ export default function Sidebar({
               >
                 <BookOpen className="h-3.5 w-3.5" />
                 <div><div className="text-xs font-medium">User Manual</div><div className="mt-0.5 text-[9px] text-slate-600">用户手册</div></div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('user_env')}
+                className={`w-full rounded px-3 py-2.5 text-left flex items-center gap-2 transition ${activeTab === 'user_env' ? 'bg-cyan-950/20 text-cyan-300' : 'text-slate-500 hover:bg-[#080C14] hover:text-slate-300'}`}
+              >
+                <KeyRound className="h-3.5 w-3.5" />
+                <div><div className="text-xs font-medium">User Env</div><div className="mt-0.5 text-[9px] text-slate-600">环境变量托管</div></div>
               </button>
             </div>
           ) : null}

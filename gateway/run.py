@@ -16061,10 +16061,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 plugin_handler = get_plugin_command_handler(command.replace("_", "-"))
                 if plugin_handler:
                     user_args = event.get_command_args().strip()
-                    result = plugin_handler(user_args)
-                    if asyncio.iscoroutine(result):
-                        result = await result
-                    return str(result) if result else None
+                    # Bind the caller's userenv identity for the duration of
+                    # the handler, mirroring the tool-call path
+                    # (agent/tool_executor.py). Plugin commands run inside
+                    # _handle_message — BEFORE _set_session_env binds
+                    # HERMES_SESSION_* — so without this, identity-dependent
+                    # plugin commands (e.g. /userenv) would see no caller.
+                    # Identity comes from the adapter's SessionSource, never
+                    # from message text, so it cannot be forged by the LLM.
+                    from tools.user_env_runtime import (
+                        reset_current_user_env_identity,
+                        set_current_user_env_identity,
+                    )
+                    _env_token = set_current_user_env_identity(
+                        source.platform.value if source.platform else "",
+                        source.user_id,
+                        source.user_name,
+                    )
+                    try:
+                        result = plugin_handler(user_args)
+                        if asyncio.iscoroutine(result):
+                            result = await result
+                        return str(result) if result else None
+                    finally:
+                        reset_current_user_env_identity(_env_token)
             except Exception as e:
                 logger.warning("Plugin command dispatch failed: %s", e)
 

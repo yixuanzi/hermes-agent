@@ -223,6 +223,9 @@ Intent: Prefix Slack and Feishu DM/channel/group messages that become agent-boun
 Feature: Feishu card output stream classification.
 Intent: Mark Feishu tool-progress sends with `hermes_progress` and the long-running heartbeat with `hermes_card_bypass`, so an adapter that renders a whole turn as one card can tell execution chrome, the reply itself, and a transient status notice apart. Both markers are scoped to Feishu so no other platform's progress or status metadata changes shape, and neither is presentation state that reaches conversation history.
 
+Feature: Plugin slash-command caller identity binding.
+Intent: Bind the invoking user's userenv identity (from the adapter's `SessionSource`) around plugin-registered slash-command handlers for the duration of the call, mirroring the tool-call path in `agent/tool_executor.py`. Plugin command dispatch runs inside `_handle_message` before `_set_session_env` binds `HERMES_SESSION_*`, so without this binding identity-dependent plugin commands (e.g. `/userenv`) would see no caller and fail closed. Identity must always come from the gateway source, never from message text, and the ContextVar must be reset after the handler returns.
+
 ## File: `tools/user_env_store.py`
 
 Feature: Persistent per-user env storage.
@@ -292,3 +295,18 @@ Intent: Ship the two product packages as importable distributions and keep the F
 
 Feature: Official A2A protocol smoke test.
 Intent: Exercise Agent Card discovery, single and multi-turn context reuse, polling, streaming, terminal states, and optional bearer authentication through the installed A2A SDK for AISOC verification.
+
+## File: `plugins/ext-tools/__init__.py`
+
+Feature: Stateless extension host for tools and slash commands.
+Intent: Register plugin-owned capabilities (the `cron_prompt` tool and the `/userenv` slash command) in one place so new stateless surface arrives as one module per capability without growing the Hermes core tool schema or command registry.
+
+## File: `plugins/ext-tools/userenv_cmd.py`
+
+Feature: `/userenv` self-service env slash command.
+Intent: Let authenticated runtime users list, get, set, and delete only their own persisted env variables through the gateway command path, so secret values never enter the LLM conversation context. Identity comes from the userenv ContextVar bound by the gateway (never from message text), missing identity fails closed for data operations while help text stays available, `get` responses mask values to the first/last four characters, and storage reuses `tools/user_env_store.py` with `CURRENT_USER_NAME` remaining system-managed.
+
+## File: `plugins/ext-tools/plugin.yaml`
+
+Feature: ext-tools plugin manifest.
+Intent: Declare the plugin's provided tools and commands (`cron_prompt` tool, `/userenv` command) so discovery surfaces what the plugin contributes without inspecting code.

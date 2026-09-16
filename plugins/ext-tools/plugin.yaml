@@ -1,0 +1,8 @@
+name: ext-tools
+version: "1.0.0"
+description: "Stateless extension tools host — read-only utilities that don't warrant core tool surface. Tools: cron_prompt (full cron job prompt with owner identity check). Commands: /userenv (self-managed user env vars, identity-scoped, bypasses LLM context)."
+author: "guisheng"
+provides_tools:
+  - cron_prompt
+provides_commands:
+  - userenv
