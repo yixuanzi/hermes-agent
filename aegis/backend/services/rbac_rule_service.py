@@ -95,11 +95,13 @@ class RbacRuleService:
         expected_fields = expected_roles | {DANGEROUS_PATTERN_FIELD}
         if configured_roles == expected_fields | {_LEGACY_UNKNOWN_ROLE}:
             payload.pop(_LEGACY_UNKNOWN_ROLE)
-            return payload, True
-        if configured_roles != expected_fields:
+            migrated = True
+        elif configured_roles != expected_fields:
             raise RbacRuleConfigError(
                 "RBAC rules must define the three supported roles and dangerous_pattern."
             )
+        else:
+            migrated = False
         dangerous_pattern = payload[DANGEROUS_PATTERN_FIELD]
         if not isinstance(dangerous_pattern, str):
             raise RbacRuleConfigError("RBAC dangerous_pattern must be a string.")
@@ -107,7 +109,23 @@ class RbacRuleService:
             re.compile(dangerous_pattern)
         except re.error as exc:
             raise RbacRuleConfigError("RBAC dangerous_pattern is not a valid regular expression.") from exc
-        return payload, False
+        for role in RBAC_ROLES:
+            role_payload = payload[role]
+            if not isinstance(role_payload, dict):
+                continue
+            tools_paras = role_payload.get("tools_paras")
+            if not isinstance(tools_paras, dict):
+                continue
+            normalized_tools_paras: dict[str, Any] = {}
+            for tool_name, rules in tools_paras.items():
+                if isinstance(rules, dict):
+                    normalized_tools_paras[tool_name] = [rules]
+                    migrated = True
+                else:
+                    normalized_tools_paras[tool_name] = rules
+            if migrated and normalized_tools_paras != tools_paras:
+                role_payload["tools_paras"] = normalized_tools_paras
+        return payload, migrated
 
     def _validated_rules(self, raw_rules: dict[str, Any]) -> dict[RbacRuleRole, RbacRule]:
         return {
@@ -129,13 +147,14 @@ class RbacRuleService:
             raise RbacRuleConfigError(f"RBAC rule for {role} failed validation.") from exc
 
         for tool_rules in rule.tools_paras.values():
-            for pattern in tool_rules.values():
-                try:
-                    re.compile(pattern)
-                except re.error as exc:
-                    raise RbacRuleConfigError(
-                        f"RBAC rule for {role} contains an invalid regular expression."
-                    ) from exc
+            for parameter_rule in tool_rules:
+                for pattern in parameter_rule.values():
+                    try:
+                        re.compile(pattern)
+                    except re.error as exc:
+                        raise RbacRuleConfigError(
+                            f"RBAC rule for {role} contains an invalid regular expression."
+                        ) from exc
         return rule
 
     def _write_rules_locked(self, raw_rules: dict[str, Any]) -> None:

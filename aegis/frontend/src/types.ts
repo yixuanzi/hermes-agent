@@ -197,7 +197,7 @@ export interface RbacRule {
   prompt_constraints: string[];
   allow_tools: string[] | null;
   denied_tools: string[];
-  tools_paras: Record<string, Record<string, string>>;
+  tools_paras: Record<string, Array<Record<string, string>>>;
 }
 
 export interface RbacRulesResponse {

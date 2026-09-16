@@ -12,7 +12,7 @@ RULE_FIELDS = {
     "prompt_constraints": ["Read only"],
     "allow_tools": None,
     "denied_tools": [],
-    "tools_paras": {"terminal": {"command": "^ls(\\s|$)"}},
+    "tools_paras": {"terminal": [{"command": "^ls(\\s|$)"}]},
 }
 DANGEROUS_PATTERN = r"(rm\s+-rf|git\s+push|drop\s+(table|database)|shutdown|reboot|mkfs|:\(\)\{)"
 
@@ -74,7 +74,7 @@ def test_admin_can_read_and_update_one_role_without_overwriting_the_others(
         "prompt_constraints": ["line one\nline two"],
         "allow_tools": ["read_file"],
         "denied_tools": ["terminal"],
-        "tools_paras": {"read_file": {"path": "^/safe/"}},
+        "tools_paras": {"read_file": [{"path": "^/safe/"}]},
     }
     updated = client.put("/api/rbac-rules/user", headers=auth_headers, json=updated_rule)
     assert updated.status_code == 200
@@ -103,7 +103,7 @@ def test_rule_validation_rejects_unknown_missing_and_invalid_values(
     missing_field = {key: value for key, value in RULE_FIELDS.items() if key != "denied_tools"}
     assert client.put("/api/rbac-rules/user", headers=auth_headers, json=missing_field).status_code == 422
 
-    invalid_pattern = {**RULE_FIELDS, "tools_paras": {"terminal": {"command": "["}}}
+    invalid_pattern = {**RULE_FIELDS, "tools_paras": {"terminal": [{"command": "["}]}}
     assert client.put("/api/rbac-rules/user", headers=auth_headers, json=invalid_pattern).status_code == 422
 
     assert client.put("/api/rbac-rules/unknown", headers=auth_headers, json=RULE_FIELDS).status_code == 422
@@ -150,6 +150,44 @@ def test_legacy_unknown_role_is_removed_and_persisted_atomically(tmp_path: Path)
         "dangerous_pattern",
     }
     assert persisted["user"] == legacy_rules["user"]
+
+
+def test_legacy_single_parameter_maps_are_migrated_to_rule_lists(tmp_path: Path) -> None:
+    from aegis.backend.services.rbac_rule_service import RbacRuleService
+
+    path = tmp_path / "legacy-tool-rules.json"
+    legacy_rules = _rules_payload()
+    legacy_rules["user"]["tools_paras"] = {"write_file": {"path": "^/output/"}}
+    path.write_text(json.dumps(legacy_rules), encoding="utf-8")
+
+    rules = RbacRuleService(path).list_rules()
+
+    assert rules["user"].tools_paras == {"write_file": [{"path": "^/output/"}]}
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["user"]["tools_paras"] == {"write_file": [{"path": "^/output/"}]}
+
+
+def test_multiple_tool_parameter_rules_are_validated_and_persisted(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    configured_rules_file: Path,
+) -> None:
+    updated_rule = {
+        **RULE_FIELDS,
+        "tools_paras": {
+            "write_file": [
+                {"path": "^/output/"},
+                {"path": r"(?<!\.secret)$"},
+            ]
+        },
+    }
+
+    updated = client.put("/api/rbac-rules/user", headers=auth_headers, json=updated_rule)
+
+    assert updated.status_code == 200
+    assert updated.json()["rule"] == updated_rule
+    persisted = json.loads(configured_rules_file.read_text(encoding="utf-8"))
+    assert persisted["user"] == updated_rule
 
 
 def test_get_rejects_malformed_rule_file(

@@ -141,33 +141,43 @@ def _load_role_rules_config(path: Path | None = None) -> tuple[dict[str, dict], 
             raise RoleRulesConfigError(
                 f"Role {role_name!r} tools_paras must be an object"
             )
-        for tool_name, parameter_rules in tools_paras.items():
+        normalized_tools_paras: dict[str, list[dict[str, str]]] = {}
+        for tool_name, raw_rules in tools_paras.items():
             if not isinstance(tool_name, str) or not tool_name:
                 raise RoleRulesConfigError("tools_paras tool names must be non-empty strings")
-            if not isinstance(parameter_rules, dict) or any(
-                not isinstance(parameter_name, str) or not parameter_name
-                or not isinstance(pattern, str)
-                for parameter_name, pattern in parameter_rules.items()
+            parameter_rules_list = raw_rules
+            if isinstance(raw_rules, dict):
+                parameter_rules_list = [raw_rules]
+                migrated = True
+            if not isinstance(parameter_rules_list, list) or any(
+                not isinstance(parameter_rules, dict)
+                or any(
+                    not isinstance(parameter_name, str)
+                    or not parameter_name
+                    or not isinstance(pattern, str)
+                    for parameter_name, pattern in parameter_rules.items()
+                )
+                for parameter_rules in parameter_rules_list
             ):
                 raise RoleRulesConfigError(
-                    f"Role {role_name!r} tools_paras[{tool_name!r}] must map parameter names to regex strings"
+                    f"Role {role_name!r} tools_paras[{tool_name!r}] must be an array of parameter maps with regex strings"
                 )
-            for parameter_name, pattern in parameter_rules.items():
-                try:
-                    re.compile(pattern)
-                except re.error as exc:
-                    raise RoleRulesConfigError(
-                        f"Invalid regex for {role_name}.{tool_name}.{parameter_name}: {exc}"
-                    ) from exc
+            for parameter_rules in parameter_rules_list:
+                for parameter_name, pattern in parameter_rules.items():
+                    try:
+                        re.compile(pattern)
+                    except re.error as exc:
+                        raise RoleRulesConfigError(
+                            f"Invalid regex for {role_name}.{tool_name}.{parameter_name}: {exc}"
+                        ) from exc
+            normalized_tools_paras[tool_name] = [dict(parameter_rules) for parameter_rules in parameter_rules_list]
+        raw["tools_paras"] = normalized_tools_paras
         validated[role_name] = {
             "summary": summary,
             "prompt_constraints": list(prompt_constraints),
             "allow_tools": None if allow_tools is None else list(allow_tools),
             "denied_tools": list(denied_tools),
-            "tools_paras": {
-                tool_name: dict(parameter_rules)
-                for tool_name, parameter_rules in tools_paras.items()
-            },
+            "tools_paras": normalized_tools_paras,
         }
     if migrated:
         _write_role_rules_atomically(
@@ -359,15 +369,18 @@ def tool_params_allowed(
     tools_paras = role.get("tools_paras", {})
     if not isinstance(tools_paras, Mapping) or tool_name not in tools_paras:
         return True, ""
-    parameter_rules = tools_paras[tool_name]
-    if not isinstance(parameter_rules, Mapping):  # validated at startup
+    parameter_rules_list = tools_paras[tool_name]
+    if not isinstance(parameter_rules_list, list):  # validated at startup
         return False, "invalid parameter rule"
-    for parameter_name, pattern in parameter_rules.items():
-        if not isinstance(args, Mapping) or parameter_name not in args:
-            return False, f"missing parameter {parameter_name!r}"
-        value = _parameter_text(args[parameter_name])
-        if re.search(str(pattern), value) is None:
-            return False, f"parameter {parameter_name!r} does not match its rule"
+    for rule_index, parameter_rules in enumerate(parameter_rules_list, start=1):
+        if not isinstance(parameter_rules, Mapping):  # validated at startup
+            return False, f"invalid parameter rule {rule_index}"
+        for parameter_name, pattern in parameter_rules.items():
+            if not isinstance(args, Mapping) or parameter_name not in args:
+                return False, f"missing parameter {parameter_name!r} in rule {rule_index}"
+            value = _parameter_text(args[parameter_name])
+            if re.search(str(pattern), value) is None:
+                return False, f"parameter {parameter_name!r} does not match rule {rule_index}"
     return True, ""
 
 

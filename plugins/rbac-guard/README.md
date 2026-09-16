@@ -70,16 +70,17 @@ Hermes core: resolve_pre_tool_block()
 }
 ```
 
-`tools_paras` 使用按工具和参数名分组的正则规则。工具被列出后，所有参数
-都必须存在且通过 `re.search` 包含匹配；未配置参数规则的工具不增加限制。
+`tools_paras` 使用按工具分组的规则列表，每条规则再按参数名配置正则。
+工具被列出后，列表中的每条规则以及规则中的所有参数都必须存在且通过
+`re.search` 包含匹配；规则之间使用 AND 逻辑。未配置参数规则的工具不增加限制。
 
 ```json
 {
   "tools_paras": {
-    "terminal": {
+    "terminal": [{
       "command": "^ls(\\s|$)",
       "cwd": "/workspace"
-    }
+    }]
   }
 }
 ```
@@ -92,7 +93,7 @@ Hermes core: resolve_pre_tool_block()
 
 1. **`denied_tools` 黑名单**：工具命中黑名单时立即拒绝，不再进行后续判断。
 2. **`allow_tools` 白名单**：当值为数组时，只有数组中明确列出的工具才允许继续；值为 `null` 时不启用白名单。
-3. **`tools_paras` 参数约束**：工具配置了参数规则时，所有被配置的参数都必须存在，并且使用 `re.search` 匹配成功。
+3. **`tools_paras` 参数约束**：工具配置了参数规则时，列表中的每条规则及其所有参数都必须存在，并且使用 `re.search` 匹配成功；规则之间为 AND 关系。
 4. **危险操作审批**：通过前述权限和参数检查后，`user`、`operator` 的危险操作进入人工审批；`admin` 直接继续执行。
 
 因此，工具同时出现在 `allow_tools` 和 `denied_tools` 中时，`denied_tools` 优先。例如：

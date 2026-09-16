@@ -22,10 +22,15 @@ interface ParameterDraft {
   testMessage: string;
 }
 
+interface ParameterRuleDraft {
+  id: string;
+  parameters: ParameterDraft[];
+}
+
 interface ToolDraft {
   id: string;
   name: string;
-  parameters: ParameterDraft[];
+  rules: ParameterRuleDraft[];
 }
 
 interface RoleDraft {
@@ -63,6 +68,19 @@ function createParameter(name = '', pattern = ''): ParameterDraft {
   };
 }
 
+function createParameterRule(): ParameterRuleDraft {
+  return {
+    id: createId('rule'),
+    parameters: [createParameter()],
+  };
+}
+
+function normalizeToolRules(
+  rules: Array<Record<string, string>> | Record<string, string>,
+): Array<Record<string, string>> {
+  return Array.isArray(rules) ? rules : [rules];
+}
+
 function toEditorState(rule: RbacRule): RoleDraft {
   return {
     rule: {
@@ -71,13 +89,19 @@ function toEditorState(rule: RbacRule): RoleDraft {
       allow_tools: rule.allow_tools ? [...rule.allow_tools] : null,
       denied_tools: [...rule.denied_tools],
       tools_paras: Object.fromEntries(
-        Object.entries(rule.tools_paras).map(([tool, parameters]) => [tool, { ...parameters }]),
+        Object.entries(rule.tools_paras).map(([tool, rules]) => [
+          tool,
+          normalizeToolRules(rules).map((parameters) => ({ ...parameters })),
+        ]),
       ),
     },
-    tools: Object.entries(rule.tools_paras).map(([name, parameters]) => ({
+    tools: Object.entries(rule.tools_paras).map(([name, rawRules]) => ({
       id: createId('tool'),
       name,
-      parameters: Object.entries(parameters).map(([parameter, pattern]) => createParameter(parameter, pattern)),
+      rules: normalizeToolRules(rawRules).map((parameters) => ({
+        id: createId('rule'),
+        parameters: Object.entries(parameters).map(([parameter, pattern]) => createParameter(parameter, pattern)),
+      })),
     })),
   };
 }
@@ -91,7 +115,9 @@ function toPersistedRule(editor: RoleDraft): RbacRule {
     tools_paras: Object.fromEntries(
       editor.tools.map((tool) => [
         tool.name.trim(),
-        Object.fromEntries(tool.parameters.map((parameter) => [parameter.name.trim(), parameter.pattern])),
+        tool.rules.map((rule) => Object.fromEntries(
+          rule.parameters.map((parameter) => [parameter.name.trim(), parameter.pattern]),
+        )),
       ]),
     ),
   };
@@ -243,40 +269,69 @@ export default function RbacRulesManager({ onAuthExpired }: RbacRulesManagerProp
   function addTool() {
     updateActiveDraft((current) => ({
       ...current,
-      tools: [...current.tools, { id: createId('tool'), name: '', parameters: [createParameter()] }],
+      tools: [...current.tools, { id: createId('tool'), name: '', rules: [createParameterRule()] }],
     }));
   }
 
-  function updateParameter(toolId: string, parameterId: string, field: 'name' | 'pattern' | 'testText', value: string) {
+  function addRule(toolId: string) {
     updateActiveDraft((current) => ({
       ...current,
       tools: current.tools.map((tool) => tool.id !== toolId ? tool : {
         ...tool,
-        parameters: tool.parameters.map((parameter) => parameter.id !== parameterId ? parameter : {
-          ...parameter,
-          [field]: value,
-          ...(field === 'pattern' || field === 'testText' ? { testStatus: 'idle', testMessage: '' } : {}),
+        rules: [...tool.rules, createParameterRule()],
+      }),
+    }));
+  }
+
+  function removeRule(toolId: string, ruleId: string) {
+    updateActiveDraft((current) => ({
+      ...current,
+      tools: current.tools.map((tool) => tool.id !== toolId ? tool : {
+        ...tool,
+        rules: tool.rules.filter((rule) => rule.id !== ruleId),
+      }),
+    }));
+  }
+
+  function updateParameter(toolId: string, ruleId: string, parameterId: string, field: 'name' | 'pattern' | 'testText', value: string) {
+    updateActiveDraft((current) => ({
+      ...current,
+      tools: current.tools.map((tool) => tool.id !== toolId ? tool : {
+        ...tool,
+        rules: tool.rules.map((rule) => rule.id !== ruleId ? rule : {
+          ...rule,
+          parameters: rule.parameters.map((parameter) => parameter.id !== parameterId ? parameter : {
+            ...parameter,
+            [field]: value,
+            ...(field === 'pattern' || field === 'testText' ? { testStatus: 'idle', testMessage: '' } : {}),
+          }),
         }),
       }),
     }));
   }
 
-  function removeParameter(toolId: string, parameterId: string) {
+  function removeParameter(toolId: string, ruleId: string, parameterId: string) {
     updateActiveDraft((current) => ({
       ...current,
       tools: current.tools.map((tool) => tool.id !== toolId ? tool : {
         ...tool,
-        parameters: tool.parameters.filter((parameter) => parameter.id !== parameterId),
+        rules: tool.rules.map((rule) => rule.id !== ruleId ? rule : {
+          ...rule,
+          parameters: rule.parameters.filter((parameter) => parameter.id !== parameterId),
+        }),
       }),
     }));
   }
 
-  function addParameter(toolId: string) {
+  function addParameter(toolId: string, ruleId: string) {
     updateActiveDraft((current) => ({
       ...current,
       tools: current.tools.map((tool) => tool.id !== toolId ? tool : {
         ...tool,
-        parameters: [...tool.parameters, createParameter()],
+        rules: tool.rules.map((rule) => rule.id !== ruleId ? rule : {
+          ...rule,
+          parameters: [...rule.parameters, createParameter()],
+        }),
       }),
     }));
   }
@@ -288,12 +343,14 @@ export default function RbacRulesManager({ onAuthExpired }: RbacRulesManagerProp
       if (!toolName) return 'Every parameter rule needs a tool name.';
       if (toolNames.has(toolName)) return `Tool “${toolName}” is defined more than once.`;
       toolNames.add(toolName);
-      const parameterNames = new Set<string>();
-      for (const parameter of tool.parameters) {
-        const parameterName = parameter.name.trim();
-        if (!parameterName) return `Every rule under “${toolName}” needs a parameter name.`;
-        if (parameterNames.has(parameterName)) return `Parameter “${parameterName}” is defined more than once under “${toolName}”.`;
-        parameterNames.add(parameterName);
+      for (const parameterRule of tool.rules) {
+        const parameterNames = new Set<string>();
+        for (const parameter of parameterRule.parameters) {
+          const parameterName = parameter.name.trim();
+          if (!parameterName) return `Every rule under “${toolName}” needs a parameter name.`;
+          if (parameterNames.has(parameterName)) return `Parameter “${parameterName}” is defined more than once in a rule under “${toolName}”.`;
+          parameterNames.add(parameterName);
+        }
       }
     }
     const lists: Array<[string, string[]]> = [
@@ -342,18 +399,23 @@ export default function RbacRulesManager({ onAuthExpired }: RbacRulesManagerProp
     }
   }
 
-  async function testParameter(toolId: string, parameterId: string) {
+  async function testParameter(toolId: string, ruleId: string, parameterId: string) {
     const tool = activeDraft.tools.find((item) => item.id === toolId);
-    const parameter = tool?.parameters.find((item) => item.id === parameterId);
+    const parameter = tool?.rules
+      .find((rule) => rule.id === ruleId)
+      ?.parameters.find((item) => item.id === parameterId);
     if (!parameter) return;
     updateActiveDraft((current) => ({
       ...current,
       tools: current.tools.map((item) => item.id !== toolId ? item : {
         ...item,
-        parameters: item.parameters.map((entry) => entry.id !== parameterId ? entry : {
-          ...entry,
-          testStatus: 'testing',
-          testMessage: '',
+        rules: item.rules.map((rule) => rule.id !== ruleId ? rule : {
+          ...rule,
+          parameters: rule.parameters.map((entry) => entry.id !== parameterId ? entry : {
+            ...entry,
+            testStatus: 'testing',
+            testMessage: '',
+          }),
         }),
       }),
     }));
@@ -362,18 +424,19 @@ export default function RbacRulesManager({ onAuthExpired }: RbacRulesManagerProp
         method: 'POST',
         body: JSON.stringify({ pattern: parameter.pattern, text: parameter.testText }),
       });
-      updateParameterTestResult(toolId, parameterId, response.matched ? 'matched' : 'unmatched', response.matched ? 'Pattern matched.' : 'Pattern did not match.');
+      updateParameterTestResult(toolId, ruleId, parameterId, response.matched ? 'matched' : 'unmatched', response.matched ? 'Pattern matched.' : 'Pattern did not match.');
     } catch (testError) {
       if (testError instanceof ApiError && testError.status === 401) {
         onAuthExpired?.();
         return;
       }
-      updateParameterTestResult(toolId, parameterId, 'error', formatApiError(testError, 'Invalid regular expression.'));
+      updateParameterTestResult(toolId, ruleId, parameterId, 'error', formatApiError(testError, 'Invalid regular expression.'));
     }
   }
 
   function updateParameterTestResult(
     toolId: string,
+    ruleId: string,
     parameterId: string,
     testStatus: ParameterDraft['testStatus'],
     testMessage: string,
@@ -386,7 +449,10 @@ export default function RbacRulesManager({ onAuthExpired }: RbacRulesManagerProp
           ...draft,
           tools: draft.tools.map((tool) => tool.id !== toolId ? tool : {
             ...tool,
-            parameters: tool.parameters.map((parameter) => parameter.id !== parameterId ? parameter : { ...parameter, testStatus, testMessage }),
+            rules: tool.rules.map((rule) => rule.id !== ruleId ? rule : {
+              ...rule,
+              parameters: rule.parameters.map((parameter) => parameter.id !== parameterId ? parameter : { ...parameter, testStatus, testMessage }),
+            }),
           }),
         },
       };
@@ -505,7 +571,7 @@ export default function RbacRulesManager({ onAuthExpired }: RbacRulesManagerProp
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div>
                   <h3 id="rbac-parameters-heading" className="aegis-page-content__title text-base">Tool parameter constraints</h3>
-                  <p className="aegis-page-content__description">Every parameter under a tool must match. Values are checked with regular-expression search.</p>
+                  <p className="aegis-page-content__description">Every parameter in every rule under a tool must match. Rules use AND logic and values are checked with regular-expression search.</p>
                 </div>
                 <button type="button" onClick={addTool} className="aegis-btn aegis-btn--secondary inline-flex items-center gap-1.5 px-3 py-2 text-xs"><Plus className="h-3.5 w-3.5" aria-hidden="true" /> Add tool</button>
               </div>
@@ -529,32 +595,43 @@ export default function RbacRulesManager({ onAuthExpired }: RbacRulesManagerProp
                       <ChevronRight className="h-4 w-4 shrink-0 text-cyan-400" aria-hidden="true" />
                       <span className="min-w-0 truncate font-mono text-sm font-semibold tracking-wide text-cyan-200">{displayName}</span>
                     </button>}
-                    <div id={parameterPanelId} hidden={!isExpanded} className="mt-3 space-y-2 border-l border-cyan-900/60 pl-3">
-                      {tool.parameters.map((parameter, parameterIndex) => (
-                        <div key={parameter.id} className="grid gap-2 rounded-md border border-[var(--aegis-border)] p-2 lg:grid-cols-[minmax(8rem,0.45fr)_minmax(12rem,1fr)_minmax(10rem,0.7fr)_auto] lg:items-end">
-                          <label className="text-[10px] font-mono font-bold uppercase tracking-widest text-slate-500">
-                            Parameter
-                            <input aria-label={`Parameter ${toolIndex + 1}.${parameterIndex + 1} name`} value={parameter.name} onChange={(event) => updateParameter(tool.id, parameter.id, 'name', event.target.value)} className="aegis-page-field mt-1 w-full px-2 py-1.5 font-mono text-xs" placeholder="command" />
-                          </label>
-                          <label className="text-[10px] font-mono font-bold uppercase tracking-widest text-slate-500">
-                            Regex pattern
-                            <input aria-label={`Parameter ${toolIndex + 1}.${parameterIndex + 1} regex`} value={parameter.pattern} onChange={(event) => updateParameter(tool.id, parameter.id, 'pattern', event.target.value)} className="aegis-page-field mt-1 w-full px-2 py-1.5 font-mono text-xs" placeholder="^ls(\\s|$)" spellCheck={false} />
-                          </label>
-                          <label className="text-[10px] font-mono font-bold uppercase tracking-widest text-slate-500">
-                            Test text
-                            <input aria-label={`Parameter ${toolIndex + 1}.${parameterIndex + 1} test text`} value={parameter.testText} onChange={(event) => updateParameter(tool.id, parameter.id, 'testText', event.target.value)} className="aegis-page-field mt-1 w-full px-2 py-1.5 font-mono text-xs" placeholder="ls -la" />
-                          </label>
-                          <div className="flex items-center gap-2 lg:justify-end">
-                            <button type="button" onClick={() => void testParameter(tool.id, parameter.id)} disabled={parameter.testStatus === 'testing'} className="aegis-btn aegis-btn--secondary inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs"><FlaskConical className="h-3.5 w-3.5" aria-hidden="true" /> Test</button>
-                            <button type="button" onClick={() => removeParameter(tool.id, parameter.id)} aria-label={`Remove parameter ${toolIndex + 1}.${parameterIndex + 1}`} className="aegis-btn aegis-btn--ghost aegis-btn--icon h-8 w-8"><Trash2 className="h-3.5 w-3.5" aria-hidden="true" /></button>
+                    <div id={parameterPanelId} hidden={!isExpanded} className="mt-3 space-y-3 border-l border-cyan-900/60 pl-3">
+                      {tool.rules.map((rule, ruleIndex) => (
+                        <section key={rule.id} aria-labelledby={`rbac-rule-${rule.id}`} className="rounded-md border border-cyan-950/80 bg-cyan-950/10 p-2">
+                          <div className="mb-2 flex items-center justify-between gap-2">
+                            <h4 id={`rbac-rule-${rule.id}`} className="font-mono text-[10px] font-bold uppercase tracking-widest text-cyan-300">Rule {ruleIndex + 1} <span className="font-normal text-slate-500">(AND)</span></h4>
+                            <button type="button" onClick={() => removeRule(tool.id, rule.id)} aria-label={`Remove rule ${toolIndex + 1}.${ruleIndex + 1}`} className="aegis-btn aegis-btn--ghost aegis-btn--icon h-8 w-8"><Trash2 className="h-3.5 w-3.5" /></button>
                           </div>
-                          {parameter.testStatus !== 'idle' ? <p className={`lg:col-span-4 flex items-center gap-1.5 text-xs ${parameter.testStatus === 'matched' ? 'text-emerald-300' : parameter.testStatus === 'error' ? 'text-rose-300' : parameter.testStatus === 'testing' ? 'text-cyan-300' : 'text-amber-300'}`} role="status">
-                            {parameter.testStatus === 'matched' ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : parameter.testStatus === 'error' ? <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> : null}
-                            {parameter.testStatus === 'testing' ? 'Testing…' : parameter.testMessage}
-                          </p> : null}
-                        </div>
+                          <div className="space-y-2">
+                            {rule.parameters.map((parameter, parameterIndex) => (
+                              <div key={parameter.id} className="grid gap-2 rounded-md border border-[var(--aegis-border)] p-2 lg:grid-cols-[minmax(8rem,0.45fr)_minmax(12rem,1fr)_minmax(10rem,0.7fr)_auto] lg:items-end">
+                                <label className="text-[10px] font-mono font-bold uppercase tracking-widest text-slate-500">
+                                  Parameter
+                                  <input aria-label={`Parameter ${toolIndex + 1}.${ruleIndex + 1}.${parameterIndex + 1} name`} value={parameter.name} onChange={(event) => updateParameter(tool.id, rule.id, parameter.id, 'name', event.target.value)} className="aegis-page-field mt-1 w-full px-2 py-1.5 font-mono text-xs" placeholder="command" />
+                                </label>
+                                <label className="text-[10px] font-mono font-bold uppercase tracking-widest text-slate-500">
+                                  Regex pattern
+                                  <input aria-label={`Parameter ${toolIndex + 1}.${ruleIndex + 1}.${parameterIndex + 1} regex`} value={parameter.pattern} onChange={(event) => updateParameter(tool.id, rule.id, parameter.id, 'pattern', event.target.value)} className="aegis-page-field mt-1 w-full px-2 py-1.5 font-mono text-xs" placeholder="^ls(\\s|$)" spellCheck={false} />
+                                </label>
+                                <label className="text-[10px] font-mono font-bold uppercase tracking-widest text-slate-500">
+                                  Test text
+                                  <input aria-label={`Parameter ${toolIndex + 1}.${ruleIndex + 1}.${parameterIndex + 1} test text`} value={parameter.testText} onChange={(event) => updateParameter(tool.id, rule.id, parameter.id, 'testText', event.target.value)} className="aegis-page-field mt-1 w-full px-2 py-1.5 font-mono text-xs" placeholder="ls -la" />
+                                </label>
+                                <div className="flex items-center gap-2 lg:justify-end">
+                                  <button type="button" onClick={() => void testParameter(tool.id, rule.id, parameter.id)} disabled={parameter.testStatus === 'testing'} className="aegis-btn aegis-btn--secondary inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs"><FlaskConical className="h-3.5 w-3.5" aria-hidden="true" /> Test</button>
+                                  <button type="button" onClick={() => removeParameter(tool.id, rule.id, parameter.id)} aria-label={`Remove parameter ${toolIndex + 1}.${ruleIndex + 1}.${parameterIndex + 1}`} className="aegis-btn aegis-btn--ghost aegis-btn--icon h-8 w-8"><Trash2 className="h-3.5 w-3.5" /></button>
+                                </div>
+                                {parameter.testStatus !== 'idle' ? <p className={`lg:col-span-4 flex items-center gap-1.5 text-xs ${parameter.testStatus === 'matched' ? 'text-emerald-300' : parameter.testStatus === 'error' ? 'text-rose-300' : parameter.testStatus === 'testing' ? 'text-cyan-300' : 'text-amber-300'}`} role="status">
+                                  {parameter.testStatus === 'matched' ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : parameter.testStatus === 'error' ? <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> : null}
+                                  {parameter.testStatus === 'testing' ? 'Testing…' : parameter.testMessage}
+                                </p> : null}
+                              </div>
+                            ))}
+                          </div>
+                          <button type="button" onClick={() => addParameter(tool.id, rule.id)} className="aegis-btn aegis-btn--ghost mt-2 inline-flex items-center gap-1.5 px-2 py-1.5 text-xs"><Plus className="h-3.5 w-3.5" aria-hidden="true" /> Add parameter</button>
+                        </section>
                       ))}
-                      <button type="button" onClick={() => addParameter(tool.id)} className="aegis-btn aegis-btn--ghost inline-flex items-center gap-1.5 px-2 py-1.5 text-xs"><Plus className="h-3.5 w-3.5" aria-hidden="true" /> Add parameter</button>
+                      <button type="button" onClick={() => addRule(tool.id)} className="aegis-btn aegis-btn--secondary inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs"><Plus className="h-3.5 w-3.5" aria-hidden="true" /> Add rule</button>
                     </div>
                   </article>
                   );

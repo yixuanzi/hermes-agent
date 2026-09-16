@@ -142,8 +142,8 @@ def on_pre_tool_call(tool_name="", args=None, session_id="", turn_id="", **kwarg
         return {
             "action": "block",
             "message": (
-                f"[RBAC] 已拒绝：工具 '{tool_name}' 的参数不满足当前角色的约束。"
-                f"（{reason}）"
+                f"[RBAC] 已拒绝：工具 '{tool_name}' 的参数执行不满足当前角色的约束。"
+                # f"（{reason}）"
             ),
         }
 

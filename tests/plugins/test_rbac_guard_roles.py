@@ -103,7 +103,7 @@ def test_invalid_role_rules_config_fails_validation(
         rbac_roles._load_role_rules(missing_path)
 
     invalid_regex = json.loads(json.dumps(valid))
-    invalid_regex["user"]["tools_paras"] = {"terminal": {"command": "["}}
+    invalid_regex["user"]["tools_paras"] = {"terminal": [{"command": "["}]}
     regex_path = tmp_path / "invalid-regex.json"
     regex_path.write_text(json.dumps(invalid_regex), encoding="utf-8")
     with pytest.raises(rbac_roles.RoleRulesConfigError):
@@ -151,10 +151,10 @@ def test_tools_paras_requires_every_configured_parameter_to_match(
     role["allow_tools"] = None
     role["denied_tools"] = []
     role["tools_paras"] = {
-        "terminal": {
+        "terminal": [{
             "command": r"^ls",
             "cwd": r"/workspace",
-        }
+        }]
     }
 
     assert rbac_roles.tool_allowed(role, "terminal") is True
@@ -180,7 +180,7 @@ def test_tools_paras_also_constrains_admin_and_denied_tools_win(
     rbac_roles: ModuleType,
 ) -> None:
     admin = rbac_roles.ROLE_RULES["admin"]
-    admin["tools_paras"] = {"terminal": {"command": r"^ls"}}
+    admin["tools_paras"] = {"terminal": [{"command": r"^ls"}]}
     assert rbac_roles.tool_allowed(admin, "terminal") is True
     assert rbac_roles.tool_params_allowed(admin, "terminal", {"command": "rm"})[0] is False
 
@@ -214,7 +214,7 @@ def test_plugin_hook_enforces_parameter_rules_and_status_has_no_rank(
     try:
         spec.loader.exec_module(plugin)
         plugin.roles.ROLE_RULES["user"]["tools_paras"] = {
-            "read_file": {"path": r"^/safe"}
+            "read_file": [{"path": r"^/safe"}]
         }
         assert plugin.roles.set_role("cli", "u-4", "user") is True
         plugin.on_pre_llm_call(
@@ -269,7 +269,7 @@ def test_plugin_hook_enforces_parameter_rules_and_status_has_no_rank(
 
         status = json.loads(plugin._tool_rbac_status({"platform": "cli", "user_id": "u-4"}))
         assert "rank" not in status
-        assert status["tools_paras"] == {"read_file": {"path": r"^/safe"}}
+        assert status["tools_paras"] == {"read_file": [{"path": r"^/safe"}]}
         assert status["dangerous_pattern"] == plugin.roles.DANGEROUS_PATTERN.pattern
     finally:
         plugin.roles.close_role_db()
@@ -296,6 +296,41 @@ def test_role_storage_uses_one_reusable_sqlite_connection(
     assert rbac_roles.set_role("telegram", "u-2", "operator") is True
     assert rbac_roles.role_for("telegram", "u-2") == "operator"
     assert len(connections) == 1
+
+
+def test_multiple_tool_parameter_rules_use_and_logic(rbac_roles: ModuleType) -> None:
+    role = rbac_roles.get_role("cli", "local")
+    role["tools_paras"] = {
+        "write_file": [
+            {"path": r"^/output/"},
+            {"path": r"(?<!\.secret)$"},
+        ]
+    }
+
+    assert rbac_roles.tool_params_allowed(
+        role, "write_file", {"path": "/output/report.txt"}
+    ) == (True, "")
+    allowed, reason = rbac_roles.tool_params_allowed(
+        role, "write_file", {"path": "/output/report.secret"}
+    )
+    assert allowed is False
+    assert "rule 2" in reason
+
+
+def test_legacy_single_tool_parameter_map_is_migrated_by_plugin(
+    rbac_roles: ModuleType,
+    tmp_path: Path,
+) -> None:
+    payload = json.loads(rbac_roles._ROLE_RULES_PATH.read_text(encoding="utf-8"))
+    payload["user"]["tools_paras"] = {"write_file": {"path": r"^/output/"}}
+    path = tmp_path / "legacy-tool-rules.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = rbac_roles._load_role_rules(path)
+
+    assert loaded["user"]["tools_paras"] == {"write_file": [{"path": r"^/output/"}]}
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["user"]["tools_paras"] == {"write_file": [{"path": r"^/output/"}]}
 
 
 def test_rbac_audit_is_disabled_by_default_and_requires_true(

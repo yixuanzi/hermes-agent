@@ -163,7 +163,7 @@ class RbacRule(BaseModel):
     prompt_constraints: list[str]
     allow_tools: list[str] | None
     denied_tools: list[str]
-    tools_paras: dict[str, dict[str, str]]
+    tools_paras: dict[str, list[dict[str, str]]]
 
     @field_validator("summary", mode="before")
     @classmethod
@@ -185,17 +185,20 @@ class RbacRule(BaseModel):
     @classmethod
     def require_parameter_maps(cls, value: object) -> object:
         if not isinstance(value, dict):
-            raise TypeError("tools_paras must be an object of tool parameter maps.")
-        for tool_name, parameter_rules in value.items():
+            raise TypeError("tools_paras must be an object of tool parameter rule lists.")
+        for tool_name, rules in value.items():
             if not isinstance(tool_name, str) or not tool_name.strip():
                 raise ValueError("tools_paras tool names must be non-empty strings.")
-            if not isinstance(parameter_rules, dict):
-                raise TypeError("Each tools_paras tool value must be an object.")
-            for parameter_name, pattern in parameter_rules.items():
-                if not isinstance(parameter_name, str) or not parameter_name.strip():
-                    raise ValueError("tools_paras parameter names must be non-empty strings.")
-                if not isinstance(pattern, str):
-                    raise TypeError("tools_paras patterns must be strings.")
+            if not isinstance(rules, list):
+                raise TypeError("Each tools_paras tool value must be an array of rule objects.")
+            for parameter_rules in rules:
+                if not isinstance(parameter_rules, dict):
+                    raise TypeError("Each tools_paras rule must be an object.")
+                for parameter_name, pattern in parameter_rules.items():
+                    if not isinstance(parameter_name, str) or not parameter_name.strip():
+                        raise ValueError("tools_paras parameter names must be non-empty strings.")
+                    if not isinstance(pattern, str):
+                        raise TypeError("tools_paras patterns must be strings.")
         return value
 
 
