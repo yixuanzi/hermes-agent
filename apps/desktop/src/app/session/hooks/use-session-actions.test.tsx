@@ -4171,7 +4171,6 @@ describe('openNewSessionTile workspace target', () => {
 
       throw new Error(`Unexpected ambient RPC: ${method}`)
     })
-
     vi.mocked(requestGatewayForProfile).mockResolvedValue({ control: {} } as never)
 
     let handle: HarnessHandle | null = null
@@ -4220,7 +4219,6 @@ describe('openNewSessionTile workspace target', () => {
 
       throw new Error(`Unexpected ambient RPC: ${method}`)
     })
-
     vi.mocked(requestGatewayForProfile).mockResolvedValue({ control: {} } as never)
 
     let handle: HarnessHandle | null = null

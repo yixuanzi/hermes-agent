@@ -11,13 +11,7 @@ import {
   workspaceScopeKey
 } from '@/components/pane-shell/workspace-scope'
 import { $activeGatewayProfile } from '@/store/profile'
-import {
-  $activeSessionId,
-  $connection,
-  $selectedStoredSessionId,
-  setSessionOwnerHint,
-  setSessions
-} from '@/store/session'
+import { $activeSessionId, $connection, $selectedStoredSessionId, setSessionOwnerHint, setSessions } from '@/store/session'
 import type { SessionProfileRoute } from '@/store/session-request-router'
 import type { SessionTile } from '@/store/session-states'
 import type * as SessionStatesModule from '@/store/session-states'
