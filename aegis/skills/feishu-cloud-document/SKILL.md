@@ -1,15 +1,8 @@
 ---
 name: feishu-cloud-document
-description: "Use when managing Feishu/Lark cloud docs and permissions."
-version: 2.1.0
-author: Hermes Agent
-license: MIT
+description: "Use when managing/read/writing/create Feishu/Lark cloud docs and permissions."
+version: 1.1.0
 platforms: [linux, macos]
-metadata:
-  hermes:
-    tags: [feishu, lark, integration, data-source, aegis]
-    category: aegis
-    related_skills: [feishu-openid-to-userid]
 ---
 
 # Feishu / Lark 云文档操作（feishu-cloud-document）
@@ -116,7 +109,6 @@ python3 <skill_dir>/scripts/feishu_doc_ops.py perm public <URL> [--external true
 - `获取表格元信息失败 ...`（权限类）：把文档分享给本应用/机器人，或配置 `FEISHU_USER_ACCESS_TOKEN`。
 - `旧版文档(doc)无 raw_content 接口`：在飞书中「转换为新版文档」后重试。
 - `无法从输入中解析出文档 token`：URL 不含可识别前缀（docx/sheets/wiki/...）或不是裸 token。
-- 删除文档报 `Access denied ... space:document:delete`：应用缺少该权限范围，需在飞书开放平台为应用开通 `drive:drive` 或 `space:document:delete` scope。
 - `perm remove` 报 field validation failed：脚本已自动带 `member_type` 查询参数；若手工调 API 记得 DELETE 时也要带。
 - **overwrite 清空旧内容（实测验证 2026-09）**：清空必须用 `DELETE /documents/{doc_id}/blocks/{doc_id}/children/batch_delete`，且 `start_index`/`end_index` 必须放 **JSON body**（放 query string 会报 99992402 field validation failed）。直接 `DELETE /blocks/{block_id}` 路由不存在（404 page not found）。
 - `delete`（删除文档）报 `Access denied ... [drive:drive, space:document:delete]`：应用 token 缺少删除 scope，需在飞书开放平台开通 `space:document:delete` 或改用 user token；脚本会显式报错，不会静默失败。
