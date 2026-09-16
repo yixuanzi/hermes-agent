@@ -4,7 +4,7 @@
 凭证全部来自环境变量（运行时动态生效，无需重启）：
   FEISHU_APP_ID            应用 App ID（必填，除非提供 USER_ACCESS_TOKEN）
   FEISHU_APP_SECRET        应用 App Secret（必填，同上）
-  FEISHU_DOMAIN            feishu | lark （默认 feishu；本机 .env 当前为 lark）
+  FEISHU_DOMAIN            feishu | lark （必填；缺失或非法时显式报错，不推断）
   FEISHU_USER_ACCESS_TOKEN 可选；提供则以用户身份调用（可读"应用不可见但用户可见"的文档）
 
 用法：
@@ -48,7 +48,14 @@ def env(name, default=""):
 
 
 def base_url():
-    return DOMAINS.get(env("FEISHU_DOMAIN", "feishu").lower(), DOMAINS["feishu"])
+    domain = env("FEISHU_DOMAIN")
+    if not domain:
+        raise SystemExit(
+            "ERROR: 未设置 FEISHU_DOMAIN（feishu | lark），无法推断目标环境，请显式配置后重试")
+    url = DOMAINS.get(domain.lower())
+    if not url:
+        raise SystemExit(f"ERROR: FEISHU_DOMAIN 必须为 {'/'.join(DOMAINS)}，当前值无效: {domain!r}")
+    return url
 
 
 def api(path):
@@ -115,7 +122,9 @@ def get_tenant_token() -> str:
         return _token_cache["value"]
     app_id, app_secret = env("FEISHU_APP_ID"), env("FEISHU_APP_SECRET")
     if not app_id or not app_secret:
-        raise SystemExit("ERROR: 需要环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET")
+        raise SystemExit(
+            "ERROR: 缺少 FEISHU_APP_ID / FEISHU_APP_SECRET，无法推断凭证，请显式配置后重试"
+            "（不要把凭证写进命令行参数）")
     r = http("POST", api("/open-apis/auth/v3/tenant_access_token/internal"),
              payload={"app_id": app_id, "app_secret": app_secret})
     if r.get("code") != 0:
