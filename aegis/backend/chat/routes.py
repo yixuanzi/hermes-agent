@@ -272,5 +272,5 @@ def build_chat_router(
                 )
         except WebSocketDisconnect:
             if actor is not None:
-                actor.detach_connection(websocket)
+                session_manager.release_connection(actor, websocket)
     return router

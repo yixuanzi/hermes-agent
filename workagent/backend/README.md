@@ -65,6 +65,28 @@ platform_toolsets:
 
 另外，toolset 出现在工具 schema 中不代表每次调用都能成功。`userenv` 还要求 A2A 请求携带已认证的运行时用户身份（`source` 中包含 `platform` 和 `uid`）；没有用户身份时，调用仍会被拒绝。
 
+#### A2A Agent 缓存的生命周期
+
+A2A 服务端按 `context_id` 缓存 agent 实例，让同一 context 的后续轮次复用已经预热的 prompt 前缀、session 审批与工具状态。每个缓存条目持有 LLM/httpx 连接池、tool schema、MCP client 以及完整的 `_session_messages` 会话记录（重工具会话可达数十 MB），因此缓存是有界的：
+
+```yaml
+# ~/.hermes/config.yaml（与 gateway 共用同一组键）
+agent:
+  agent_cache:
+    max_size: 128          # LRU 条目上限
+    idle_ttl_secs: 3600    # 空闲超过该秒数即驱逐
+```
+
+这两个键与 gateway 的 agent 缓存共用配置，不需要为 A2A 单独维护一份；`memory_high_mb` 等内存压力相关的键目前只对 gateway 生效。
+
+驱逐是**软驱逐**：关闭连接池并释放会话记录，但保留按 task id 绑定的终端沙箱、浏览器守护进程和后台进程。下一轮请求会用同一个 session id 重建 agent，并由 `load_conversation_history()` 从 `SessionDB` 重新载入完整历史，因此驱逐不会丢失对话内容，只会损失一次 prompt 缓存命中。
+
+正在执行中的 turn 永远不会被驱逐，即使因此临时超过 `max_size`。
+
+同一组 `max_size` / `idle_ttl_secs` 也约束 A2A 的**任务存储**（`a2a_service/task_store.py` 的 `BoundedTaskStore`）。SDK 自带的 `InMemoryTaskStore` 只有客户端显式调用 `tasks/delete` 才会删除记录，而 A2A 委派轮询到终态后就走开了，所以未加约束时每个请求都会留下一条永久记录。`BoundedTaskStore` 在每次 `save` 时按 owner 分区做 LRU + TTL 清理，但只清理**已结束**的任务：处于 `submitted` / `working` 的任务仍被请求驱动，删掉会让并发的 `tasks/get`、`tasks/cancel` 中途报 not found；停在 `input_required` / `auth_required` 的任务则可以被 TTL 回收——客户端再也没回来正是 TTL 存在的意义。
+
+注意：调用方若不显式传 `session_id`，`a2a_delegate` 会为每次调用生成一个新的 `context_id`（见 `tools/a2a_delegate_tool.py` 的 `_default_session_id()`），即"一次委派一个 context"。需要跨轮次复用上下文时，请显式传入稳定的 `session_id`。
+
 #### A2A 模式启用 YOLO
 
 如果要使用当前 `aisoc` profile 启动 A2A service，并让 A2A agent 自动跳过危险命令的人工审批，使用：

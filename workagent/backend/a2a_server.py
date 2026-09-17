@@ -15,7 +15,6 @@ from a2a.server.routes import (
     add_a2a_routes_to_fastapi,
     create_jsonrpc_routes,
 )
-from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCapabilities, AgentCard, AgentInterface
 from a2a.utils.constants import PROTOCOL_VERSION_CURRENT, TransportProtocol
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, status
@@ -24,7 +23,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 import uvicorn
 
-from workagent.backend.a2a_service import HermesA2AExecutor
+from workagent.backend.a2a_service import BoundedTaskStore, HermesA2AExecutor
 from workagent.backend.agent_runtime import prepare_hermes_home, start_workagent_mcp_bootstrap
 from workagent.backend.auth import (
     extract_bearer_token,
@@ -424,7 +423,10 @@ def create_a2a_app(
         card_path=card_path,
         streaming=streaming,
     )
-    task_store = InMemoryTaskStore()
+    # Bounded rather than the SDK's InMemoryTaskStore: nothing in the A2A
+    # flow deletes a finished task, so an unbounded store keeps one record
+    # per request for the life of the process.
+    task_store = BoundedTaskStore()
     a2a_executor = HermesA2AExecutor(
         agent_factory=agent_factory,
         enable_streaming=streaming,

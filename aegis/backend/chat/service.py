@@ -29,6 +29,7 @@ from aegis.backend.chat.models import (
 from aegis.backend.chat.attachments import ChatAttachment, ChatAttachmentStore, prepare_turn_message
 from aegis.backend.chat.runtime import AegisChatInputAdapter, AegisChatOutputAdapter
 from hermes_constants import get_hermes_home
+from workagent.backend.agent_cache import AgentCache, release_agent_soft
 from workagent.backend.agent_runtime import default_agent_factory
 from workagent.backend.agent_runtime import load_conversation_history
 from gateway.session_context import clear_session_vars, set_session_vars
@@ -499,6 +500,41 @@ class ChatSessionActor:
                 self._websocket = None
                 self._loop = None
                 self._disconnect_requested = True
+
+    def holds_websocket(self, websocket: WebSocket) -> bool:
+        with self._lock:
+            return self._websocket is websocket
+
+    def is_evictable(self) -> bool:
+        """True when dropping this actor cannot disturb anyone.
+
+        An actor is only safe to shed once nothing is still driving it: no
+        client attached (the websocket route keeps its own reference, so
+        evicting a bound actor would let a rebind build a *second* agent for
+        the same session), no turn running, and nothing waiting on the user.
+        Everything an evicted session actually needs comes back on the next
+        bind — history reloads from ``SessionDB`` — so what is lost is the
+        in-memory run-state replay, which a service restart already discards.
+        """
+        with self._lock:
+            if self._websocket is not None or self._loop is not None:
+                return False
+            if self._running_thread is not None and self._running_thread.is_alive():
+                return False
+            if self._pending_approval is not None or self._pending_clarify is not None:
+                return False
+            if self._delegate_input is not None or self._a2a_interaction_session is not None:
+                return False
+            return True
+
+    def release(self) -> None:
+        """Drop the evicted actor's client pool and transcript."""
+        release_agent_soft(self._agent)
+
+    @property
+    def owner_key(self) -> str:
+        """The owner half of this actor's cache key."""
+        return self._user_id
 
     def build_bound_event(self, *, resumed: bool) -> dict[str, Any]:
         return self._make_event(
@@ -1617,17 +1653,46 @@ class ChatSessionActor:
             return
 
 
+def _session_is_protected(_session_key: object, actor: ChatSessionActor) -> bool:
+    """Eviction guard for the session cache — see ``is_evictable``."""
+    return not actor.is_evictable()
+
+
+def _release_evicted_actors(evicted: list[tuple[object, ChatSessionActor]]) -> None:
+    """Release actors the session cache shed.  Never raises."""
+    for _session_key, actor in evicted:
+        try:
+            actor.release()
+        except Exception:
+            logger.debug("Aegis chat session release failed", exc_info=True)
+
+
 class ChatSessionManager:
-    def __init__(self, agent_factory: Callable[..., object] | None = None) -> None:
+    def __init__(
+        self,
+        agent_factory: Callable[..., object] | None = None,
+        *,
+        session_cache: AgentCache | None = None,
+    ) -> None:
         self._agent_factory = agent_factory or _build_default_aegis_agent
         self._lock = threading.Lock()
-        self._sessions: dict[tuple[str, str], ChatSessionActor] = {}
+        # Bounded (LRU cap + idle TTL) rather than a plain dict: every cached
+        # actor owns an AIAgent, and nothing else ever removes one, so an
+        # Aegis service that has been up for a week holds every session any
+        # user ever opened.  Actors that are still bound, running a turn, or
+        # waiting on the user are protected from eviction.
+        self._sessions = (
+            session_cache
+            if session_cache is not None
+            else AgentCache(is_protected=_session_is_protected)
+        )
         self.attachments = ChatAttachmentStore()
 
     def set_agent_factory(self, agent_factory: Callable[..., object]) -> None:
         with self._lock:
             self._agent_factory = agent_factory
-            self._sessions.clear()
+            evicted = self._sessions.clear()
+        _release_evicted_actors(evicted)
 
     def bind(
         self,
@@ -1642,33 +1707,61 @@ class ChatSessionManager:
         resolved_session_id = str(session_id or "").strip() or f"aegis-{uuid4().hex}"
         owner_key = str(user_id or "").strip()
         session_key = (owner_key, resolved_session_id)
+
+        def _new_actor(_key) -> ChatSessionActor:
+            return ChatSessionActor(
+                session_id=resolved_session_id,
+                title=_conversation_title(title),
+                agent_factory=self._agent_factory,
+                user_id=user_id,
+                user_name=user_name,
+            )
+
         with self._lock:
-            actor = self._sessions.get(session_key)
-            if actor is None:
-                actor = ChatSessionActor(
-                    session_id=resolved_session_id,
-                    title=_conversation_title(title),
-                    agent_factory=self._agent_factory,
-                    user_id=user_id,
-                    user_name=user_name,
-                )
-                self._sessions[session_key] = actor
-            else:
+            existed = session_key in self._sessions
+            actor, evicted = self._sessions.get_or_create(session_key, _new_actor)
+            if existed:
                 actor.set_title(title)
                 actor.update_identity(
                     user_id=user_id,
                     user_name=user_name,
                 )
+        # Off the lock: release_clients() closes a socket pool, and no other
+        # bind should wait behind that teardown.
+        _release_evicted_actors(evicted)
+        # One socket drives one actor at a time.  A client that switches
+        # conversations rebinds the same socket, and the actor it is leaving
+        # would otherwise keep a stale reference to it — which reads as "still
+        # attached" and would pin that session in the cache forever.
+        self._detach_stale_holders(websocket, keep=actor)
         actor.replace_connection(websocket, loop)
         return actor
+
+    def _detach_stale_holders(self, websocket: WebSocket, *, keep: ChatSessionActor) -> None:
+        with self._lock:
+            cached = self._sessions.items()
+        for _session_key, actor in cached:
+            if actor is not keep and actor.holds_websocket(websocket):
+                actor.detach_connection(websocket)
+
+    def release_connection(self, actor: ChatSessionActor, websocket: WebSocket) -> None:
+        """Detach a disconnecting client and restart the actor's idle clock.
+
+        Called instead of ``actor.detach_connection`` so the idle TTL is
+        measured from the disconnect rather than from the bind that opened the
+        connection.
+        """
+        actor.detach_connection(websocket)
+        with self._lock:
+            self._sessions.touch((actor.owner_key, actor.session_id))
 
     def get(self, session_id: str, *, user_id: str | None = None) -> ChatSessionActor | None:
         with self._lock:
             if user_id is not None:
-                return self._sessions.get((str(user_id).strip(), session_id))
+                return self._sessions.peek((str(user_id).strip(), session_id))
             matches = [
                 actor
-                for (_owner_key, public_session_id), actor in self._sessions.items()
-                if public_session_id == session_id
+                for _session_key, actor in self._sessions.items()
+                if actor.session_id == session_id
             ]
             return matches[0] if len(matches) == 1 else None

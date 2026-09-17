@@ -20,6 +20,7 @@ from hermes_state import SessionDB
 from hermes_cli import config as hermes_config
 from hermes_cli import runtime_provider
 
+from workagent.backend.agent_cache import AgentCache, release_agent_soft
 from workagent.backend.agent_runtime import (
     build_profile_agent_kwargs,
     default_agent_factory,
@@ -82,10 +83,14 @@ class HermesA2AExecutor(AgentExecutor):
         agent_factory: AgentFactory | None = None,
         *,
         enable_streaming: bool = False,
+        agent_cache: AgentCache | None = None,
     ):
         self._agent_factory = agent_factory or _default_agent_factory
         self._enable_streaming = enable_streaming
-        self._agents: dict[str, object] = {}
+        # Bounded (LRU cap + idle TTL) rather than a plain dict: a cached agent
+        # holds a client pool and the full transcript, and an A2A caller that
+        # does not pass an explicit session id opens a new context per call.
+        self._agents = agent_cache if agent_cache is not None else AgentCache()
         self._task_agent_keys: dict[str, str] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._task_event_queues: dict[str, EventQueue] = {}
@@ -172,9 +177,7 @@ class HermesA2AExecutor(AgentExecutor):
         # The context id is the stable Hermes approval/clarify session key.
         # Keep it separate from the transient task id so a follow-up A2A turn
         # can reuse session approvals and the same response route.
-        agent = await self._get_agent(agent_session_id)
-        async with self._lock:
-            self._task_agent_keys[task.id] = agent_session_id
+        agent = await self._get_agent(agent_session_id, task_id=task.id)
         agent._pending_source_meta = _source_meta  # per-request 注入，供 _run_agent_conversation 使用
 
         # ── 路径 C：构建 Session Context Prompt，动态注入 agent.ephemeral_system_prompt ──
@@ -377,6 +380,10 @@ class HermesA2AExecutor(AgentExecutor):
                 self._cancel_events.pop(task.id, None)
                 self._task_agent_keys.pop(task.id, None)
                 self._task_event_queues.pop(task.id, None)
+                # The turn is over: restart the idle clock from here, not from
+                # when the turn started, and drop the eviction protection that
+                # the in-flight task id carried.
+                self._agents.touch(agent_session_id)
 
         streamed_text = await self._finish_stream_consumer(loop, delta_queue, stream_task)
         response_text = str(result.get("final_response") or "")
@@ -399,7 +406,7 @@ class HermesA2AExecutor(AgentExecutor):
             event.set()
         async with self._lock:
             agent_key = self._task_agent_keys.get(task.id, task.context_id)
-            agent = self._agents.get(agent_key)
+            agent = self._agents.peek(agent_key)
         if agent is not None:
             setattr(agent, "_interrupt_requested", True)
         if agent_key:
@@ -430,7 +437,7 @@ class HermesA2AExecutor(AgentExecutor):
         self, context_id: str, task_id: str
     ) -> list:
         """Expose stored history in A2A message format for tests and diagnostics."""
-        agent = self._agents.get(context_id)
+        agent = self._agents.peek(context_id)
         session_id = getattr(agent, "session_id", None) if agent is not None else context_id
         history = load_conversation_history(agent, session_id) if agent is not None else []
         return history_to_a2a(history, context_id=context_id, task_id=task_id)
@@ -448,13 +455,32 @@ class HermesA2AExecutor(AgentExecutor):
             return normalized_context_id
         return f"a2a-{uuid.uuid4().hex}"
 
-    async def _get_agent(self, session_id: str):
+    async def _get_agent(self, session_id: str, *, task_id: str | None = None):
+        """Return the agent for ``session_id``, evicting cold contexts.
+
+        ``task_id`` is registered under the same lock as the cache lookup, so a
+        concurrently starting turn is already "in flight" — and therefore
+        protected from eviction — before any other turn can sweep the cache.
+        """
         async with self._lock:
-            agent = self._agents.get(session_id)
-            if agent is None:
-                agent = self._agent_factory(session_id)
-                self._agents[session_id] = agent
-            return agent
+            protected = set(self._task_agent_keys.values())
+            agent, evicted = self._agents.get_or_create(
+                session_id,
+                self._agent_factory,
+                protected=protected,
+            )
+            if task_id is not None:
+                self._task_agent_keys[task_id] = session_id
+        if evicted:
+            # Off the lock: release_clients() closes a socket pool, and no
+            # other turn should wait behind that teardown.
+            await asyncio.to_thread(self._release_evicted_agents, evicted)
+        return agent
+
+    @staticmethod
+    def _release_evicted_agents(evicted: list[tuple[str, object]]) -> None:
+        for _session_id, agent in evicted:
+            release_agent_soft(agent)
 
     def _agent_accepts_stream_callback(self, agent: object) -> bool:
         try:
