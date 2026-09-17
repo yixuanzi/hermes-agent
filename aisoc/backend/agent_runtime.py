@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 
 from hermes_state import SessionDB
 from hermes_constants import get_config_path
@@ -15,39 +14,6 @@ from hermes_cli import runtime_provider
 logger = logging.getLogger(__name__)
 
 _AISOC_MCP_WAIT_TIMEOUT_SECONDS = 0.75
-
-
-class EchoAgent:
-    """Deterministic agent for smoke and e2e tests."""
-
-    def __init__(self):
-        self._interrupt_requested = False
-        self._turn_count = 0
-
-    def run_conversation(
-        self,
-        user_message: str,
-        system_message: str | None = None,
-        conversation_history: list[dict[str, str]] | None = None,
-        task_id: str | None = None,
-        stream_callback=None,
-    ) -> dict[str, object]:
-        del system_message, task_id
-        if self._interrupt_requested:
-            raise RuntimeError("Canceled by user.")
-        history = list(conversation_history or [])
-        self._turn_count += 1
-        response = f"echo(turn={self._turn_count}): {user_message}"
-        if stream_callback is not None:
-            midpoint = max(1, len(response) // 2)
-            stream_callback(response[:midpoint])
-            time.sleep(0.01)
-            stream_callback(response[midpoint:])
-            stream_callback(None)
-        return {
-            "final_response": response,
-            "messages": history,
-        }
 
 
 def prepare_hermes_home() -> None:
@@ -258,7 +224,6 @@ def build_profile_agent_kwargs(
     if runtime.get("fallback_model"):
         agent_kwargs["fallback_model"] = runtime["fallback_model"]
 
-    agent_kwargs["_a2a_runtime_source"] = runtime.get("source", "config")
     return agent_kwargs
 
 
@@ -277,9 +242,6 @@ def default_agent_factory(
     log: logging.Logger | None = None,
 ):
     """Create a profile-configured AIAgent for AISOC modules."""
-    if os.environ.get("AISOC_A2A_TEST_MODE") == "echo":
-        return EchoAgent()
-
     active_logger = log or logger
     start_aisoc_mcp_bootstrap(logger=active_logger)
     wait_for_aisoc_mcp_bootstrap()
@@ -302,20 +264,17 @@ def default_agent_factory(
         agent_kwargs["skip_memory"] = True
     if disabled_toolsets:
         agent_kwargs["disabled_toolsets"] = list(disabled_toolsets)
-    log_prefix = "A2A" if "a2a" in platform else "AISOC"
     active_logger.info(
         "%s profile injection from %s: %s",
-        log_prefix,
+        "AISOC",
         get_config_path(),
         {
             "provider": agent_kwargs.get("provider"),
             "model": agent_kwargs.get("model"),
             "base_url": agent_kwargs.get("base_url"),
             "api_mode": agent_kwargs.get("api_mode"),
-            "source": agent_kwargs.get("_a2a_runtime_source"),
         },
     )
-    agent_kwargs.pop("_a2a_runtime_source", None)
     try:
         agent_kwargs["session_db"] = session_db_cls()
     except Exception as exc:

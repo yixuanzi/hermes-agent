@@ -1,10 +1,8 @@
 # AISOC Backend (FastAPI)
 
 ## 1. 模块定位
-AISOC Backend 是 `hermes aisoc` 的服务层。当前以 `server` 模块为主，后续扩展 `a2a` 模块后，同一入口将根据 `--module` 参数启动不同服务：
+AISOC Backend 是 `hermes aisoc` 的服务层，目前仅提供 `server` 模块：
 - `server`：当前 Web Console / FastAPI API / 统一聊天 WebSocket 服务
-- `a2a`：A2A (Agent-to-Agent) 协议服务
-- `extcli`：本地增强交互命令行，直接在终端里与 `AIAgent` 对话
 
 `server` 模块当前负责：
 - 统一认证（用户账号 + JWT）
@@ -29,50 +27,24 @@ hermes aisoc --module server --port 9120
 ```
 
 常用参数：
-- `--module server|a2a|extcli`：选择启动模块，默认 `server`
+- `--module server`：保留的服务模块入口，默认 `server`
 - `--port 9120`：服务端口（默认 9120）
 - `--host 127.0.0.1`：监听地址（默认 loopback）
-- `--no-open`：不自动打开浏览器，仅 `server` 模块使用
+- `--no-open`：不自动打开浏览器
 - `--insecure`：允许非 loopback 绑定（有安全风险）
-- `--skip-build`：跳过前端构建（需已有 `backend/web_dist`），仅 `server` 模块使用
-
-未来 A2A 模块启动形态：
-
-```bash
-hermes aisoc --module a2a --host 127.0.0.1 --port 9086
-```
-
-A2A 模块默认允许直接连接；设置 `AISOC_A2A_AUTH=true` 后，会在 HTTP 中间件层对 A2A RPC 请求启用 Bearer Token 认证。
-
-`extcli` 模块启动形态：
-
-```bash
-hermes aisoc --module extcli
-```
+- `--skip-build`：跳过前端构建（需已有 `backend/web_dist`）
 
 也支持直接以 Python 启动同一入口：
 
 ```bash
 python aisoc/backend/main.py -p myprofile --module server --port 9120
-python aisoc/backend/main.py --profile myprofile --module a2a --host 127.0.0.1 --port 9086
-python aisoc/backend/main.py -p myprofile --module extcli
 ```
 
 说明：
 - `-p/--profile` 仅用于 `python aisoc/backend/main.py ...` 这类 direct startup 场景
 - `hermes -p <profile> aisoc ...` 继续由 Hermes 主入口负责 profile 解析，不需要额外改写参数
 
-`extcli` 特性：
-- 直接复用 `AIAgent` 对话循环，并通过 SessionDB 恢复上下文，不再手动维护 history
-- 输出默认写入 `/tmp/extcli_output`，输入继续通过当前终端读取，实现输入/输出通道分离
-- 支持用户输入、AI 流式输出、tool call 展示、tool result 摘要展示
-- tool result 最多显示前 50 个字符，超出部分以 `...` 省略
-- `main` 会话忙碌时拒绝新的主会话输入，不缓存待回放消息
-- 支持 `delegate_ext(is_loop=true)` 前台子会话；子会话激活时，终端输入会临时路由给子 agent
-- 子会话内 `/main` 与 `/exit` 等价，都会结束子会话并返回主会话；只有主会话前台时 `/exit` 才会退出整个 `extcli`
-- 支持 `/new` 重置当前主会话；当子会话前台时，`/new` 会作为普通输入传给子 agent
-- `a2a` / `extcli` 模块启动的 agent 会按 Hermes 原生语义加载 `config.yaml` 中启用的 `mcp_servers`
-- 可通过环境变量 `AISOC_MCP_ACTIVE` 覆盖该行为：未设置时自动加载，`true/1/yes/on` 强制启用，`false/0/no/off` 禁用
+AISOC 聊天 agent 会按 Hermes 原生语义加载 `config.yaml` 中启用的 `mcp_servers`。可通过环境变量 `AISOC_MCP_ACTIVE` 覆盖该行为：未设置时自动加载，`true/1/yes/on` 强制启用，`false/0/no/off` 禁用。
 
 ### 2.2 直接以 Python 启动（调试后端）
 
@@ -89,11 +61,7 @@ python -c "from aisoc.backend.server import start_server; start_server(host='127
 ### 2.3 认证配置
 - `AISOC_BOOTSTRAP_ADMIN_PASSWORD`：首次启动播种初始 `admin` 账号所需（≥8 位）；未设置时不会创建 admin，`/api/system/bootstrap` 返回 `admin_setup_required: true`，任何账号均无法登录
 - `AISOC_JWT_SECRET`：若设置，则 JWT 使用该固定密钥签发/校验；未设置时进程启动自动生成随机密钥（不落盘）——**重启且未设置该变量会使所有已登录会话失效**
-- `AISOC_A2A_AUTH`：A2A 模块认证开关；`true/1/yes/on` 启用，未设置或 `false/0/no/off` 关闭
-- `A2A_SESSION_TOKEN`：仅 `a2a` 模块使用；启用 A2A 认证时若设置，则使用静态 token（`a2a_token_source=env`）
-- 启用 A2A 认证且未设置 `A2A_SESSION_TOKEN` 时：进程启动自动生成随机 A2A token（`a2a_token_source=generated`）
-- `AISOC_A2A_ADMIN_TOKEN`：仅用于启用 `/man` A2A 管理页面和换取短期管理凭证；这是独立的管理 secret，不得与负责 A2A 通信认证的 `A2A_SESSION_TOKEN` 复用相同值
-- `AISOC_MCP_ACTIVE`：仅影响 `a2a` / `extcli` 的 MCP 装载；默认跟随配置自动加载，设置为 `false/0/no/off` 可在启动时关闭 MCP
+- `AISOC_MCP_ACTIVE`：AISOC 聊天 agent 的 MCP 装载开关；默认跟随配置自动加载，设置为 `false/0/no/off` 可在启动时关闭 MCP
 
 ---
 
@@ -129,25 +97,7 @@ python -c "from aisoc.backend.server import start_server; start_server(host='127
 - WebSocket：`?token=<JWT>`（浏览器 WS 升级不便带自定义 Authorization）
 - 自助注册（`POST /api/auth/register`）默认落地 `status=disabled`，需管理员在 `/api/users` 启用后才能登录
 
-### 3.3 A2A 认证机制
-- 默认关闭；通过 `AISOC_A2A_AUTH=true` 启用
-- 启用后使用 `Authorization: Bearer <A2A_SESSION_TOKEN>` 保护 A2A HTTP 路由
-- 公开白名单：
-  - `/health`
-  - `/.well-known/agent-card.json`
-  - `/a2a/.well-known/agent-card.json`（或 `A2A_BASE_PATH` 对应前缀）
-- 仅在 HTTP 中间件层认证，不改变 A2A executor、消息流或任务状态机
-- `A2A_SESSION_TOKEN` 仅用于 `a2a` 模块，与 `server` 模块的用户账号 + JWT 认证完全独立，不共享同一套凭证
-
-### 3.4 A2A 管理与重启
-- 设置非空 `AISOC_A2A_ADMIN_TOKEN` 后启用 `GET /man`；未设置时页面会明确显示管理未启用，管理 API 返回 503，重启不可用
-- 页面通过 `POST /man/api/auth` 提交 `{"token":"<AISOC_A2A_ADMIN_TOKEN>"}`，成功后换取有效期 5 分钟的专用 Bearer；管理 secret 和短期 Bearer 都只保存在浏览器内存中，不写入 cookie、localStorage 或 sessionStorage
-- `POST /man/api/restart` 只接受上述短期 Bearer，不接受原始管理 secret 或 `A2A_SESSION_TOKEN`；浏览器流程需要危险操作确认并准确输入 `RESTART A2A`
-- 管理路由仅允许浏览器同源调用；无 `Origin` 的非浏览器客户端仍可使用相同的管理认证流程
-- 重启成功返回 HTTP 202，统一字段为 `accepted`、`already_requested`、`service`、`pid`；重复请求不会启动第二个 watcher
-- 重启会重放当前启动命令；若认证 token 原本由进程启动时随机生成，新进程可能生成不同值
-
-### 3.5 统一聊天链路设计（1.0）
+### 3.3 统一聊天链路设计（1.0）
 聊天核心在 `aisoc/backend/chat/`（自 aegis chat 模块回迁；已恢复用户账号绑定，会话按认证用户的 `user_id` 隔离）：
 - `WS /api/chat/session`：唯一聊天通道。客户端事件 `session.bind` / `message.send` /
   `approval.respond` / `clarify.respond` / `session.interrupt` / `session.resume`；
@@ -266,13 +216,6 @@ python -c "from aisoc.backend.server import start_server; start_server(host='127
 - 原 `GET /api/overview/cronjobs/{job_id}/history` 已迁移到 `GET /api/cron/jobs/{job_id}/history`
 - 原 `GET /api/overview/sessions/{session_id}/detail` 已迁移到 `GET /api/sessions/{session_id}/detail`
 - Overview 仅保留总览/聚合接口；明细下钻接口归属到对应业务模块（Cron / Sessions）
-
-### 4.11 A2A Management
-- `GET /man`
-- `POST /man/api/auth`：请求体 `{"token":"..."}`，返回 5 分钟、仅用于管理 API 的 Bearer 及到期信息
-- `POST /man/api/restart`：需要管理 Bearer，成功返回 HTTP 202 和 `accepted`、`already_requested`、`service`、`pid`
-
----
 
 ## 5. 关键实现与依赖
 

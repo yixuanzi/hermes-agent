@@ -186,7 +186,7 @@ def _build_default_aisoc_agent(
         # built-in MEMORY.md/USER.md injection and any external memory
         # provider (Hindsight, etc.) so a brand-new "新建会话" never inherits
         # context accumulated from other sessions/platforms. Other AISOC
-        # entry points (extcli, a2a) call default_agent_factory() directly
+        # The server chat path calls default_agent_factory() directly.
         # and are unaffected.
         "skip_memory": True,
         # skip_memory only turns off the *automatic* MEMORY.md/Hindsight

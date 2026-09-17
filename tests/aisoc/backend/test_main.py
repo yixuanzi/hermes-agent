@@ -22,11 +22,6 @@ def _ns(**kwargs) -> argparse.Namespace:
         insecure=False,
         skip_build=False,
         module="server",
-        name=None,
-        description=None,
-        card=None,
-        streaming=False,
-        workers=4,
     )
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
@@ -36,76 +31,29 @@ def test_backend_main_module_exists() -> None:
     _load_backend_main()
 
 
-def test_cmd_aisoc_dispatches_a2a_module(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("module", ["a2a", "extcli"])
+def test_build_parser_rejects_removed_modules(module: str) -> None:
     backend_main = _load_backend_main()
-    called: dict[str, object] = {}
-
-    def _fake_start_a2a_server(**kwargs) -> None:
-        called.update(kwargs)
-
-    monkeypatch.setattr(
-        "aisoc.backend.a2a_server.start_a2a_server",
-        _fake_start_a2a_server,
-        raising=False,
-    )
-    backend_main.cmd_aisoc(
-        _ns(
-            module="a2a",
-            port=9086,
-            host="0.0.0.0",
-            insecure=True,
-            name="Hermes A2A",
-            description="A2A server",
-            card="/tmp/card.json",
-            streaming=True,
-            workers=8,
-        )
-    )
-
-    assert called == {
-        "host": "0.0.0.0",
-        "port": 9086,
-        "allow_public": True,
-        "name": "Hermes A2A",
-        "description": "A2A server",
-        "card_path": "/tmp/card.json",
-        "streaming": True,
-        "workers": 8,
-    }
-
-
-def test_cmd_aisoc_rejects_server_only_flags_for_a2a() -> None:
-    backend_main = _load_backend_main()
+    parser = backend_main.build_parser()
     with pytest.raises(SystemExit) as exc:
-        backend_main.cmd_aisoc(_ns(module="a2a", skip_build=True))
+        parser.parse_args(["--module", module])
     assert exc.value.code == 2
 
 
-def test_cmd_aisoc_dispatches_extcli_module(monkeypatch: pytest.MonkeyPatch) -> None:
-    backend_main = _load_backend_main()
-    called: dict[str, object] = {}
-
-    def _fake_start_extcli(**kwargs) -> None:
-        called.update(kwargs)
-
-    monkeypatch.setattr(
-        "aisoc.backend.extcli.start_extcli",
-        _fake_start_extcli,
-        raising=False,
-    )
-    backend_main.cmd_aisoc(_ns(module="extcli"))
-
-    assert called == {}
-
-
-def test_cmd_aisoc_rejects_a2a_only_flags_for_extcli() -> None:
-    backend_main = _load_backend_main()
-    with pytest.raises(SystemExit) as exc:
-        backend_main.cmd_aisoc(_ns(module="extcli", streaming=True))
-    assert exc.value.code == 2
-
-
-@pytest.mark.parametrize("flag", ["--stop", "--status", "--db", "--db=/tmp/a2a.db"])
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--stop",
+        "--status",
+        "--db",
+        "--db=/tmp/a2a.db",
+        "--name",
+        "--description",
+        "--card",
+        "--streaming",
+        "--workers",
+    ],
+)
 def test_build_parser_rejects_removed_flags(flag: str) -> None:
     backend_main = _load_backend_main()
     parser = backend_main.build_parser()
@@ -132,11 +80,11 @@ def test_main_applies_profile_override_before_dispatch(
 
     monkeypatch.setattr(backend_main, "cmd_aisoc", _fake_cmd_aisoc)
 
-    exit_code = backend_main.main(["-p", "coder", "--module", "extcli"])
+    exit_code = backend_main.main(["-p", "coder"])
 
     assert exit_code == 0
     assert called == {
-        "module": "extcli",
+        "module": "server",
         "hermes_home": "/tmp/hermes-profile-coder",
     }
 

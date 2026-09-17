@@ -21,7 +21,7 @@ def test_build_profile_agent_kwargs_reads_platform_toolsets_from_loaded_config()
             "provider": "custom:chatai",
         },
         "platform_toolsets": {
-            "aisoc-a2a": ["web", "a2a"],
+            "aisoc_web": ["web", "a2a"],
         },
     }
     config_module = SimpleNamespace(
@@ -38,7 +38,7 @@ def test_build_profile_agent_kwargs_reads_platform_toolsets_from_loaded_config()
 
     agent_kwargs = build_profile_agent_kwargs(
         "context-123",
-        platform="aisoc-a2a",
+        platform="aisoc_web",
         config_module=config_module,
         runtime_provider_module=runtime_provider_module,
     )
@@ -67,7 +67,7 @@ def test_build_profile_agent_kwargs_does_not_enable_a2a_when_platform_toolsets_m
 
     agent_kwargs = build_profile_agent_kwargs(
         "context-123",
-        platform="aisoc-a2a",
+        platform="aisoc_web",
         config_module=config_module,
         runtime_provider_module=runtime_provider_module,
     )
@@ -82,7 +82,7 @@ def test_build_profile_agent_kwargs_respects_explicit_empty_platform_toolsets() 
             "provider": "custom:chatai",
         },
         "platform_toolsets": {
-            "aisoc-a2a": [],
+            "aisoc_web": [],
         },
     }
     config_module = SimpleNamespace(
@@ -99,7 +99,7 @@ def test_build_profile_agent_kwargs_respects_explicit_empty_platform_toolsets() 
 
     agent_kwargs = build_profile_agent_kwargs(
         "context-123",
-        platform="aisoc-a2a",
+        platform="aisoc_web",
         config_module=config_module,
         runtime_provider_module=runtime_provider_module,
     )
@@ -133,7 +133,7 @@ def test_build_profile_agent_kwargs_auto_appends_enabled_mcp_servers() -> None:
 
     agent_kwargs = build_profile_agent_kwargs(
         "context-123",
-        platform="aisoc-a2a",
+        platform="aisoc_web",
         config_module=config_module,
         runtime_provider_module=runtime_provider_module,
     )
@@ -169,7 +169,7 @@ def test_build_profile_agent_kwargs_disables_mcp_via_env(
 
     agent_kwargs = build_profile_agent_kwargs(
         "context-123",
-        platform="aisoc-a2a",
+        platform="aisoc_web",
         config_module=config_module,
         runtime_provider_module=runtime_provider_module,
     )
@@ -184,7 +184,7 @@ def test_build_profile_agent_kwargs_honors_no_mcp_sentinel() -> None:
             "provider": "custom:chatai",
         },
         "platform_toolsets": {
-            "aisoc-a2a": ["web", "no_mcp"],
+            "aisoc_web": ["web", "no_mcp"],
         },
         "mcp_servers": {
             "filesystem": {"enabled": True},
@@ -204,7 +204,7 @@ def test_build_profile_agent_kwargs_honors_no_mcp_sentinel() -> None:
 
     agent_kwargs = build_profile_agent_kwargs(
         "context-123",
-        platform="aisoc-a2a",
+        platform="aisoc_web",
         config_module=config_module,
         runtime_provider_module=runtime_provider_module,
     )
@@ -219,7 +219,7 @@ def test_build_profile_agent_kwargs_preserves_explicit_mcp_allowlist() -> None:
             "provider": "custom:chatai",
         },
         "platform_toolsets": {
-            "aisoc-a2a": ["web", "github"],
+            "aisoc_web": ["web", "github"],
         },
         "mcp_servers": {
             "filesystem": {"enabled": True},
@@ -240,7 +240,7 @@ def test_build_profile_agent_kwargs_preserves_explicit_mcp_allowlist() -> None:
 
     agent_kwargs = build_profile_agent_kwargs(
         "context-123",
-        platform="aisoc-a2a",
+        platform="aisoc_web",
         config_module=config_module,
         runtime_provider_module=runtime_provider_module,
     )
@@ -277,12 +277,11 @@ def test_default_agent_factory_forwards_ephemeral_system_prompt(
     class _FakeSessionDB:
         pass
 
-    monkeypatch.delenv("AISOC_A2A_TEST_MODE", raising=False)
     monkeypatch.setattr("run_agent.AIAgent", _FakeAgent)
 
     agent = default_agent_factory(
         "context-123",
-        platform="aisoc-a2a",
+        platform="aisoc_web",
         config_module=config_module,
         runtime_provider_module=runtime_provider_module,
         session_db_cls=_FakeSessionDB,

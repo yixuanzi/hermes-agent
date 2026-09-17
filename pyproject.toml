@@ -220,7 +220,7 @@ wake = [
   "ai-edge-litert==2.1.6; platform_system == 'Darwin'",
 ]
 honcho = ["honcho-ai==2.2.0"]
-# a2a: A2A protocol adapter (aisoc/workagent/aegis agent-to-agent surface).
+# a2a: A2A protocol adapter (workagent/aegis agent-to-agent surface).
 # New in aegis_v0.2 — separate extra so the fastapi-pinned SDK stays lazy
 # for installs that don't run an A2A-exposed agent.
 a2a = ["a2a-sdk[fastapi]==1.1.0"]

@@ -32,9 +32,8 @@ def configure_aisoc_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     )
     parser.add_argument(
         "--module",
-        "--model",
         dest="module",
-        choices=("server", "a2a", "extcli"),
+        choices=("server",),
         default="server",
         help="AISOC service module to start (default: server)",
     )
@@ -55,23 +54,6 @@ def configure_aisoc_parser(parser: argparse.ArgumentParser) -> argparse.Argument
             "Skip the AISOC web UI build step and serve existing dist directly. "
             "Pre-build with: cd aisoc/frontend && npm run build"
         ),
-    )
-    parser.add_argument("--name", help="A2A module: override AgentCard name")
-    parser.add_argument(
-        "--description",
-        help="A2A module: override AgentCard description",
-    )
-    parser.add_argument("--card", help="A2A module: load AgentCard JSON from a file")
-    parser.add_argument(
-        "--streaming",
-        action="store_true",
-        help="A2A module: reserve streaming capability flag",
-    )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=4,
-        help="A2A module: maximum worker count (default 4)",
     )
     return parser
 
@@ -215,60 +197,8 @@ def _ensure_server_dist_available(skip_build: bool) -> None:
 
 def _validate_module_args(args: argparse.Namespace) -> None:
     module = getattr(args, "module", "server") or "server"
-    if module == "a2a":
-        invalid_flags = []
-        if getattr(args, "skip_build", False):
-            invalid_flags.append("--skip-build")
-        if getattr(args, "no_open", False):
-            invalid_flags.append("--no-open")
-        if invalid_flags:
-            print(
-                "A2A module does not support: " + ", ".join(invalid_flags),
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
-        return
-
-    if module == "extcli":
-        invalid_flags = []
-        if getattr(args, "skip_build", False):
-            invalid_flags.append("--skip-build")
-        if getattr(args, "no_open", False):
-            invalid_flags.append("--no-open")
-        if getattr(args, "name", None):
-            invalid_flags.append("--name")
-        if getattr(args, "description", None):
-            invalid_flags.append("--description")
-        if getattr(args, "card", None):
-            invalid_flags.append("--card")
-        if getattr(args, "streaming", False):
-            invalid_flags.append("--streaming")
-        if getattr(args, "workers", 4) != 4:
-            invalid_flags.append("--workers")
-        if invalid_flags:
-            print(
-                "extcli module does not support: " + ", ".join(invalid_flags),
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
-        return
-
-    invalid_flags = []
-    if getattr(args, "name", None):
-        invalid_flags.append("--name")
-    if getattr(args, "description", None):
-        invalid_flags.append("--description")
-    if getattr(args, "card", None):
-        invalid_flags.append("--card")
-    if getattr(args, "streaming", False):
-        invalid_flags.append("--streaming")
-    if getattr(args, "workers", 4) != 4:
-        invalid_flags.append("--workers")
-    if invalid_flags:
-        print(
-            "Server module does not support: " + ", ".join(invalid_flags),
-            file=sys.stderr,
-        )
+    if module != "server":
+        print(f"Unsupported AISOC module: {module}", file=sys.stderr)
         raise SystemExit(2)
 
 
@@ -288,28 +218,6 @@ def cmd_aisoc(args: argparse.Namespace) -> None:
         )
         print(f"Import error: {exc}")
         raise SystemExit(1)
-
-    module = getattr(args, "module", "server") or "server"
-    if module == "a2a":
-        from aisoc.backend.a2a_server import start_a2a_server
-
-        start_a2a_server(
-            host=args.host,
-            port=args.port,
-            allow_public=getattr(args, "insecure", False),
-            name=getattr(args, "name", None),
-            description=getattr(args, "description", None),
-            card_path=getattr(args, "card", None),
-            streaming=getattr(args, "streaming", False),
-            workers=getattr(args, "workers", 4),
-        )
-        return
-
-    if module == "extcli":
-        from aisoc.backend.extcli import start_extcli
-
-        start_extcli()
-        return
 
     _ensure_server_dist_available(getattr(args, "skip_build", False))
 
