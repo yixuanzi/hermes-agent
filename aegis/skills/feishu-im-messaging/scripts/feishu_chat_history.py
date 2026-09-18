@@ -17,6 +17,10 @@
   # 读取话题（thread）内消息
   python3 feishu_chat_history.py --thread om_xxx
 
+  # 展开合并转发消息（merge_forward）的全部子消息
+  python3 feishu_chat_history.py --merge-forward om_xxx
+  python3 feishu_chat_history.py --merge-forward om_xxx --raw   # 完整 JSON
+
 环境变量（本机 .env 已配置）：FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_DOMAIN
 注意：读取群组消息需要应用具备「获取群组中所有消息」权限，且机器人必须在群内。
 """
@@ -25,6 +29,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -121,6 +126,36 @@ def fetch_history(container_id_type, container_id, start_time=None, end_time=Non
                ) if data.get("has_more") and token else None
 
 
+def fetch_merge_forward(message_id):
+    """读取合并转发消息（merge_forward）的全部子消息。
+
+    会话历史列表中 merge_forward 仅有占位文本；改用「获取指定消息」接口
+    GET /open-apis/im/v1/messages/{message_id}，返回 data.items 数组：
+    第 1 条为父消息本体，其后为全部子消息（带 upper_message_id 指向父消息）。
+    返回 (父消息, [子消息...])。
+    """
+    try:
+        r = http("GET", f"{domain()}/open-apis/im/v1/messages/{message_id}",
+                 headers=auth_headers())
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read().decode())
+            sys.exit(f"ERROR: 获取消息失败 HTTP {e.code} "
+                     f"code={detail.get('code')} msg={detail.get('msg')}")
+        except Exception:
+            sys.exit(f"ERROR: 获取消息失败 HTTP {e.code} {e.reason}")
+    if r.get("code") != 0:
+        sys.exit(f"ERROR: 获取消息失败 code={r.get('code')} msg={r.get('msg')}")
+    items = (r.get("data") or {}).get("items", [])
+    if not items:
+        sys.exit(f"ERROR: 消息 {message_id} 无返回 items")
+    parent, subs = items[0], items[1:]
+    if parent.get("msg_type") != "merge_forward":
+        sys.exit(f"ERROR: 消息 {message_id} 不是 merge_forward 类型"
+                 f"（实际为 {parent.get('msg_type')}），无需展开")
+    return parent, subs
+
+
 def resolve_thread_id(thread_id):
     """兼容传入根消息 ID（om_ 前缀）：查该消息拿真实 thread_id（omt_ 前缀）。"""
     if not thread_id or thread_id.startswith("omt_"):
@@ -168,6 +203,8 @@ def main():
     ap.add_argument("--list-chats", action="store_true", help="列出机器人所在会话")
     ap.add_argument("--chat", help="chat_id（单聊或群聊）")
     ap.add_argument("--thread", help="thread_id（话题）")
+    ap.add_argument("--merge-forward", metavar="MESSAGE_ID",
+                    help="读取合并转发消息(om_)的全部子消息")
     ap.add_argument("--start", help="起始秒级时间戳")
     ap.add_argument("--end", help="结束秒级时间戳")
     ap.add_argument("--last-hours", type=float, help="最近 N 小时（转 start_time）")
@@ -183,8 +220,21 @@ def main():
                              ensure_ascii=False))
         return
 
+    if args.merge_forward:
+        parent, subs = fetch_merge_forward(args.merge_forward)
+        if args.raw:
+            print(json.dumps({"parent": parent, "sub_messages": subs},
+                             ensure_ascii=False))
+        else:
+            n = len(subs)
+            print(f"# 合并转发消息 {parent['message_id']} 共 {n} 条子消息：")
+            for m in subs:
+                print(brief(m))
+        print(f"--- 共 {len(subs)} 条子消息 ---", file=sys.stderr)
+        return
+
     if not args.chat and not args.thread:
-        ap.error("需要 --chat、--thread 或 --list-chats 之一")
+        ap.error("需要 --chat、--thread、--merge-forward 或 --list-chats 之一")
     if args.thread and (args.start or args.end or args.last_hours):
         ap.error("thread 容器暂不支持时间范围过滤（官方限制）")
 

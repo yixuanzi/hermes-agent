@@ -1,6 +1,6 @@
 ---
 name: feishu-im-messaging
-description: Use when user wants to bring in chat/group history for Feishu/Lark. Read chat & group message history via IM API; defaults to latest 20 messages incl. thread replies.
+description: Use when user wants to bring in chat/group history for Feishu/Lark. Read chat & group message history via IM API; expand merge_forward sub-messages; defaults to latest 20 messages incl. thread replies.
 ---
 
 # Feishu/Lark IM 消息（群历史消息）读取
@@ -33,6 +33,7 @@ python3 $SKILL_DIR/scripts/feishu_chat_history.py --list-chats            # 列�
 python3 $SKILL_DIR/scripts/feishu_chat_history.py --chat oc_xxx           # 全量历史（自动分页）
 python3 $SKILL_DIR/scripts/feishu_chat_history.py --chat oc_xxx --last-hours 240 --desc  # 时间范围+降序
 python3 $SKILL_DIR/scripts/feishu_chat_history.py --thread om_xxx --raw   # 话题消息 / 完整 JSON
+python3 $SKILL_DIR/scripts/feishu_chat_history.py --merge-forward om_xxx # 展开合并转发消息全部子消息
 ```
 
 ## 工作流
@@ -59,7 +60,35 @@ python3 $SKILL_DIR/scripts/feishu_chat_history.py --thread om_xxx --raw   # 话�
    过滤**：降序拉取 + 本地截断。另注意普通 chat 容器只能拿到话题根消息（根消息带
    `thread_id: omt_xxx` 字段），取话题全部回复需 `container_id_type=thread` + thread_id。
 5. **@提及还原**：正文中的 `@_user_1` 占位符需用响应内 `mentions[].key → name` 映射替换。
-6. **速率限制**：1000 次/分钟、50 次/秒。
+6. **`FEISHU_DOMAIN` 是短标识，不是完整域名（2026-09-18 实测）**：`.env` 中取值为
+   `lark` 或 `feishu`，自定义代码若直接拼 `domain + "/open-apis/..."` 会得到
+   `lark/open-apis/...`（无协议头），`urllib.request` 抛
+   `ValueError: unknown url type`。必须先做映射：
+   `{"lark": "https://open.larksuite.com", "feishu": "https://open.feishu.cn"}`。
+   本 skill 自带脚本已内置该映射，手写内联代码时勿漏。
+7. **速率限制**：1000 次/分钟、50 次/秒。
+9. **interactive 卡片读回结构被规范化（2026-09-18 实测）**：发送时的 `lark_md`/`plain_text`
+   卡片，经 IM API 读回后 `body.content` 已被服务端转为卡片 JSON v2 规范结构：文本在
+   `elements[][]` 二维数组内的 `{"tag":"text","text":"..."}`；`header.title` 只留顶层
+   `title` 字符串；markdown 标记（`**加粗**` 等）被剥离成分段 text。解析时对
+   `tag∈{text,plain_text,lark_md}` 同时取 `text` 和 `content` 字段兜底。另注意：卡片内
+   图片仅为 `image_key`（如 `img_v3_...`），需另行调资源下载接口取二进制；发送卡片时
+   `ul` 块会报 `230099 unsupported type of block`，列表请用 lark_md `- item` 语法。
+10. **卡片内图片无法下载 + cardkit 卡片读回仅为降级 fallback（2026-09-18 实测+检索）**：
+    卡片（interactive）内的 `image_key` 既不能走 `GET /im/v1/messages/{mid}/resources/{file_key}`
+    （报 `234043 Unsupported message type`），也不能走 `GET /im/v1/images/{image_key}`
+    （报 `234001 Invalid request param`）。
+    **重要区分——两种卡片的可读性不同**：
+    - **经典卡片**（直接随消息发送卡片 JSON，含 `tag:text/plain_text/div/markdown` 段）：
+      文本保留在 `body.content` 中，可正常读取（如标题「🧪 卡片文本读取实测」的卡片）。
+    - **cardkit 卡片实体**（card JSON 2.0，经「创建卡片实体 POST /cardkit/v1/cards」拿
+      card_id 后发送，流式更新 streaming_mode 也属此类）：IM API 读回的 `body.content`
+      仅为**降级 fallback**——结构固定为 `{"title":..., "elements":[[{"tag":"img","image_key":...},
+      {"tag":"text","text":" "}, ...]]}`（一张预览缩略图+空白占位文本），真实卡片内容存于
+      服务端卡片实体中，而 cardkit API 仅有 create/update/batch_update，**没有按 card_id
+      读取内容的 GET 接口**（id_convert 已废弃）→ 程序化读取此路不通。
+    判定方法：读回 content 若为「img 段 + 空 text 段」的 fallback 结构，基本可断定是
+    cardkit 实体卡片；若含有效 text/div/markdown 段则是经典卡片。
 
 ## 详细参考
 
