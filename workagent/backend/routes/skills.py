@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
-from workagent.backend.models import SkillToggleRequest
+from workagent.backend.models import SkillCategoryToggleRequest, SkillToggleRequest
 from workagent.backend.services import skill_service
 
 
@@ -47,6 +47,13 @@ def build_skills_router() -> APIRouter:
     @router.put("/toggle")
     async def toggle_skill(body: SkillToggleRequest):
         return skill_service.toggle_skill(body.name, body.enabled)
+
+    @router.put("/toggle-category")
+    async def toggle_category(body: SkillCategoryToggleRequest):
+        try:
+            return skill_service.toggle_category(body.category, body.enabled)
+        except skill_service.SkillNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @router.post("/reload")
     async def reload_skills():

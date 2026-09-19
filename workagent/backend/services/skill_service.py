@@ -82,6 +82,12 @@ def _scan_skill_index() -> dict[str, dict[str, Any]]:
     return index
 
 
+def _normalize_category(category: Any) -> str:
+    """Match the frontend's grouping: blank/None categories fall under "misc"."""
+    cleaned = str(category or "").strip()
+    return cleaned if cleaned else "misc"
+
+
 def _resolve_skill_entry(skill_name: str) -> dict[str, Any]:
     index = _scan_skill_index()
     entry = index.get(skill_name)
@@ -278,6 +284,32 @@ def toggle_skill(name: str, enabled: bool) -> dict[str, Any]:
         disabled.add(name)
     save_disabled_skills(config, disabled)
     return {"ok": True, "name": name, "enabled": enabled}
+
+
+def toggle_category(category: str, enabled: bool) -> dict[str, Any]:
+    """Enable or disable every skill in one category with a single config write.
+
+    A single load/save cycle (rather than one per skill) keeps the update
+    atomic with respect to other in-flight category or per-skill toggles.
+    """
+    from hermes_cli.skills_config import get_disabled_skills, save_disabled_skills
+
+    target = _normalize_category(category)
+    index = _scan_skill_index()
+    names = sorted(
+        entry["name"] for entry in index.values() if _normalize_category(entry.get("category")) == target
+    )
+    if not names:
+        raise SkillNotFoundError(f"No skills found in category '{category}'.")
+
+    config = load_config()
+    disabled = get_disabled_skills(config)
+    if enabled:
+        disabled.difference_update(names)
+    else:
+        disabled.update(names)
+    save_disabled_skills(config, disabled)
+    return {"ok": True, "category": target, "enabled": enabled, "names": names}
 
 
 def reload_index() -> bool:

@@ -155,3 +155,106 @@ def test_delete_skills_route_maps_delete_errors(
         response = client.delete("/api/skills/demo")
 
     assert response.status_code == status_code
+
+
+def _patch_disabled_skills_store(monkeypatch: pytest.MonkeyPatch, initial: set[str]) -> dict[str, set[str]]:
+    captured: dict[str, set[str]] = {"disabled": set(initial)}
+    monkeypatch.setattr(skill_service, "load_config", lambda: {})
+    monkeypatch.setattr(
+        "hermes_cli.skills_config.get_disabled_skills",
+        lambda config, platform=None: set(captured["disabled"]),
+    )
+
+    def fake_save(config: dict, disabled: set[str], platform: str | None = None) -> None:
+        captured["disabled"] = set(disabled)
+
+    monkeypatch.setattr("hermes_cli.skills_config.save_disabled_skills", fake_save)
+    return captured
+
+
+def test_toggle_category_disables_every_skill_in_that_category_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    index = {
+        "alpha": {"name": "alpha", "category": "aegis", "path": "/skills/aegis/alpha"},
+        "beta": {"name": "beta", "category": "aegis", "path": "/skills/aegis/beta"},
+        "gamma": {"name": "gamma", "category": "other", "path": "/skills/other/gamma"},
+    }
+    monkeypatch.setattr(skill_service, "_scan_skill_index", lambda: index)
+    captured = _patch_disabled_skills_store(monkeypatch, set())
+
+    result = skill_service.toggle_category("aegis", False)
+
+    assert result == {"ok": True, "category": "aegis", "enabled": False, "names": ["alpha", "beta"]}
+    assert captured["disabled"] == {"alpha", "beta"}
+
+
+def test_toggle_category_enabling_only_clears_that_categorys_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    index = {
+        "alpha": {"name": "alpha", "category": "aegis", "path": "/skills/aegis/alpha"},
+        "gamma": {"name": "gamma", "category": "other", "path": "/skills/other/gamma"},
+    }
+    monkeypatch.setattr(skill_service, "_scan_skill_index", lambda: index)
+    captured = _patch_disabled_skills_store(monkeypatch, {"alpha", "gamma"})
+
+    result = skill_service.toggle_category("aegis", True)
+
+    assert result == {"ok": True, "category": "aegis", "enabled": True, "names": ["alpha"]}
+    assert captured["disabled"] == {"gamma"}
+
+
+def test_toggle_category_treats_blank_category_as_misc(monkeypatch: pytest.MonkeyPatch) -> None:
+    index = {"solo": {"name": "solo", "category": None, "path": "/skills/solo"}}
+    monkeypatch.setattr(skill_service, "_scan_skill_index", lambda: index)
+    captured = _patch_disabled_skills_store(monkeypatch, set())
+
+    result = skill_service.toggle_category("misc", False)
+
+    assert result["names"] == ["solo"]
+    assert captured["disabled"] == {"solo"}
+
+
+def test_toggle_category_rejects_unknown_category(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(skill_service, "_scan_skill_index", lambda: {})
+
+    with pytest.raises(skill_service.SkillNotFoundError, match="nonexistent"):
+        skill_service.toggle_category("nonexistent", True)
+
+
+def test_toggle_category_route_returns_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(build_skills_router())
+    monkeypatch.setattr(
+        skill_service,
+        "toggle_category",
+        lambda category, enabled: {"ok": True, "category": category, "enabled": enabled, "names": ["alpha"]},
+    )
+
+    with TestClient(app) as client:
+        response = client.put("/api/skills/toggle-category", json={"category": "aegis", "enabled": False})
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "category": "aegis", "enabled": False, "names": ["alpha"]}
+
+
+def test_toggle_category_route_maps_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(build_skills_router())
+    monkeypatch.setattr(
+        skill_service,
+        "toggle_category",
+        lambda category, enabled: (_ for _ in ()).throw(skill_service.SkillNotFoundError("none")),
+    )
+
+    with TestClient(app) as client:
+        response = client.put("/api/skills/toggle-category", json={"category": "missing", "enabled": True})
+
+    assert response.status_code == 404

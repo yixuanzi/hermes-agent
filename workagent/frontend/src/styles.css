@@ -2157,7 +2157,8 @@ select:focus {
 }
 
 .skills-category-toggle {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   border: none;
   background: transparent;
   box-shadow: none;
@@ -2172,6 +2173,14 @@ select:focus {
   transform: none;
   box-shadow: none;
   color: var(--workagent-accent);
+}
+
+.skills-category-bulk-toggle {
+  flex-shrink: 0;
+  min-height: calc(26px * var(--density-scale));
+  padding: calc(3px * var(--density-scale)) calc(9px * var(--density-scale));
+  font-size: calc(11px * var(--density-scale));
+  white-space: nowrap;
 }
 
 .skills-category-head-right {
@@ -2492,6 +2501,19 @@ select:focus {
   align-items: center;
   justify-content: space-between;
   gap: calc(8px * var(--density-scale));
+}
+
+.wiki-detail-head-title {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(10px * var(--density-scale));
+  min-width: 0;
+}
+
+.wiki-detail-head-title h3 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .wiki-detail-head-actions {

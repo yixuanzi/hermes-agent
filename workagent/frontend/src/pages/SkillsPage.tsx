@@ -58,6 +58,7 @@ export function SkillsPage() {
 
   const [pendingSkill, setPendingSkill] = useState("");
   const [pendingDeleteSkill, setPendingDeleteSkill] = useState("");
+  const [pendingCategory, setPendingCategory] = useState("");
   const [actionError, setActionError] = useState("");
   const [actionSuccess, setActionSuccess] = useState("");
 
@@ -144,6 +145,28 @@ export function SkillsPage() {
       setActionError(`Failed to ${enabled ? "enable" : "disable"} ${name}.`);
     } finally {
       setPendingSkill("");
+    }
+  }
+
+  async function toggleCategory(category: string, enabled: boolean) {
+    setPendingCategory(category);
+    setActionError("");
+    setActionSuccess("");
+    try {
+      await fetchJSON("/api/skills/toggle-category", {
+        method: "PUT",
+        body: JSON.stringify({ category, enabled }),
+      });
+      const refreshSucceeded = await loadSkills();
+      if (!refreshSucceeded) {
+        setActionError(`Updated ${category}, but failed to refresh skills from /api/skills.`);
+        return;
+      }
+      setActionSuccess(`${category} ${enabled ? "enabled" : "disabled"} successfully.`);
+    } catch (error) {
+      setActionError(getApiErrorDetail(error, `Failed to ${enabled ? "enable" : "disable"} ${category}.`));
+    } finally {
+      setPendingCategory("");
     }
   }
 
@@ -238,6 +261,7 @@ export function SkillsPage() {
 
   const selectedSkill = skills.find((skill) => skill.name === selectedSkillName) || null;
   const disabledSkillCount = filteredSkills.filter((skill) => !skill.enabled).length;
+  const mutationInFlight = Boolean(pendingSkill) || Boolean(pendingDeleteSkill) || Boolean(pendingCategory);
 
   return (
     <section className="skills-workbench-page">
@@ -285,27 +309,46 @@ export function SkillsPage() {
           <div className="skills-list-scroll">
             {groupedSkills.map((group) => (
               <section key={group.category} className="skills-category-block">
-                <button
-                  type="button"
-                  className="skills-category-head skills-category-toggle"
-                  onClick={() =>
-                    setCollapsedCategories((current) => ({
-                      ...current,
-                      [group.category]: !current[group.category],
-                    }))
-                  }
-                  aria-label={`Toggle ${group.category} category`}
-                  aria-expanded={isSearching || !collapsedCategories[group.category]}
-                >
-                  <h4>{group.category}</h4>
-                  <span className="skills-category-head-right">
-                    <span className="status-badge">{group.items.length}</span>
-                    <span className="skills-disabled-count">{group.disabledCount} disabled</span>
-                    <span className="skills-category-chevron" aria-hidden="true">
-                      {isSearching || !collapsedCategories[group.category] ? "▾" : "▸"}
+                <div className="skills-category-head">
+                  <button
+                    type="button"
+                    className="skills-category-toggle"
+                    onClick={() =>
+                      setCollapsedCategories((current) => ({
+                        ...current,
+                        [group.category]: !current[group.category],
+                      }))
+                    }
+                    aria-label={`Toggle ${group.category} category`}
+                    aria-expanded={isSearching || !collapsedCategories[group.category]}
+                  >
+                    <h4>{group.category}</h4>
+                    <span className="skills-category-head-right">
+                      <span className="status-badge">{group.items.length}</span>
+                      <span className="skills-disabled-count">{group.disabledCount} disabled</span>
+                      <span className="skills-category-chevron" aria-hidden="true">
+                        {isSearching || !collapsedCategories[group.category] ? "▾" : "▸"}
+                      </span>
                     </span>
-                  </span>
-                </button>
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button skills-category-bulk-toggle"
+                    disabled={mutationInFlight}
+                    onClick={() => void toggleCategory(group.category, group.disabledCount > 0)}
+                    title={
+                      group.disabledCount > 0
+                        ? `Enable all skills in ${group.category}`
+                        : `Disable all skills in ${group.category}`
+                    }
+                  >
+                    {pendingCategory === group.category
+                      ? "..."
+                      : group.disabledCount > 0
+                        ? "Enable all"
+                        : "Disable all"}
+                  </button>
+                </div>
                 {isSearching || !collapsedCategories[group.category] ? (
                   <ul className="list-grid skills-narrow-list">
                     {group.items.map((skill) => (
@@ -326,7 +369,7 @@ export function SkillsPage() {
                           <button
                             type="button"
                             className="ghost-button skills-mini-toggle"
-                            disabled={pendingSkill === skill.name || pendingDeleteSkill === skill.name}
+                            disabled={mutationInFlight}
                             onClick={(event) => {
                               event.stopPropagation();
                               void toggleSkill(skill.name, !skill.enabled);
@@ -448,6 +491,13 @@ export function SkillsPage() {
               kind="loading"
               title="Applying Toggle"
               message={`Updating ${pendingSkill} via /api/skills/toggle.`}
+            />
+          ) : null}
+          {pendingCategory ? (
+            <StateBlock
+              kind="loading"
+              title="Applying Category Toggle"
+              message={`Updating ${pendingCategory} via /api/skills/toggle-category.`}
             />
           ) : null}
           {pendingDeleteSkill ? (

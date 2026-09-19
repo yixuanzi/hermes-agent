@@ -68,6 +68,11 @@ class SkillToggleRequest(BaseModel):
     enabled: bool
 
 
+class SkillCategoryToggleRequest(BaseModel):
+    category: str
+    enabled: bool
+
+
 class MemoryWriteRequest(BaseModel):
     content: str
 

@@ -236,6 +236,68 @@ describe("SkillsPage behavior", () => {
     });
   });
 
+  it("bulk-toggles a whole category via /api/skills/toggle-category", async () => {
+    let toggleCategoryCalls = 0;
+    let skillsLoadCount = 0;
+
+    fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/api/skills") {
+        skillsLoadCount += 1;
+        const enabled = skillsLoadCount === 1;
+        return Promise.resolve([
+          { name: "alpha", description: "alpha", enabled, category: "aegis", path: "/tmp/alpha" },
+          { name: "beta", description: "beta", enabled, category: "aegis", path: "/tmp/beta" },
+        ]) as Promise<unknown>;
+      }
+      if (url === "/api/skills/toggle-category") {
+        toggleCategoryCalls += 1;
+        expect(init?.method).toBe("PUT");
+        expect(JSON.parse(String(init?.body))).toEqual({ category: "aegis", enabled: false });
+        return Promise.resolve({
+          ok: true,
+          category: "aegis",
+          enabled: false,
+          names: ["alpha", "beta"],
+        }) as Promise<unknown>;
+      }
+      if (url === "/api/skills/alpha") {
+        return Promise.resolve({
+          name: "alpha",
+          path: "/tmp/alpha",
+          content: "# alpha",
+          appendix: [],
+        }) as Promise<unknown>;
+      }
+      throw new Error(`Unexpected URL in test: ${url}`);
+    });
+
+    await mountSkillsPage();
+
+    await waitForAssert(() => {
+      expect((containerRef as HTMLElement).textContent).toContain("aegis");
+    });
+
+    const bulkButton = (containerRef as HTMLElement).querySelector(
+      ".skills-category-bulk-toggle",
+    ) as HTMLButtonElement | null;
+    expect(bulkButton).not.toBeNull();
+    expect(bulkButton?.textContent).toBe("Disable all");
+
+    await act(async () => {
+      bulkButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    await waitForAssert(() => {
+      expect(toggleCategoryCalls).toBe(1);
+      expect((containerRef as HTMLElement).textContent).toContain("aegis disabled successfully.");
+      const refreshedBulkButton = (containerRef as HTMLElement).querySelector(
+        ".skills-category-bulk-toggle",
+      ) as HTMLButtonElement | null;
+      expect(refreshedBulkButton?.textContent).toBe("Enable all");
+    });
+  });
+
   it("confirms, deletes the selected skill, and selects the next skill", async () => {
     let deleted = false;
     fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {

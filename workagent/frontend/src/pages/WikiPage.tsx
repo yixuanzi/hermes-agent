@@ -233,7 +233,20 @@ export function WikiPage() {
 
         <aside className="detail-panel wiki-detail-pane">
           <div className="wiki-detail-head">
-            <h3>{document?.name || "Document"}</h3>
+            <div className="wiki-detail-head-title">
+              <h3>{document?.name || "Document"}</h3>
+              {document && mode === "code" ? (
+                <button
+                  type="button"
+                  className="wiki-save-button wiki-header-save-button"
+                  onClick={() => void saveCurrentDocument()}
+                  disabled={saveLoading || !hasUnsavedChanges}
+                >
+                  <Save size={14} strokeWidth={1.8} aria-hidden="true" />
+                  {saveLoading ? "Saving..." : "Save"}
+                </button>
+              ) : null}
+            </div>
             <div className="wiki-detail-head-actions">
               <div className="wiki-mode-toggle" role="group" aria-label="Document view mode">
                 <button
@@ -261,17 +274,6 @@ export function WikiPage() {
                   <span>Code</span>
                 </button>
               </div>
-              {document && mode === "code" ? (
-                <button
-                  type="button"
-                  className="wiki-save-button wiki-header-save-button"
-                  onClick={() => void saveCurrentDocument()}
-                  disabled={saveLoading || !hasUnsavedChanges}
-                >
-                  <Save size={14} strokeWidth={1.8} aria-hidden="true" />
-                  {saveLoading ? "Saving..." : "Save"}
-                </button>
-              ) : null}
               {document ? <span className="status-badge">{formatFileSize(document.size)}</span> : null}
             </div>
           </div>
