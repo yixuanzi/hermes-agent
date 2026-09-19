@@ -8,7 +8,7 @@ from typing import Any
 
 from hermes_cli.config import load_config
 
-_MAX_APPENDIX_SIZE = 2 * 1024 * 1024  # 2 MB read limit for appendix files
+_MAX_SKILL_FILE_SIZE = 2 * 1024 * 1024  # 2 MB read/write limit for SKILL.md and appendix files
 
 
 class SkillNotFoundError(Exception):
@@ -21,6 +21,10 @@ class SkillDeleteForbiddenError(Exception):
 
 class SkillDeleteFailedError(Exception):
     """Raised when the skill directory cannot be removed."""
+
+
+class SkillWriteFailedError(Exception):
+    """Raised when a skill file cannot be written to disk."""
 
 
 def _iter_skill_roots() -> list[Path]:
@@ -257,9 +261,9 @@ def get_skill_appendix_content(skill_name: str, appendix_path: str) -> dict[str,
         raise FileNotFoundError(f"Appendix file '{appendix_path}' not found.")
     if target_path.name == "SKILL.md":
         raise ValueError("SKILL.md is not an appendix file.")
-    if target_path.stat().st_size > _MAX_APPENDIX_SIZE:
+    if target_path.stat().st_size > _MAX_SKILL_FILE_SIZE:
         raise ValueError(
-            f"Appendix file too large ({target_path.stat().st_size} bytes, max {_MAX_APPENDIX_SIZE})."
+            f"Appendix file too large ({target_path.stat().st_size} bytes, max {_MAX_SKILL_FILE_SIZE})."
         )
     try:
         content = target_path.read_text(encoding="utf-8")
@@ -270,6 +274,85 @@ def get_skill_appendix_content(skill_name: str, appendix_path: str) -> dict[str,
         "name": target_path.name,
         "path": str(target_path.relative_to(skill_dir)),
         "content": content,
+    }
+
+
+def _encode_skill_text(content: str) -> bytes:
+    try:
+        content_bytes = content.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("Content must be valid UTF-8 text.") from exc
+    if len(content_bytes) > _MAX_SKILL_FILE_SIZE:
+        raise ValueError(
+            f"Content too large ({len(content_bytes)} bytes, max {_MAX_SKILL_FILE_SIZE})."
+        )
+    return content_bytes
+
+
+def save_skill_content(skill_name: str, content: str) -> dict[str, Any]:
+    """Overwrite a skill's SKILL.md body in place."""
+    entry = _resolve_skill_entry(skill_name)
+    skill_dir = Path(entry["path"])
+    target_path = skill_dir / "SKILL.md"
+    if not target_path.is_file():
+        raise SkillNotFoundError(f"Skill '{skill_name}' main file not found.")
+
+    content_bytes = _encode_skill_text(content)
+    try:
+        target_path.write_bytes(content_bytes)
+        stat = target_path.stat()
+    except OSError as exc:
+        raise SkillWriteFailedError(f"Failed to save '{skill_name}'.") from exc
+
+    try:
+        from agent.prompt_builder import clear_skills_system_prompt_cache
+
+        clear_skills_system_prompt_cache(clear_snapshot=True)
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "name": skill_name,
+        "path": str(target_path.relative_to(skill_dir)),
+        "size": stat.st_size,
+        "modified": int(stat.st_mtime),
+    }
+
+
+def save_skill_appendix_content(skill_name: str, appendix_path: str, content: str) -> dict[str, Any]:
+    """Overwrite a single appendix file inside a skill's directory."""
+    from tools.path_security import has_traversal_component, validate_within_dir
+
+    if not appendix_path:
+        raise ValueError("appendix path is required")
+    if has_traversal_component(appendix_path):
+        raise ValueError("Path traversal ('..') is not allowed.")
+
+    entry = _resolve_skill_entry(skill_name)
+    skill_dir = Path(entry["path"])
+    target_path = skill_dir / appendix_path
+    traversal_error = validate_within_dir(target_path, skill_dir)
+    if traversal_error:
+        raise ValueError(traversal_error)
+    if not target_path.exists() or not target_path.is_file():
+        raise FileNotFoundError(f"Appendix file '{appendix_path}' not found.")
+    if target_path.name == "SKILL.md":
+        raise ValueError("SKILL.md is not an appendix file.")
+
+    content_bytes = _encode_skill_text(content)
+    try:
+        target_path.write_bytes(content_bytes)
+        stat = target_path.stat()
+    except OSError as exc:
+        raise SkillWriteFailedError(f"Failed to save '{appendix_path}'.") from exc
+
+    return {
+        "ok": True,
+        "name": target_path.name,
+        "path": str(target_path.relative_to(skill_dir)),
+        "size": stat.st_size,
+        "modified": int(stat.st_mtime),
     }
 
 

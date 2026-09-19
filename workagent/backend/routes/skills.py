@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
-from workagent.backend.models import SkillCategoryToggleRequest, SkillToggleRequest
+from workagent.backend.models import (
+    SkillAppendixWriteRequest,
+    SkillCategoryToggleRequest,
+    SkillContentWriteRequest,
+    SkillToggleRequest,
+)
 from workagent.backend.services import skill_service
 
 
@@ -54,6 +59,35 @@ def build_skills_router() -> APIRouter:
             return skill_service.toggle_category(body.category, body.enabled)
         except skill_service.SkillNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # These generic "/{skill_name}" PUT routes must stay registered after the
+    # literal "/toggle" and "/toggle-category" routes above — otherwise a
+    # request to those literal paths would match here first, with
+    # skill_name="toggle"/"toggle-category", since routes are matched in
+    # registration order.
+    @router.put("/{skill_name}")
+    async def put_skill_content(skill_name: str, body: SkillContentWriteRequest):
+        try:
+            return skill_service.save_skill_content(skill_name, body.content)
+        except skill_service.SkillNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except skill_service.SkillWriteFailedError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @router.put("/{skill_name}/appendix")
+    async def put_skill_appendix(skill_name: str, body: SkillAppendixWriteRequest):
+        try:
+            return skill_service.save_skill_appendix_content(skill_name, body.path, body.content)
+        except skill_service.SkillNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except skill_service.SkillWriteFailedError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.post("/reload")
     async def reload_skills():

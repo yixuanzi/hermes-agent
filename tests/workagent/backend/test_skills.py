@@ -258,3 +258,197 @@ def test_toggle_category_route_maps_not_found(monkeypatch: pytest.MonkeyPatch) -
         response = client.put("/api/skills/toggle-category", json={"category": "missing", "enabled": True})
 
     assert response.status_code == 404
+
+
+def test_save_skill_content_overwrites_skill_md(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    skill_dir = _make_skill(tmp_path / "skills" / "demo-category", "demo")
+    _patch_skill_entry(monkeypatch, skill_dir, "demo", tmp_path / "skills")
+
+    result = skill_service.save_skill_content("demo", "---\nname: demo\n---\n\nUpdated body\n")
+
+    assert result["ok"] is True
+    assert result["name"] == "demo"
+    assert result["path"] == "SKILL.md"
+    assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == "---\nname: demo\n---\n\nUpdated body\n"
+
+
+def test_save_skill_content_rejects_oversized_content(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    skill_dir = _make_skill(tmp_path / "skills" / "demo-category", "demo")
+    _patch_skill_entry(monkeypatch, skill_dir, "demo", tmp_path / "skills")
+    monkeypatch.setattr(skill_service, "_MAX_SKILL_FILE_SIZE", 10)
+
+    with pytest.raises(ValueError, match="too large"):
+        skill_service.save_skill_content("demo", "this body is definitely longer than 10 bytes")
+
+    assert (skill_dir / "SKILL.md").read_text(encoding="utf-8").startswith("---")
+
+
+def test_save_skill_content_requires_existing_skill_md(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    skill_dir = tmp_path / "skills" / "demo-category" / "demo"
+    skill_dir.mkdir(parents=True)
+    _patch_skill_entry(monkeypatch, skill_dir, "demo", tmp_path / "skills")
+
+    with pytest.raises(skill_service.SkillNotFoundError):
+        skill_service.save_skill_content("demo", "content")
+
+
+def test_save_skill_appendix_content_overwrites_appendix_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    skill_dir = _make_skill(tmp_path / "skills" / "demo-category", "demo")
+    _patch_skill_entry(monkeypatch, skill_dir, "demo", tmp_path / "skills")
+
+    result = skill_service.save_skill_appendix_content("demo", "references/notes.md", "updated notes")
+
+    assert result == {
+        "ok": True,
+        "name": "notes.md",
+        "path": "references/notes.md",
+        "size": len(b"updated notes"),
+        "modified": result["modified"],
+    }
+    assert (skill_dir / "references" / "notes.md").read_text(encoding="utf-8") == "updated notes"
+
+
+def test_save_skill_appendix_content_rejects_traversal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    skill_dir = _make_skill(tmp_path / "skills" / "demo-category", "demo")
+    _patch_skill_entry(monkeypatch, skill_dir, "demo", tmp_path / "skills")
+
+    with pytest.raises(ValueError, match="traversal"):
+        skill_service.save_skill_appendix_content("demo", "../outside.md", "content")
+
+
+def test_save_skill_appendix_content_rejects_skill_md_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    skill_dir = _make_skill(tmp_path / "skills" / "demo-category", "demo")
+    _patch_skill_entry(monkeypatch, skill_dir, "demo", tmp_path / "skills")
+
+    with pytest.raises(ValueError, match="not an appendix file"):
+        skill_service.save_skill_appendix_content("demo", "SKILL.md", "content")
+
+
+def test_save_skill_appendix_content_requires_existing_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    skill_dir = _make_skill(tmp_path / "skills" / "demo-category", "demo")
+    _patch_skill_entry(monkeypatch, skill_dir, "demo", tmp_path / "skills")
+
+    with pytest.raises(FileNotFoundError):
+        skill_service.save_skill_appendix_content("demo", "references/missing.md", "content")
+
+
+@pytest.mark.parametrize(
+    ("exception", "status_code"),
+    [
+        (skill_service.SkillNotFoundError("missing"), 404),
+        (ValueError("bad content"), 400),
+        (skill_service.SkillWriteFailedError("disk full"), 500),
+    ],
+)
+def test_put_skill_content_route_maps_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    exception: Exception,
+    status_code: int,
+) -> None:
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(build_skills_router())
+    monkeypatch.setattr(
+        skill_service,
+        "save_skill_content",
+        lambda name, content: (_ for _ in ()).throw(exception),
+    )
+
+    with TestClient(app) as client:
+        response = client.put("/api/skills/demo", json={"content": "new body"})
+
+    assert response.status_code == status_code
+
+
+def test_put_skill_content_route_returns_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(build_skills_router())
+    monkeypatch.setattr(
+        skill_service,
+        "save_skill_content",
+        lambda name, content: {"ok": True, "name": name, "path": "SKILL.md", "size": len(content), "modified": 0},
+    )
+
+    with TestClient(app) as client:
+        response = client.put("/api/skills/demo", json={"content": "new body"})
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "name": "demo", "path": "SKILL.md", "size": 8, "modified": 0}
+
+
+@pytest.mark.parametrize(
+    ("exception", "status_code"),
+    [
+        (skill_service.SkillNotFoundError("missing"), 404),
+        (FileNotFoundError("missing file"), 404),
+        (ValueError("bad path"), 400),
+        (skill_service.SkillWriteFailedError("disk full"), 500),
+    ],
+)
+def test_put_skill_appendix_route_maps_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    exception: Exception,
+    status_code: int,
+) -> None:
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(build_skills_router())
+    monkeypatch.setattr(
+        skill_service,
+        "save_skill_appendix_content",
+        lambda name, path, content: (_ for _ in ()).throw(exception),
+    )
+
+    with TestClient(app) as client:
+        response = client.put(
+            "/api/skills/demo/appendix",
+            json={"path": "references/notes.md", "content": "updated"},
+        )
+
+    assert response.status_code == status_code
+
+
+def test_toggle_and_toggle_category_routes_are_not_shadowed_by_generic_skill_put(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard: the generic PUT "/{skill_name}" route is registered
+    after the literal "/toggle" and "/toggle-category" routes, so a request
+    to those literal paths must still resolve to the toggle handlers instead
+    of being treated as saving a skill named "toggle"/"toggle-category".
+    """
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(build_skills_router())
+    monkeypatch.setattr(skill_service, "toggle_skill", lambda name, enabled: {"ok": True, "via": "toggle_skill"})
+    monkeypatch.setattr(
+        skill_service, "toggle_category", lambda category, enabled: {"ok": True, "via": "toggle_category"}
+    )
+    monkeypatch.setattr(
+        skill_service,
+        "save_skill_content",
+        lambda name, content: (_ for _ in ()).throw(AssertionError("should not be called for /toggle paths")),
+    )
+
+    with TestClient(app) as client:
+        toggle_response = client.put("/api/skills/toggle", json={"name": "demo", "enabled": False})
+        category_response = client.put("/api/skills/toggle-category", json={"category": "demo", "enabled": False})
+
+    assert toggle_response.status_code == 200
+    assert toggle_response.json() == {"ok": True, "via": "toggle_skill"}
+    assert category_response.status_code == 200
+    assert category_response.json() == {"ok": True, "via": "toggle_category"}

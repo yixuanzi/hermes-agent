@@ -74,6 +74,12 @@ export function SkillsPage() {
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [search, setSearch] = useState("");
 
+  const [isEditingContent, setIsEditingContent] = useState(false);
+  const [contentDraft, setContentDraft] = useState("");
+  const [contentSaving, setContentSaving] = useState(false);
+  const [contentSaveError, setContentSaveError] = useState("");
+  const [contentSaveSuccess, setContentSaveSuccess] = useState("");
+
   async function loadSkills(): Promise<boolean> {
     setLoading(true);
     setError("");
@@ -89,6 +95,14 @@ export function SkillsPage() {
     }
   }
 
+  function resetContentEditing() {
+    setIsEditingContent(false);
+    setContentDraft("");
+    setContentSaving(false);
+    setContentSaveError("");
+    setContentSaveSuccess("");
+  }
+
   async function loadSkillDetail(skillName: string) {
     if (!skillName) return;
     setDetailLoading(true);
@@ -98,6 +112,7 @@ export function SkillsPage() {
     setAppendixCollapsed(false);
     setAppendixContent(null);
     setAppendixError("");
+    resetContentEditing();
     try {
       const payload = await fetchJSON<SkillDetail>(`/api/skills/${encodeURIComponent(skillName)}`);
       setDetail(payload);
@@ -113,6 +128,7 @@ export function SkillsPage() {
     setAppendixLoading(true);
     setAppendixError("");
     setSelectedAppendixPath(appendixPath);
+    resetContentEditing();
     try {
       const encodedPath = encodeURIComponent(appendixPath);
       const payload = await fetchJSON<SkillAppendixContent>(
@@ -200,6 +216,64 @@ export function SkillsPage() {
     }
   }
 
+  function confirmDiscardEditIfNeeded(): boolean {
+    if (!isEditingContent) return true;
+    const editingAppendixNow = Boolean(selectedAppendixPath) && appendixContent?.path === selectedAppendixPath;
+    const original = editingAppendixNow ? appendixContent?.content ?? "" : detail?.content ?? "";
+    if (contentDraft === original) {
+      resetContentEditing();
+      return true;
+    }
+    const confirmed = window.confirm("You have unsaved edits. Discard changes?");
+    if (confirmed) resetContentEditing();
+    return confirmed;
+  }
+
+  function startEditingContent() {
+    if (!detail) return;
+    const editingAppendixNow = Boolean(selectedAppendixPath) && appendixContent?.path === selectedAppendixPath;
+    setContentDraft(editingAppendixNow ? appendixContent?.content ?? "" : detail.content);
+    setIsEditingContent(true);
+    setContentSaveError("");
+    setContentSaveSuccess("");
+  }
+
+  function cancelEditingContent() {
+    setIsEditingContent(false);
+    setContentDraft("");
+    setContentSaveError("");
+  }
+
+  async function saveEditedContent() {
+    if (!detail || contentSaving) return;
+    const editingAppendixNow = Boolean(selectedAppendixPath) && appendixContent?.path === selectedAppendixPath;
+    setContentSaving(true);
+    setContentSaveError("");
+    setContentSaveSuccess("");
+    try {
+      if (editingAppendixNow && appendixContent) {
+        await fetchJSON(`/api/skills/${encodeURIComponent(detail.name)}/appendix`, {
+          method: "PUT",
+          body: JSON.stringify({ path: appendixContent.path, content: contentDraft }),
+        });
+        setAppendixContent({ ...appendixContent, content: contentDraft });
+        setContentSaveSuccess(`${appendixContent.path} saved.`);
+      } else {
+        await fetchJSON(`/api/skills/${encodeURIComponent(detail.name)}`, {
+          method: "PUT",
+          body: JSON.stringify({ content: contentDraft }),
+        });
+        setDetail({ ...detail, content: contentDraft });
+        setContentSaveSuccess("SKILL.md saved.");
+      }
+      setIsEditingContent(false);
+    } catch (error) {
+      setContentSaveError(getApiErrorDetail(error, "Failed to save content."));
+    } finally {
+      setContentSaving(false);
+    }
+  }
+
   useEffect(() => {
     void loadSkills();
   }, []);
@@ -262,6 +336,10 @@ export function SkillsPage() {
   const selectedSkill = skills.find((skill) => skill.name === selectedSkillName) || null;
   const disabledSkillCount = filteredSkills.filter((skill) => !skill.enabled).length;
   const mutationInFlight = Boolean(pendingSkill) || Boolean(pendingDeleteSkill) || Boolean(pendingCategory);
+  const editingAppendix =
+    isEditingContent && Boolean(selectedAppendixPath) && appendixContent?.path === selectedAppendixPath;
+  const contentEditOriginal = editingAppendix ? appendixContent?.content ?? "" : detail?.content ?? "";
+  const hasContentUnsavedChanges = contentDraft !== contentEditOriginal;
 
   return (
     <section className="skills-workbench-page">
@@ -357,10 +435,14 @@ export function SkillsPage() {
                         className={selectedSkillName === skill.name ? "clickable-card active" : "clickable-card"}
                         role="button"
                         tabIndex={0}
-                        onClick={() => setSelectedSkillName(skill.name)}
+                        onClick={() => {
+                          if (!confirmDiscardEditIfNeeded()) return;
+                          setSelectedSkillName(skill.name);
+                        }}
                         onKeyDown={(event) => {
                           if (event.key !== "Enter" && event.key !== " ") return;
                           event.preventDefault();
+                          if (!confirmDiscardEditIfNeeded()) return;
                           setSelectedSkillName(skill.name);
                         }}
                       >
@@ -395,10 +477,40 @@ export function SkillsPage() {
             {selectedSkill ? (
               <div className="skills-detail-head-actions">
                 <span className="status-badge">{selectedSkill.enabled ? "Enabled" : "Disabled"}</span>
+                {!isEditingContent ? (
+                  <button
+                    type="button"
+                    className="ghost-button skills-edit-button"
+                    disabled={!detail || detailLoading}
+                    onClick={startEditingContent}
+                    title="Edit content"
+                  >
+                    Edit
+                  </button>
+                ) : !editingAppendix ? (
+                  <>
+                    <button
+                      type="button"
+                      className="ghost-button skills-cancel-edit-button"
+                      disabled={contentSaving}
+                      onClick={cancelEditingContent}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="wiki-save-button"
+                      disabled={contentSaving || !hasContentUnsavedChanges}
+                      onClick={() => void saveEditedContent()}
+                    >
+                      {contentSaving ? "Saving..." : "Save"}
+                    </button>
+                  </>
+                ) : null}
                 <button
                   type="button"
                   className="ghost-button danger-button skills-delete-button"
-                  disabled={Boolean(pendingSkill || pendingDeleteSkill)}
+                  disabled={Boolean(pendingSkill || pendingDeleteSkill) || isEditingContent}
                   onClick={() => void deleteSkill(selectedSkill.name)}
                   aria-label={`Delete skill ${selectedSkill.name}`}
                   title="Delete skill"
@@ -423,24 +535,78 @@ export function SkillsPage() {
                       <p>
                         <strong>{`Appendix: ${appendixContent.path}`}</strong>
                       </p>
-                      <button
-                        type="button"
-                        className="ghost-button skills-back-to-skill"
-                        onClick={() => {
-                          setSelectedAppendixPath("");
-                          setAppendixError("");
-                        }}
-                      >
-                        Back to SKILL.md
-                      </button>
+                      {editingAppendix ? (
+                        <div className="skills-content-toolbar-actions">
+                          <button
+                            type="button"
+                            className="ghost-button skills-cancel-edit-button"
+                            disabled={contentSaving}
+                            onClick={cancelEditingContent}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            className="wiki-save-button"
+                            disabled={contentSaving || !hasContentUnsavedChanges}
+                            onClick={() => void saveEditedContent()}
+                          >
+                            {contentSaving ? "Saving..." : "Save"}
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="ghost-button skills-back-to-skill"
+                          onClick={() => {
+                            if (!confirmDiscardEditIfNeeded()) return;
+                            setSelectedAppendixPath("");
+                            setAppendixError("");
+                          }}
+                        >
+                          Back to SKILL.md
+                        </button>
+                      )}
                     </div>
-                    <pre>{appendixContent.content}</pre>
+                    {editingAppendix ? (
+                      <textarea
+                        className="skills-content-editor"
+                        aria-label={`Appendix source: ${appendixContent.path}`}
+                        value={contentDraft}
+                        disabled={contentSaving}
+                        onChange={(event) => {
+                          setContentDraft(event.target.value);
+                          setContentSaveError("");
+                          setContentSaveSuccess("");
+                        }}
+                        spellCheck={false}
+                      />
+                    ) : (
+                      <pre>{appendixContent.content}</pre>
+                    )}
                   </div>
                 ) : (
                   <div className="skills-markdown-view">
-                    <pre>{detail.content}</pre>
+                    {isEditingContent && !editingAppendix ? (
+                      <textarea
+                        className="skills-content-editor"
+                        aria-label="SKILL.md source"
+                        value={contentDraft}
+                        disabled={contentSaving}
+                        onChange={(event) => {
+                          setContentDraft(event.target.value);
+                          setContentSaveError("");
+                          setContentSaveSuccess("");
+                        }}
+                        spellCheck={false}
+                      />
+                    ) : (
+                      <pre>{detail.content}</pre>
+                    )}
                   </div>
                 )}
+                {contentSaveError ? <p className="error-text">{contentSaveError}</p> : null}
+                {contentSaveSuccess ? <p className="wiki-save-success">{contentSaveSuccess}</p> : null}
                 {appendixLoading ? (
                   <p className="subtle-copy">Loading appendix content...</p>
                 ) : null}
@@ -476,7 +642,10 @@ export function SkillsPage() {
                           ? "ghost-button skills-appendix-chip active"
                           : "ghost-button skills-appendix-chip"
                       }
-                      onClick={() => void loadAppendixContent(detail.name, appendix.path)}
+                      onClick={() => {
+                        if (!confirmDiscardEditIfNeeded()) return;
+                        void loadAppendixContent(detail.name, appendix.path);
+                      }}
                     >
                       {appendix.path}
                     </button>

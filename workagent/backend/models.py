@@ -73,6 +73,15 @@ class SkillCategoryToggleRequest(BaseModel):
     enabled: bool
 
 
+class SkillContentWriteRequest(BaseModel):
+    content: str
+
+
+class SkillAppendixWriteRequest(BaseModel):
+    path: str
+    content: str
+
+
 class MemoryWriteRequest(BaseModel):
     content: str
 

@@ -298,6 +298,181 @@ describe("SkillsPage behavior", () => {
     });
   });
 
+  it("edits and saves the SKILL.md body via PUT /api/skills/{name}", async () => {
+    let putCalls = 0;
+    let lastPutBody: unknown = null;
+
+    fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/api/skills") {
+        return Promise.resolve([
+          { name: "demo", description: "demo", enabled: true, category: "", path: "/tmp/demo" },
+        ]) as Promise<unknown>;
+      }
+      if (url === "/api/skills/demo" && init?.method === "PUT") {
+        putCalls += 1;
+        lastPutBody = JSON.parse(String(init.body));
+        return Promise.resolve({ ok: true, name: "demo", path: "SKILL.md", size: 20, modified: 0 }) as Promise<unknown>;
+      }
+      if (url === "/api/skills/demo") {
+        return Promise.resolve({
+          name: "demo",
+          path: "/tmp/demo",
+          content: "# demo\noriginal",
+          appendix: [],
+        }) as Promise<unknown>;
+      }
+      throw new Error(`Unexpected URL in test: ${url} ${init?.method || "GET"}`);
+    });
+
+    await mountSkillsPage();
+
+    await waitForAssert(() => {
+      expect((containerRef as HTMLElement).textContent).toContain("original");
+    });
+
+    const editButton = Array.from(
+      (containerRef as HTMLElement).querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent === "Edit");
+    expect(editButton).not.toBeNull();
+
+    await act(async () => {
+      editButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const textarea = (containerRef as HTMLElement).querySelector(
+      ".skills-content-editor",
+    ) as HTMLTextAreaElement | null;
+    expect(textarea).not.toBeNull();
+    expect(textarea?.value).toBe("# demo\noriginal");
+
+    await act(async () => {
+      if (!textarea) return;
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+      valueSetter?.call(textarea, "# demo\nedited");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const saveButton = Array.from(
+      (containerRef as HTMLElement).querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent === "Save");
+    expect(saveButton).not.toBeNull();
+
+    await act(async () => {
+      saveButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    await waitForAssert(() => {
+      expect(putCalls).toBe(1);
+      expect(lastPutBody).toEqual({ content: "# demo\nedited" });
+      const text = (containerRef as HTMLElement).textContent || "";
+      expect(text).toContain("SKILL.md saved.");
+      expect(text).toContain("edited");
+      expect((containerRef as HTMLElement).querySelector(".skills-content-editor")).toBeNull();
+    });
+  });
+
+  it("edits and saves an appendix file via PUT /api/skills/{name}/appendix", async () => {
+    let putCalls = 0;
+    let lastPutBody: unknown = null;
+
+    fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/api/skills") {
+        return Promise.resolve([
+          { name: "demo", description: "demo", enabled: true, category: "", path: "/tmp/demo" },
+        ]) as Promise<unknown>;
+      }
+      if (url === "/api/skills/demo") {
+        return Promise.resolve({
+          name: "demo",
+          path: "/tmp/demo",
+          content: "# demo",
+          appendix: [{ name: "notes.md", path: "references/notes.md" }],
+        }) as Promise<unknown>;
+      }
+      if (url === "/api/skills/demo/appendix?path=references%2Fnotes.md") {
+        return Promise.resolve({
+          name: "notes.md",
+          path: "references/notes.md",
+          content: "original notes",
+        }) as Promise<unknown>;
+      }
+      if (url === "/api/skills/demo/appendix" && init?.method === "PUT") {
+        putCalls += 1;
+        lastPutBody = JSON.parse(String(init.body));
+        return Promise.resolve({
+          ok: true,
+          name: "notes.md",
+          path: "references/notes.md",
+          size: 20,
+          modified: 0,
+        }) as Promise<unknown>;
+      }
+      throw new Error(`Unexpected URL in test: ${url} ${init?.method || "GET"}`);
+    });
+
+    await mountSkillsPage();
+
+    await waitForAssert(() => {
+      expect((containerRef as HTMLElement).textContent).toContain("references/notes.md");
+    });
+
+    const appendixButton = Array.from(
+      (containerRef as HTMLElement).querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("references/notes.md"));
+
+    await act(async () => {
+      appendixButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    await waitForAssert(() => {
+      expect((containerRef as HTMLElement).textContent).toContain("original notes");
+    });
+
+    const editButton = Array.from(
+      (containerRef as HTMLElement).querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent === "Edit");
+
+    await act(async () => {
+      editButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const textarea = (containerRef as HTMLElement).querySelector(
+      ".skills-content-editor",
+    ) as HTMLTextAreaElement | null;
+    expect(textarea?.value).toBe("original notes");
+
+    await act(async () => {
+      if (!textarea) return;
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+      valueSetter?.call(textarea, "updated notes");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const saveButton = Array.from(
+      (containerRef as HTMLElement).querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent === "Save");
+
+    await act(async () => {
+      saveButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    await waitForAssert(() => {
+      expect(putCalls).toBe(1);
+      expect(lastPutBody).toEqual({ path: "references/notes.md", content: "updated notes" });
+      const text = (containerRef as HTMLElement).textContent || "";
+      expect(text).toContain("references/notes.md saved.");
+      expect(text).toContain("updated notes");
+      expect((containerRef as HTMLElement).querySelector(".skills-content-editor")).toBeNull();
+    });
+  });
+
   it("confirms, deletes the selected skill, and selects the next skill", async () => {
     let deleted = false;
     fetchJSONMock.mockImplementation((url: string, init?: RequestInit) => {

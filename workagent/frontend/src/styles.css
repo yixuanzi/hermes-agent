@@ -2152,33 +2152,38 @@ select:focus {
 
 .skills-category-head h4 {
   margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(12px * var(--density-scale));
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
 
-.skills-category-toggle {
+/* Element+class beats the shared ":is(.detail-panel button, ...)" reset
+   (which also matches this button) on specificity, so display/padding/
+   min-height here actually take effect instead of being silently dropped. */
+button.skills-category-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   flex: 1;
   min-width: 0;
-  border: none;
-  background: transparent;
-  box-shadow: none;
+  gap: calc(8px * var(--density-scale));
+  padding: calc(6px * var(--density-scale)) calc(10px * var(--density-scale));
+  min-height: calc(28px * var(--density-scale));
   color: inherit;
-  padding: 0;
-  min-height: auto;
-  transform: none;
-  justify-content: space-between;
 }
 
-.skills-category-toggle:hover {
-  transform: none;
-  box-shadow: none;
+button.skills-category-toggle:hover {
   color: var(--workagent-accent);
 }
 
 .skills-category-bulk-toggle {
   flex-shrink: 0;
-  min-height: calc(26px * var(--density-scale));
-  padding: calc(3px * var(--density-scale)) calc(9px * var(--density-scale));
+  min-height: calc(28px * var(--density-scale));
+  padding: calc(4px * var(--density-scale)) calc(10px * var(--density-scale));
   font-size: calc(11px * var(--density-scale));
   white-space: nowrap;
 }
@@ -2186,6 +2191,7 @@ select:focus {
 .skills-category-head-right {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 6px;
 }
 
@@ -2234,7 +2240,9 @@ select:focus {
   background: linear-gradient(180deg, rgba(16, 53, 67, 0.92), rgba(10, 31, 42, 0.96));
 }
 
-.skills-delete-button {
+.skills-delete-button,
+.skills-edit-button,
+.skills-cancel-edit-button {
   min-height: calc(30px * var(--density-scale));
   padding: calc(4px * var(--density-scale)) calc(10px * var(--density-scale));
   font-size: calc(12px * var(--density-scale));
@@ -2286,6 +2294,40 @@ select:focus {
 
 .skills-content-toolbar p {
   margin: 0;
+}
+
+.skills-content-toolbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(8px * var(--density-scale));
+  flex-shrink: 0;
+}
+
+.skills-content-editor {
+  display: block;
+  width: 100%;
+  min-height: calc(320px * var(--density-scale));
+  box-sizing: border-box;
+  resize: vertical;
+  padding: calc(10px * var(--density-scale));
+  background: rgba(3, 11, 21, 0.86);
+  border: 1px solid var(--workagent-accent-strong);
+  border-radius: 8px;
+  outline: none;
+  color: var(--workagent-text);
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  font-size: calc(12px * var(--density-scale));
+  line-height: 1.38;
+  caret-color: var(--workagent-accent);
+}
+
+.skills-content-editor:focus {
+  box-shadow: 0 0 0 1px rgba(45, 255, 222, 0.22);
+}
+
+.skills-content-editor:disabled {
+  cursor: wait;
+  opacity: 0.7;
 }
 
 .skills-back-to-skill {
