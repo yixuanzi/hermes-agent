@@ -363,8 +363,10 @@ def tool_params_allowed(
     """Check all configured parameter regexes for a tool.
 
     ``tools_paras`` is intentionally an allow rule: when a tool is listed,
-    every configured parameter must exist and match its regex. A tool absent
-    from the mapping has no additional parameter restriction.
+    every configured parameter that is present in ``args`` must match its
+    regex. A parameter configured in a rule but absent from ``args`` is
+    skipped rather than treated as a failure. A tool absent from the mapping
+    has no additional parameter restriction.
     """
     tools_paras = role.get("tools_paras", {})
     if not isinstance(tools_paras, Mapping) or tool_name not in tools_paras:
@@ -377,7 +379,7 @@ def tool_params_allowed(
             return False, f"invalid parameter rule {rule_index}"
         for parameter_name, pattern in parameter_rules.items():
             if not isinstance(args, Mapping) or parameter_name not in args:
-                return False, f"missing parameter {parameter_name!r} in rule {rule_index}"
+                continue
             value = _parameter_text(args[parameter_name])
             if re.search(str(pattern), value) is None:
                 return False, f"parameter {parameter_name!r} does not match rule {rule_index}"

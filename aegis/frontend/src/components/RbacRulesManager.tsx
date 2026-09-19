@@ -571,7 +571,7 @@ export default function RbacRulesManager({ onAuthExpired }: RbacRulesManagerProp
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div>
                   <h3 id="rbac-parameters-heading" className="aegis-page-content__title text-base">Tool parameter constraints</h3>
-                  <p className="aegis-page-content__description">Every parameter in every rule under a tool must match. Rules use AND logic and values are checked with regular-expression search.</p>
+                  <p className="aegis-page-content__description">Each parameter is checked only when the tool call includes it — a configured parameter missing from the call is skipped, not treated as a failure. Rules use AND logic and values are checked with regular-expression search.</p>
                 </div>
                 <button type="button" onClick={addTool} className="aegis-btn aegis-btn--secondary inline-flex items-center gap-1.5 px-3 py-2 text-xs"><Plus className="h-3.5 w-3.5" aria-hidden="true" /> Add tool</button>
               </div>

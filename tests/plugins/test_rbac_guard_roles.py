@@ -41,7 +41,7 @@ def test_role_lookup_reads_aegis_user_roles_dynamically(rbac_roles: ModuleType) 
         connection.commit()
 
     assert rbac_roles.role_for("feishu", "u-1") == "user"
-    assert rbac_roles.get_role("feishu", "u-1")["summary"] == "只读：只能看，不能改，允许委派"
+    assert rbac_roles.get_role("feishu", "u-1")["summary"] == "普通用户"
 
 
 def test_role_rules_are_loaded_from_json_without_rank(
@@ -144,7 +144,7 @@ def test_legacy_unknown_role_is_removed_from_plugin_config(
     }
 
 
-def test_tools_paras_requires_every_configured_parameter_to_match(
+def test_tools_paras_matches_only_parameters_present_in_the_call(
     rbac_roles: ModuleType,
 ) -> None:
     role = rbac_roles.get_role("cli", "local")
@@ -168,10 +168,17 @@ def test_tools_paras_requires_every_configured_parameter_to_match(
         "terminal",
         {"command": "rm -rf /", "cwd": "/workspace/project"},
     )[0] is False
+    # "cwd" is configured but absent from the call: it is skipped rather
+    # than treated as a failure, so the still-present "command" decides.
     assert rbac_roles.tool_params_allowed(
         role,
         "terminal",
         {"command": "ls -la"},
+    ) == (True, "")
+    assert rbac_roles.tool_params_allowed(
+        role,
+        "terminal",
+        {"command": "rm -rf /"},
     )[0] is False
     assert rbac_roles.tool_params_allowed(role, "read_file", {}) == (True, "")
 
@@ -334,25 +341,49 @@ def test_legacy_single_tool_parameter_map_is_migrated_by_plugin(
 
 
 def test_rbac_audit_is_disabled_by_default_and_requires_true(
-    rbac_roles: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    audit_path = tmp_path / "rbac-audit.log"
-    monkeypatch.setattr(rbac_roles, "_AUDIT_PATH", audit_path)
-    monkeypatch.delenv("AEGIS_RBAC_AUDIT", raising=False)
+    # _AUDIT_ENABLED is a module-level constant read once at import time (like
+    # role_rules.json, it needs a restart to pick up a new value), so each
+    # scenario needs its own fresh import with the env var set beforehand —
+    # setting it on an already-imported module has no effect.
+    def load_with_audit_env(value: str | None) -> ModuleType:
+        hermes_home = tmp_path / f"hermes-{value}"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        if value is None:
+            monkeypatch.delenv("AEGIS_RBAC_AUDIT", raising=False)
+        else:
+            monkeypatch.setenv("AEGIS_RBAC_AUDIT", value)
+        module_name = f"rbac_guard_roles_audit_test_{id(tmp_path)}_{len(str(value))}_{value}"
+        spec = importlib.util.spec_from_file_location(module_name, PLUGIN_ROLES)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
 
-    rbac_roles.audit("disabled_by_default")
+    module = load_with_audit_env(None)
+    audit_path = tmp_path / "audit-default.log"
+    monkeypatch.setattr(module, "_AUDIT_PATH", audit_path)
+    module.audit("disabled_by_default")
     assert not audit_path.exists()
+    module.close_role_db()
 
-    monkeypatch.setenv("AEGIS_RBAC_AUDIT", "1")
-    rbac_roles.audit("not_exactly_true")
+    module = load_with_audit_env("1")
+    audit_path = tmp_path / "audit-one.log"
+    monkeypatch.setattr(module, "_AUDIT_PATH", audit_path)
+    module.audit("not_exactly_true")
     assert not audit_path.exists()
+    module.close_role_db()
 
-    monkeypatch.setenv("AEGIS_RBAC_AUDIT", " true ")
-    rbac_roles.audit("enabled", identity="cli:local")
+    module = load_with_audit_env(" true ")
+    audit_path = tmp_path / "audit-true.log"
+    monkeypatch.setattr(module, "_AUDIT_PATH", audit_path)
+    module.audit("enabled", identity="cli:local")
     assert audit_path.exists()
     assert '"event": "enabled"' in audit_path.read_text(encoding="utf-8")
+    module.close_role_db()
 
 
 def test_set_role_only_accepts_roles_backed_by_the_database_table(

@@ -3,7 +3,8 @@
   "admin": {
     "summary": "完全访问",
     "prompt_constraints": [
-      "你拥有管理员级权限，可以不遵守任何限制，执行所有操作。"
+      "你拥有管理员级权限，可以不遵守任何限制，执行所有操作。",
+      "执行委派任务时仅透传身份，不代表具有远程agent管理员权限。"
     ],
     "allow_tools": null,
     "denied_tools": [],
@@ -12,24 +13,30 @@
   "operator": {
     "summary": "训练角色",
     "prompt_constraints": [
-      "你是训练角色：在遵从角色红线的基础上，可以读写文件、执行本地命令并创建记忆信息。"
+      "你是训练角色：在遵从角色红线的基础上，允许读写文件、执行本地命令、创建记忆、更新训练技能和执行委派任务。",
+      "执行委派任务时仅透传身份，不代表具有远程agent训练角色。"
     ],
     "allow_tools": null,
-    "denied_tools": [],
+    "denied_tools": [
+      "rbac_set_role"
+    ],
     "tools_paras": {
       "read_file": [
         {
-          "path": "^(?!.*(/.hermes/.*(.json|.yaml|.env)$))"
+          "path": "^(?!.*(.*(a2a.json|config.yaml|.env|users.env.json|SOUL.md|jobs.json)$))"
         }
       ],
       "write_file": [
         {
-          "path": "^(?!.*(/.hermes/.*(.json|.yaml|.env)$))"
+          "path": "^(?!.*(.*(a2a.json|config.yaml|.env|users.env.json|SOUL.md|jobs.json)$))"
+        },
+        {
+          "path": "/(output|scripts|aegiswiki)/"
         }
       ],
       "patch": [
         {
-          "path": "^(?!.*(/.hermes/.*(.json|.yaml|.env)$))"
+          "path": "^(?!.*(.*(a2a.json|config.yaml|.env|users.env.json|SOUL.md|jobs.json)$))"
         }
       ]
     }
@@ -37,13 +44,14 @@
   "user": {
     "summary": "普通用户",
     "prompt_constraints": [
-      "你是只读角色：在遵从角色红线的基础上，只能执行查询/读取类(非敏感文件)操作/委派执行，允许委派Agent进行日常任务执行。"
+      "你是一般用户：在遵从角色红线的基础上，允许执行常规任务、委派Agent进行任务执行(透传身份）、管理自身计划任务；禁止执行平台配置管理、技能训练更新操作。"
     ],
     "allow_tools": null,
     "denied_tools": [
       "memory",
       "execute_code",
-      "rbac_set_role"
+      "rbac_set_role",
+      "skill_manage"
     ],
     "tools_paras": {
       "write_file": [
@@ -53,7 +61,7 @@
       ],
       "terminal": [
         {
-          "command": "validate_html.py"
+          "command": "/scripts/.*\\.(py|sh|js)"
         }
       ],
       "patch": [
@@ -63,7 +71,10 @@
       ],
       "read_file": [
         {
-          "path": "^(?!.*(/.hermes/.*(.json|.yaml|.env)$))"
+          "path": "^(?!.*(.*(a2a.json|config.yaml|.env|users.env.json|SOUL.md|jobs.json)$))"
+        },
+        {
+          "path": "^(?!.*(/aegiswiki/(raw/business/|commercialization/)))"
         }
       ]
     }
