@@ -2686,7 +2686,9 @@ def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
     }
 
 
-def _apply_jev_complexity_route(user_message: str, route: dict) -> None:
+def _apply_jev_complexity_route(
+    user_message: str, route: dict, session_id: Optional[str] = None,
+) -> None:
     """Re-point ``route`` at the model configured for this turn's difficulty.
 
     Off unless ``HERMES_JEV_COMPLEXITY_ROUTING`` is on AND at least one band
@@ -2699,9 +2701,17 @@ def _apply_jev_complexity_route(user_message: str, route: dict) -> None:
     Mutates ``route`` in place, ``signature`` included: the caller derives
     the agent-cache key from it, so a band switch correctly rebuilds the
     agent instead of reusing one bound to the previous model.  That rebuild
-    is the same cache boundary a ``/model`` switch crosses — banding is
-    therefore deliberately confidence-gated so ordinary turns do not
-    oscillate between models and throw away the prompt cache every message.
+    is the same cache boundary a ``/model`` switch crosses, which is why the
+    default ``complexity_scope: session`` decides the band once per session
+    and reuses it — under that scope a conversation rebuilds at most once.
+    ``complexity_scope: turn`` re-rates every message and can therefore
+    re-route (and rebuild) mid-conversation; confidence gating is what keeps
+    that from happening on every turn.
+
+    ``session_id`` (the session id, not the routing key) keys the per-session
+    band, so a ``/new`` mints a new id and the next turn is rated fresh.
+    Callers with no session of their own — the one-shot background-task path —
+    pass nothing and are rated per turn, which is what a single-turn task means.
     """
     if not (user_message or "").strip():
         return
@@ -2715,7 +2725,9 @@ def _apply_jev_complexity_route(user_message: str, route: dict) -> None:
         settings = jev_policy.load_jev_settings()
         if not jev_policy.complexity_routing_active(settings):
             return
-        tier_model = jev_policy.route_model_for_request(user_message, settings=settings)
+        tier_model = jev_policy.route_model_for_request(
+            user_message, settings=settings, session_key=session_id,
+        )
     except Exception:
         logger.warning("Jev complexity routing failed; keeping the session model", exc_info=True)
         return
@@ -4844,7 +4856,9 @@ class TurnRunner:
                 log_message="interim_assistant_callback scheduling error",
             )
 
-        turn_route = self._runner._resolve_turn_agent_config(ctx.message, model, runtime_kwargs)
+        turn_route = self._runner._resolve_turn_agent_config(
+            ctx.message, model, runtime_kwargs, session_id=ctx.session_id,
+        )
 
         # Per-platform skip_context_files — messaging platforms can opt out
         # of filesystem-heavy context-file discovery (SOUL.md, AGENTS.md,
@@ -7332,7 +7346,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return model, runtime_kwargs
 
-    def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
+    def _resolve_turn_agent_config(
+        self,
+        user_message: str,
+        model: str,
+        runtime_kwargs: dict,
+        *,
+        session_id: Optional[str] = None,
+    ) -> dict:
         """Build the effective model/runtime config for a single turn.
 
         Uses the session's primary model/provider, unless Jev complexity
@@ -7368,7 +7389,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             ),
         }
 
-        _apply_jev_complexity_route(user_message, route)
+        _apply_jev_complexity_route(user_message, route, session_id)
 
         service_tier = getattr(self, "_service_tier", None)
         if not service_tier:

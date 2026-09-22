@@ -36,6 +36,7 @@ HERMES_JEV_RELEVANCE_THRESHOLD=0.7
 
 # Feature 2
 HERMES_JEV_COMPLEXITY_ROUTING=true
+HERMES_JEV_COMPLEXITY_SCOPE=session      # session (default) | turn
 HERMES_JEV_MODEL_LOW=gpt-5-mini
 HERMES_JEV_MODEL_MEDIUM=gpt-5
 HERMES_JEV_MODEL_HIGH=claude-opus-5
@@ -50,6 +51,7 @@ jev:
   timeout: 8.0
   channel_autoreply: false
   complexity_routing: false
+  complexity_scope: session      # session | turn
   business_scope: ""
   relevance_threshold: 0.7
   min_confidence: 0.5
@@ -229,6 +231,55 @@ Jev rates the request on an ordinal `low / medium / high` scale and the turn run
 on that band's model. A band with no configured model, or an answer below
 `min_confidence`, keeps the agent's default model.
 
+### How often the rating happens
+
+`HERMES_JEV_COMPLEXITY_SCOPE` / `jev.complexity_scope`:
+
+| value | behavior | cost |
+|---|---|---|
+| **`session`** (default) | Rate the first turn of a session that yields a decision, reuse that band for every later turn of the same session. | One decision per conversation. One model throughout — the prompt cache survives. |
+| `turn` | Rate every turn. | One decision per message. The model can change mid-conversation, which rebuilds the agent each time it does. |
+
+Measured on the same three-turn conversation, bands configured
+`low=gpt-5-mini`, `medium=gpt-5`, `high=claude-opus-5`:
+
+| turn | message | `scope=session` | `scope=turn` |
+|---|---|---|---|
+| 1 | 重新设计整个零信任接入架构，并给出分阶段迁移方案 | `high` in 878ms (api) → **claude-opus-5** | `high` in 817ms (api) → **claude-opus-5** |
+| 2 | 谢谢 | `high` reused → **claude-opus-5** | `low` in 937ms (api) → **gpt-5-mini** |
+| 3 | 这个方案什么时候能开始？ | `high` reused → **claude-opus-5** | `low` in 859ms (api) → **gpt-5-mini** |
+| | | **1 API call, 1 model** | **3 API calls, 2 model switches** |
+
+**The trade-off is real in both directions.** Under `session`, a conversation
+that opens with "谢谢" is pinned to the LOW model even when the real task arrives
+on turn 2 — the band is decided by the *first* message, which is usually but not
+always the task statement. Under `turn`, follow-ups like "谢谢" and
+"什么时候能开始？" correctly rate `low`, but the conversation bounces between
+models and pays a decision every message.
+
+`session` is the default because the first message of a session is normally the
+task, and because not switching models mid-conversation is what keeps the prompt
+cache intact. Choose `turn` when one session genuinely carries unrelated tasks of
+different sizes.
+
+#### What counts as a session
+
+The **session id**, not the routing key — so `/new` or `/reset` mints a new id
+and the next turn is rated fresh. On the WORKAGENT A2A service it is the A2A
+context id, so a delegate conversation is rated once and its follow-ups inherit
+the band. The gateway's one-shot background-task path has no session of its own
+and is therefore always rated per turn, which is what a single-turn task means.
+
+An **undecided** turn is deliberately not remembered: a transport error or a
+single low-confidence rating must not pin a whole session to the default model,
+so the next turn tries again. Only a decided band is stored.
+
+The **band** is remembered, not the model — re-pointing `HERMES_JEV_MODEL_HIGH`
+at a different model takes effect on the next turn of an existing session. Bands
+are held in a bounded in-process memo (512 sessions, 24h TTL), so a gateway
+restart re-rates; `jev_policy.forget_session_band(session_id)` drops one
+explicitly.
+
 ### The exact request
 
 Built by `judge_complexity()` + `_COMPLEXITY_QUESTION` in `agent/jev_policy.py`.
@@ -361,11 +412,17 @@ change to `_COMPLEXITY_QUESTION`, and the band names must stay `low`/`medium`/
 
 In the gateway, the route's signature feeds the agent-cache key, so switching
 band rebuilds the `AIAgent` — the same cache boundary a `/model` switch crosses.
-That is intentional (a cached agent must not be reused against a different
-model), and it is why banding is confidence-gated: `min_confidence` is what keeps
-an ordinary conversation from oscillating between models and discarding the
-prompt cache every turn. Raise it if you see churn; the fallback is always the
-session's own model.
+That is intentional: a cached agent must not be reused against a different model.
+
+Under the default `complexity_scope: session` a conversation crosses that
+boundary **at most once** — the band is decided on the first turn and reused, so
+there is no mid-conversation switch to invalidate the cache. This is the main
+reason `session` is the default rather than `turn`.
+
+Under `complexity_scope: turn` every message can re-route and therefore rebuild.
+`min_confidence` is the brake there: it keeps a marginal rating from moving the
+turn at all. Raise it if you see churn; the fallback is always the session's own
+model.
 
 On the WORKAGENT A2A service the cached agent's model is swapped in place and its
 original model is captured on first use, so a later unbanded turn — or turning
@@ -386,6 +443,7 @@ INFO  [Jev] channel admission: ANSWER in 1260ms (api) — in_scope=0.98 wants_an
 INFO  [Jev] channel admission: ANSWER in 0ms (cache) — in_scope=0.98 wants_answer=0.97 threshold=0.70 chat=安全运营大群
 INFO  [Jev] channel admission: STAY QUIET in 1132ms (api) — in_scope=0.02 wants_answer=0.47 threshold=0.70 chat=安全运营大群
 INFO  [Jev] complexity: high in 1077ms (api) — confidence=1.00 >= 0.50
+INFO  [Jev] complexity: high reused for this session (scope=session) -> claude-opus-5
 INFO  [Jev] complexity: high REJECTED in 871ms (api) — confidence=0.27 < 0.50, keeping the default model
 WARN  [Jev] channel admission: UNDECIDED in 15ms (api) — ConnectError; caller keeps its default
 WARN  [Jev] complexity: UNDECIDED in 6ms (api) — ConnectError; keeping the default model
@@ -393,7 +451,7 @@ WARN  [Jev] complexity: UNDECIDED in 6ms (api) — ConnectError; keeping the def
 
 | level | when | why that level |
 |---|---|---|
-| `INFO` | a decision was reached — `ANSWER` / `STAY QUIET`, a band, or a band `REJECTED` for low confidence | This is the record of what the layer did. `STAY QUIET` is logged as loudly as `ANSWER`, because a silent bot is exactly what an operator comes to the log to explain. |
+| `INFO` | a decision was reached — `ANSWER` / `STAY QUIET`, a band, a band `REJECTED` for low confidence, or a band `reused` from the session | This is the record of what the layer did. `STAY QUIET` is logged as loudly as `ANSWER`, because a silent bot is exactly what an operator comes to the log to explain. A `reused` line has no latency figure: nothing was asked. |
 | `WARNING` | `UNDECIDED` — transport error, or an answer missing from the response | Something is wrong with the classifier, and the feature silently degraded. |
 | `DEBUG` | skipped — empty text, or no client because `TYPESAFE_API_KEY` is unset | Ordinary and expected; would otherwise flood the log on every turn with the feature off. |
 

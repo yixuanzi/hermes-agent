@@ -512,3 +512,201 @@ def test_a_client_without_ask_detailed_is_still_timed(caplog):
     jev_policy.judge_complexity("…", settings=settings, client=client)
 
     assert "ms" in _jev_records(caplog)[-1].getMessage()
+
+
+# --- complexity scope: how often a session is rated -------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clear_session_bands():
+    """Each test starts with no session remembered."""
+    jev_policy._session_bands.clear()
+    yield
+    jev_policy._session_bands.clear()
+
+
+def test_the_scope_defaults_to_session(jev_env):
+    assert jev_policy.load_jev_settings().complexity_scope == "session"
+
+
+@pytest.mark.parametrize("raw, expected", [("session", "session"), ("turn", "turn"),
+                                           ("TURN", "turn"), ("  session  ", "session")])
+def test_the_scope_is_parsed_case_and_space_insensitively(jev_env, monkeypatch, raw, expected):
+    monkeypatch.setenv("HERMES_JEV_COMPLEXITY_SCOPE", raw)
+    assert jev_policy.load_jev_settings().complexity_scope == expected
+
+
+def test_an_unknown_scope_falls_back_to_session_with_a_warning(jev_env, monkeypatch, caplog):
+    caplog.set_level("WARNING")
+    monkeypatch.setenv("HERMES_JEV_COMPLEXITY_SCOPE", "hourly")
+    assert jev_policy.load_jev_settings().complexity_scope == "session"
+    assert any("complexity scope" in r.getMessage() for r in caplog.records)
+
+
+def test_the_scope_comes_from_config_yaml_when_no_env_is_set(jev_env):
+    jev_env["complexity_scope"] = "turn"
+    assert jev_policy.load_jev_settings().complexity_scope == "turn"
+
+
+def _routing_settings(scope="session"):
+    return jev_policy.JevSettings(
+        api_key="k",
+        complexity_routing=True,
+        complexity_scope=scope,
+        tier_models={t: TierModel(model=f"{t}-model") for t in jev_policy.COMPLEXITY_TIERS},
+    )
+
+
+def test_session_scope_rates_once_and_reuses_the_band():
+    client = _StubClient({"complexity": _score("high", 0.9)})
+    settings = _routing_settings("session")
+
+    first = jev_policy.route_model_for_request("big task", settings=settings,
+                                               client=client, session_key="sess-1")
+    second = jev_policy.route_model_for_request("thanks", settings=settings,
+                                                client=client, session_key="sess-1")
+    assert first.model == second.model == "high-model"
+    assert len(client.asked) == 1, "the follow-up must not be classified again"
+
+
+def test_turn_scope_rates_every_turn():
+    client = _StubClient({"complexity": _score("high", 0.9)})
+    settings = _routing_settings("turn")
+
+    jev_policy.route_model_for_request("big task", settings=settings,
+                                       client=client, session_key="sess-1")
+    jev_policy.route_model_for_request("thanks", settings=settings,
+                                       client=client, session_key="sess-1")
+    assert len(client.asked) == 2
+
+
+def test_turn_scope_can_move_a_conversation_between_bands():
+    settings = _routing_settings("turn")
+    high = _StubClient({"complexity": _score("high", 0.9)})
+    low = _StubClient({"complexity": _score("low", 0.9)})
+
+    assert jev_policy.route_model_for_request("big", settings=settings,
+                                              client=high, session_key="s").model == "high-model"
+    assert jev_policy.route_model_for_request("hi", settings=settings,
+                                              client=low, session_key="s").model == "low-model"
+
+
+def test_session_scope_keeps_the_first_band_even_when_the_work_changes():
+    settings = _routing_settings("session")
+    high = _StubClient({"complexity": _score("high", 0.9)})
+    low = _StubClient({"complexity": _score("low", 0.9)})
+
+    assert jev_policy.route_model_for_request("big", settings=settings,
+                                              client=high, session_key="s").model == "high-model"
+    # A second client that would rate `low` is never consulted.
+    assert jev_policy.route_model_for_request("hi", settings=settings,
+                                              client=low, session_key="s").model == "high-model"
+    assert low.asked == []
+
+
+def test_each_session_is_rated_independently():
+    client = _StubClient({"complexity": _score("high", 0.9)})
+    settings = _routing_settings("session")
+
+    jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s1")
+    jev_policy.route_model_for_request("b", settings=settings, client=client, session_key="s2")
+    assert len(client.asked) == 2
+
+
+def test_session_scope_without_a_session_key_degrades_to_per_turn():
+    client = _StubClient({"complexity": _score("high", 0.9)})
+    settings = _routing_settings("session")
+
+    jev_policy.route_model_for_request("a", settings=settings, client=client)
+    jev_policy.route_model_for_request("b", settings=settings, client=client)
+    assert len(client.asked) == 2
+
+
+def test_an_undecided_turn_is_not_remembered_so_the_next_turn_retries():
+    # One transient failure must not pin a whole session to the default model.
+    settings = _routing_settings("session")
+    broken = _StubClient(None)
+    assert jev_policy.route_model_for_request("a", settings=settings,
+                                              client=broken, session_key="s") is None
+
+    working = _StubClient({"complexity": _score("high", 0.9)})
+    assert jev_policy.route_model_for_request("b", settings=settings,
+                                              client=working, session_key="s").model == "high-model"
+
+
+def test_a_low_confidence_turn_is_not_remembered_either():
+    settings = _routing_settings("session")
+    unsure = _StubClient({"complexity": _score("high", 0.1)})
+    assert jev_policy.route_model_for_request("a", settings=settings,
+                                              client=unsure, session_key="s") is None
+
+    sure = _StubClient({"complexity": _score("low", 0.9)})
+    assert jev_policy.route_model_for_request("b", settings=settings,
+                                              client=sure, session_key="s").model == "low-model"
+
+
+def test_forgetting_a_session_makes_the_next_turn_rate_again():
+    client = _StubClient({"complexity": _score("high", 0.9)})
+    settings = _routing_settings("session")
+
+    jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s")
+    jev_policy.forget_session_band("s")
+    jev_policy.route_model_for_request("b", settings=settings, client=client, session_key="s")
+    assert len(client.asked) == 2
+
+
+def test_forgetting_nothing_is_harmless():
+    jev_policy.forget_session_band(None)
+    jev_policy.forget_session_band("")
+
+
+def test_a_reused_band_is_logged_with_its_scope(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient({"complexity": _score("high", 0.9)})
+    settings = _routing_settings("session")
+
+    jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s")
+    caplog.clear()
+    jev_policy.route_model_for_request("b", settings=settings, client=client, session_key="s")
+
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "reused" in line and "scope=session" in line and "high" in line
+
+
+def test_a_remembered_band_still_honors_the_current_band_model():
+    # The band is remembered, not the model: re-pointing a band at another
+    # model must take effect on the next turn of an existing session.
+    client = _StubClient({"complexity": _score("high", 0.9)})
+    settings = _routing_settings("session")
+    jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s")
+
+    repointed = jev_policy.JevSettings(
+        api_key="k", complexity_routing=True, complexity_scope="session",
+        tier_models={"high": TierModel(model="new-high-model")},
+    )
+    result = jev_policy.route_model_for_request("b", settings=repointed,
+                                                client=client, session_key="s")
+    assert result.model == "new-high-model"
+
+
+def test_the_session_memo_is_bounded():
+    settings = _routing_settings("session")
+    client = _StubClient({"complexity": _score("low", 0.9)})
+    for i in range(jev_policy._SESSION_BAND_MAX_ENTRIES + 10):
+        jev_policy.route_model_for_request("x", settings=settings,
+                                           client=client, session_key=f"s{i}")
+    assert len(jev_policy._session_bands._entries) <= jev_policy._SESSION_BAND_MAX_ENTRIES
+
+
+def test_a_remembered_band_expires():
+    import agent.jev_policy as jp
+
+    settings = _routing_settings("session")
+    client = _StubClient({"complexity": _score("high", 0.9)})
+    now = [1000.0]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(jp.time, "monotonic", lambda: now[0])
+        jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s")
+        now[0] += jp._SESSION_BAND_TTL_SECONDS + 1
+        jev_policy.route_model_for_request("b", settings=settings, client=client, session_key="s")
+    assert len(client.asked) == 2

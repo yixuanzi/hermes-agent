@@ -42,7 +42,7 @@ def _stub_policy(monkeypatch, *, active=True, tier_model=None, raises=False):
     monkeypatch.setattr(jev_policy, "load_jev_settings", lambda: SimpleNamespace(name="stub"))
     monkeypatch.setattr(jev_policy, "complexity_routing_active", lambda _s: active)
 
-    def _route_model(_text, settings=None, client=None):
+    def _route_model(_text, settings=None, client=None, session_key=None):
         if raises:
             raise RuntimeError("classifier exploded")
         return tier_model
@@ -194,3 +194,59 @@ def test_an_api_mode_lookup_failure_keeps_the_existing_mode(monkeypatch):
 
     assert route["model"] == "big-model"
     assert route["runtime"]["api_mode"] == "chat"
+
+
+# --- session id threading --------------------------------------------------
+
+
+def test_the_session_id_reaches_the_policy_layer(monkeypatch):
+    from agent import jev_policy
+
+    seen = {}
+    monkeypatch.setattr(jev_policy, "load_jev_settings", lambda: SimpleNamespace(name="stub"))
+    monkeypatch.setattr(jev_policy, "complexity_routing_active", lambda _s: True)
+
+    def _route_model(_text, settings=None, client=None, session_key=None):
+        seen["session_key"] = session_key
+        return TierModel(model="big-model")
+
+    monkeypatch.setattr(jev_policy, "route_model_for_request", _route_model)
+    route = _route()
+    _apply_jev_complexity_route("…", route, "sess-abc")
+    assert seen["session_key"] == "sess-abc"
+
+
+def test_a_caller_with_no_session_passes_none(monkeypatch):
+    from agent import jev_policy
+
+    seen = {}
+    monkeypatch.setattr(jev_policy, "load_jev_settings", lambda: SimpleNamespace(name="stub"))
+    monkeypatch.setattr(jev_policy, "complexity_routing_active", lambda _s: True)
+
+    def _route_model(_text, settings=None, client=None, session_key=None):
+        seen["session_key"] = session_key
+        return None
+
+    monkeypatch.setattr(jev_policy, "route_model_for_request", _route_model)
+    _apply_jev_complexity_route("…", _route())
+    assert seen["session_key"] is None
+
+
+def test_the_turn_route_builder_forwards_its_session_id(monkeypatch):
+    from agent import jev_policy
+    from gateway.run import GatewayRunner
+
+    seen = {}
+    monkeypatch.setattr(jev_policy, "load_jev_settings", lambda: SimpleNamespace(name="stub"))
+    monkeypatch.setattr(jev_policy, "complexity_routing_active", lambda _s: True)
+
+    def _route_model(_text, settings=None, client=None, session_key=None):
+        seen["session_key"] = session_key
+        return None
+
+    monkeypatch.setattr(jev_policy, "route_model_for_request", _route_model)
+
+    runner = SimpleNamespace(_service_tier=None)
+    bound = GatewayRunner._resolve_turn_agent_config.__get__(runner)
+    bound("hello", "gpt-5", _route()["runtime"], session_id="sess-xyz")
+    assert seen["session_key"] == "sess-xyz"

@@ -262,7 +262,7 @@ class HermesA2AExecutor(AgentExecutor):
         # Difficulty-based model routing for this turn.  No-op unless
         # HERMES_JEV_COMPLEXITY_ROUTING is on; restores the profile model when a
         # turn resolves to no band, so the cached agent never stays banded.
-        await self._apply_jev_complexity_route(agent, user_input)
+        await self._apply_jev_complexity_route(agent, user_input, agent_session_id)
         agent._pending_source_meta = _source_meta  # per-request 注入，供 _run_agent_conversation 使用
 
         # ── 路径 C：构建 Session Context Prompt，动态注入 agent.ephemeral_system_prompt ──
@@ -584,8 +584,15 @@ class HermesA2AExecutor(AgentExecutor):
             logger.info("Jev declined an out-of-scope channel request")
         return bool(verdict)
 
-    async def _apply_jev_complexity_route(self, agent, user_input: str) -> None:
-        """Route this turn to the band model Jev rates the request into."""
+    async def _apply_jev_complexity_route(
+        self, agent, user_input: str, session_key: str | None = None,
+    ) -> None:
+        """Route this turn to the band model Jev rates the request into.
+
+        ``session_key`` is the A2A context id, which is this surface's session
+        identity — under the default ``complexity_scope: session`` the band is
+        decided on the first turn of a context and reused for its follow-ups.
+        """
         settings = self._jev_settings()
         if settings is None:
             return
@@ -595,7 +602,10 @@ class HermesA2AExecutor(AgentExecutor):
             if not jev_policy.complexity_routing_active(settings):
                 return
             tier_model = await asyncio.to_thread(
-                jev_policy.route_model_for_request, user_input, settings=settings
+                jev_policy.route_model_for_request,
+                user_input,
+                settings=settings,
+                session_key=session_key,
             )
             jev_policy.apply_tier_to_agent(agent, tier_model)
         except Exception:

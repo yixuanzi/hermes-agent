@@ -1968,8 +1968,16 @@ DEFAULT_CONFIG = {
         # Answer group/channel messages that did not @-mention the bot, when
         # Jev judges them to be inside business_scope. Requires business_scope.
         "channel_autoreply": False,
-        # Rate each turn low/medium/high and route it to models.<band>.
+        # Rate the task low/medium/high and route it to models.<band>.
         "complexity_routing": False,
+        # How often that rating is made:
+        #   "session" (default) — rate the first turn of a session and reuse
+        #     that band for the rest of it: one decision, one model, and the
+        #     conversation's prompt cache survives.
+        #   "turn" — rate every turn, following the work as it changes, at the
+        #     cost of a decision per message and a possible mid-conversation
+        #     model switch.
+        "complexity_scope": "session",
         # Plain-language description of what this agent is responsible for.
         # Channel autoreply stays off while this is empty — there is nothing to
         # judge relevance against.

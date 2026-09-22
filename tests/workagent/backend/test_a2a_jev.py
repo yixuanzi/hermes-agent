@@ -114,7 +114,7 @@ def _stub_routing(monkeypatch, *, active=True, tier_model=None, raises=False):
     monkeypatch.setattr(jev_policy, "load_jev_settings", lambda: SimpleNamespace(name="stub"))
     monkeypatch.setattr(jev_policy, "complexity_routing_active", lambda _s: active)
 
-    def _route_model(_text, settings=None, client=None):
+    def _route_model(_text, settings=None, client=None, session_key=None):
         if raises:
             raise RuntimeError("classifier exploded")
         return tier_model
@@ -161,3 +161,20 @@ def test_an_unavailable_policy_module_never_touches_the_agent(monkeypatch):
     agent = SimpleNamespace(model="profile-model", provider="openai")
     asyncio.run(_executor()._apply_jev_complexity_route(agent, "…"))
     assert agent.model == "profile-model"
+
+
+def test_the_a2a_context_id_is_the_session_identity_for_banding(monkeypatch):
+    from agent import jev_policy
+
+    seen = {}
+    monkeypatch.setattr(jev_policy, "load_jev_settings", lambda: SimpleNamespace(name="stub"))
+    monkeypatch.setattr(jev_policy, "complexity_routing_active", lambda _s: True)
+
+    def _route_model(_text, settings=None, client=None, session_key=None):
+        seen["session_key"] = session_key
+        return TierModel(model="big-model")
+
+    monkeypatch.setattr(jev_policy, "route_model_for_request", _route_model)
+    agent = SimpleNamespace(model="profile-model", provider="openai")
+    asyncio.run(_executor()._apply_jev_complexity_route(agent, "task", "ctx-42"))
+    assert seen["session_key"] == "ctx-42"

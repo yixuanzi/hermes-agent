@@ -23,7 +23,9 @@ cannot read another profile's key or scope.
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -43,6 +45,22 @@ logger = logging.getLogger(__name__)
 #: Ordered low → high. The band names are also the ``score`` criteria sent to
 #: Jev, so renaming one changes the question — keep them stable.
 COMPLEXITY_TIERS = ("low", "medium", "high")
+
+#: How often a session pays for a complexity decision.
+#:
+#: ``session`` (the default) rates the first turn of a session and reuses that
+#: band for the rest of it: one decision, one model, no mid-conversation model
+#: switch — which is also what keeps the prompt cache intact. ``turn`` rates
+#: every turn, which follows the work as it changes but re-decides (and can
+#: re-route) on each message.
+COMPLEXITY_SCOPES = ("session", "turn")
+DEFAULT_COMPLEXITY_SCOPE = "session"
+
+#: A session's decided band, so ``session`` scope classifies once. Bounded
+#: rather than unbounded: a long-lived gateway sees many sessions, and this
+#: holds only a short string per session.
+_SESSION_BAND_MAX_ENTRIES = 512
+_SESSION_BAND_TTL_SECONDS = 24 * 60 * 60.0
 
 # Admission is two separate propositions, not one.  Folding "is it our topic"
 # and "does it want an answer" into a single question squashes both signals
@@ -133,6 +151,24 @@ def _as_float(raw: Any, default: float) -> float:
         return default
 
 
+def _as_scope(raw: Any) -> str:
+    """Parse the complexity scope, falling back loudly on an unknown value."""
+    if raw is None:
+        return DEFAULT_COMPLEXITY_SCOPE
+    value = str(raw).strip().lower()
+    if not value:
+        return DEFAULT_COMPLEXITY_SCOPE
+    if value in COMPLEXITY_SCOPES:
+        return value
+    logger.warning(
+        "[Jev] unknown complexity scope %r (expected one of %s); using %r",
+        raw,
+        "/".join(COMPLEXITY_SCOPES),
+        DEFAULT_COMPLEXITY_SCOPE,
+    )
+    return DEFAULT_COMPLEXITY_SCOPE
+
+
 @dataclass(frozen=True)
 class TierModel:
     """The model a complexity band routes to."""
@@ -149,6 +185,7 @@ class JevSettings:
     timeout: float = DEFAULT_JEV_TIMEOUT
     channel_autoreply: bool = False
     complexity_routing: bool = False
+    complexity_scope: str = DEFAULT_COMPLEXITY_SCOPE
     business_scope: str = ""
     relevance_threshold: float = 0.7
     min_confidence: float = 0.5
@@ -200,6 +237,9 @@ def load_jev_settings() -> JevSettings:
         ),
         complexity_routing=_as_bool(
             pick("HERMES_JEV_COMPLEXITY_ROUTING", "complexity_routing"), False
+        ),
+        complexity_scope=_as_scope(
+            pick("HERMES_JEV_COMPLEXITY_SCOPE", "complexity_scope")
         ),
         business_scope=str(pick("HERMES_JEV_BUSINESS_SCOPE", "business_scope") or "").strip(),
         relevance_threshold=_as_float(
@@ -475,21 +515,103 @@ def resolve_tier_model(
     return settings.tier_models.get(tier)
 
 
+class _SessionBandMemo:
+    """Remembers the band a session was rated into, for ``session`` scope."""
+
+    def __init__(self):
+        self._entries: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, session_key: str) -> Optional[str]:
+        now = time.monotonic()
+        with self._lock:
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return None
+            expires_at, tier = entry
+            if expires_at <= now:
+                self._entries.pop(session_key, None)
+                return None
+            self._entries.move_to_end(session_key)
+            return tier
+
+    def put(self, session_key: str, tier: str) -> None:
+        with self._lock:
+            self._entries[session_key] = (
+                time.monotonic() + _SESSION_BAND_TTL_SECONDS,
+                tier,
+            )
+            self._entries.move_to_end(session_key)
+            while len(self._entries) > _SESSION_BAND_MAX_ENTRIES:
+                self._entries.popitem(last=False)
+
+    def forget(self, session_key: str) -> None:
+        with self._lock:
+            self._entries.pop(session_key, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+
+_session_bands = _SessionBandMemo()
+
+
+def forget_session_band(session_key: Optional[str]) -> None:
+    """Drop a session's remembered band so the next turn re-rates it.
+
+    Session identity already does this implicitly — a reset mints a new session
+    id, which is a different memo key — so this is for callers that reuse an id
+    across a deliberate restart.
+    """
+    if session_key:
+        _session_bands.forget(str(session_key))
+
+
 def route_model_for_request(
     text: str,
     *,
     settings: Optional[JevSettings] = None,
     client: Optional[JevClient] = None,
+    session_key: Optional[str] = None,
 ) -> Optional[TierModel]:
     """Classify ``text`` and return the band's model, or ``None`` for default.
 
-    The single entry point for complexity routing: it re-checks the feature
-    gate itself, so callers only need one guarded call.
+    The single entry point for complexity routing: it re-checks the feature gate
+    itself, so callers only need one guarded call.
+
+    Under ``complexity_scope: session`` (the default) the band is decided on the
+    first turn that yields one and reused for the rest of the session, so a
+    conversation runs on one model rather than switching under itself. An
+    undecided turn is deliberately NOT remembered — a transient error or one
+    low-confidence rating must not pin a whole session to the default model, so
+    the next turn tries again.
+
+    ``session_key`` should be the session **id**, not the routing key: a reset
+    mints a new id, which is what makes a fresh conversation re-rate. Without
+    one, ``session`` scope degrades to per-turn classification.
     """
     settings = settings if settings is not None else load_jev_settings()
     if not complexity_routing_active(settings):
         return None
+
+    per_session = settings.complexity_scope == "session" and bool(session_key)
+    memo_key = str(session_key) if per_session else ""
+
+    if per_session:
+        remembered = _session_bands.get(memo_key)
+        if remembered is not None:
+            model = resolve_tier_model(remembered, settings)
+            logger.info(
+                "[Jev] complexity: %s reused for this session (scope=session) -> %s",
+                remembered,
+                model.model if model else "default model",
+            )
+            return model
+
     tier = judge_complexity(text, settings=settings, client=client)
+    if per_session and tier is not None:
+        _session_bands.put(memo_key, tier)
     return resolve_tier_model(tier, settings)
 
 
