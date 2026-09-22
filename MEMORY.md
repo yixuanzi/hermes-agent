@@ -16,7 +16,7 @@ This file records project-level working memory for this repository.
 
 ## A2A interaction and runtime ownership (2026-08)
 
-- The current `hermes.interaction.v1` A2A service implementation belongs to `workagent/backend/`; the `aisoc/` A2A executor/server remains unchanged unless a later task explicitly extends it.
+- The current `hermes.interaction.v1` A2A service implementation belongs to `workagent/backend/`; 
 - Workagent keeps approval and clarification on the existing `TaskState.WORKING` task. `InteractionRegistry` validates task/context/interaction IDs, reuses the existing approval/clarify resolvers, and fails closed on timeout, cancellation, cleanup, unknown IDs, stale responses, or an unavailable response channel.
 - `tools/a2a_delegate_tool.py` is the caller-side bridge: it reads the optional Agent Card extension, parses streaming and polling metadata, de-duplicates by interaction ID/event kind, and schedules authenticated responses on the session owner event loop. A remote service that does not declare the extension must not receive fabricated UI controls or automatic approval.
 - A2A delegate UI state is separate from ordinary local gateway approval/clarify state. Slack, Feishu, and Aegis delegate controls call the remote responder by interaction ID; ordinary local controls continue using their existing local resolver.

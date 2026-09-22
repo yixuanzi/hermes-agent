@@ -13,12 +13,13 @@ from tools.user_env_runtime import (
 import tools.user_env_runtime as user_env_runtime
 
 
+# A list of one: the contract below should hold for any A2A executor, but
+# WORKAGENT ships the only one. `aisoc.backend.a2a_service` does not exist in
+# this fork -- aisoc/backend/ has no a2a_service package and no
+# HermesA2AExecutor -- so parametrizing over it only ever raised ImportError.
 @pytest.mark.parametrize(
     "module_name",
-    [
-        "workagent.backend.a2a_service.executor",
-        "aisoc.backend.a2a_service.executor",
-    ],
+    ["workagent.backend.a2a_service.executor"],
 )
 def test_a2a_platform_suffix_preserves_origin_user_env(
     module_name: str,

@@ -711,6 +711,7 @@ RejectReason = Literal[
     "bots_disabled",
     "bot_not_mentioned",
     "group_policy_rejected",
+    "group_mention_missing",
 ]
 
 
@@ -4169,6 +4170,15 @@ class FeishuAdapter(BasePlatformAdapter):
             return
 
         reason = self._admit(sender, message)
+        is_bot = _is_bot_sender(sender)
+        # An unmentioned group message is normally dropped here.  With Jev
+        # channel autoreply configured, defer that drop until the text has been
+        # extracted so Jev can decide whether it is our business — but never for
+        # a bot sender, where an unprompted reply invites a bot-to-bot loop.
+        jev_gate_pending = False
+        if reason == "group_mention_missing" and not is_bot and self._jev_channel_autoreply_enabled():
+            jev_gate_pending = True
+            reason = None
         if reason is not None:
             logger.debug("[Feishu] dropping inbound event: %s", reason)
             return
@@ -4180,7 +4190,8 @@ class FeishuAdapter(BasePlatformAdapter):
             sender_id=getattr(sender, "sender_id", None),
             chat_type=chat_type,
             message_id=message_id,
-            is_bot=_is_bot_sender(sender),
+            is_bot=is_bot,
+            jev_gate_pending=jev_gate_pending,
         )
 
     def _on_message_read_event(self, data: P2ImMessageMessageReadV1) -> None:
@@ -5117,6 +5128,7 @@ class FeishuAdapter(BasePlatformAdapter):
         chat_type: str,
         message_id: str,
         is_bot: bool = False,
+        jev_gate_pending: bool = False,
     ) -> None:
         text, inbound_type, media_urls, media_types, mentions = await self._extract_message_content(message)
 
@@ -5171,6 +5183,30 @@ class FeishuAdapter(BasePlatformAdapter):
             chat_info=chat_info,
             event_chat_type=chat_type,
         )
+        # Jev relevance gate for a group message that did not @-mention us.
+        # Slash commands are excluded outright: an unaddressed "/reset" typed at
+        # another bot must never reach this agent's command dispatch.
+        force_reply_thread = False
+        if jev_gate_pending:
+            if inbound_type == MessageType.COMMAND:
+                logger.debug(
+                    "[Feishu] dropping unmentioned group command id=%s", message_id,
+                )
+                return
+            if not await self._jev_message_in_scope(
+                text=text,
+                chat_name=chat_info.get("name") or chat_id,
+                sender_name=sender_profile["user_name"],
+            ):
+                logger.info(
+                    "[Feishu] dropping inbound event: group_out_of_scope id=%s chat_id=%s",
+                    message_id,
+                    chat_id,
+                )
+                return
+            # Answer where the question was asked: an unprompted reply goes into
+            # a topic under the triggering message, never as a loose group post.
+            force_reply_thread = True
         source = self.build_source(
             chat_id=chat_id,
             chat_name=chat_info.get("name") or chat_id or "Feishu Chat",
@@ -5183,7 +5219,7 @@ class FeishuAdapter(BasePlatformAdapter):
             message_id=message_id,
         )
         if (
-            self._reply_thread_enabled()
+            (self._reply_thread_enabled() or force_reply_thread)
             and source_chat_type in {"dm", "group"}
             and not actual_thread_id
             and not root_message_id
@@ -5261,6 +5297,10 @@ class FeishuAdapter(BasePlatformAdapter):
             channel_prompt=self._resolve_channel_prompt(chat_id, thread_id or None),
             timestamp=datetime.now(),
         )
+        if jev_gate_pending:
+            # Downstream (hooks, plugins, logs) can tell an unprompted
+            # Jev-admitted turn apart from a normal @-mentioned one.
+            normalized.metadata["jev_channel_autoreply"] = True
         await self._dispatch_inbound_event(normalized)
 
     async def _dispatch_inbound_event(self, event: MessageEvent) -> None:
@@ -6272,7 +6312,11 @@ class FeishuAdapter(BasePlatformAdapter):
         ):
             return "group_policy_rejected"
         if require_mention and not self._mentions_self(message):
-            return "group_policy_rejected"
+            # Distinct from ``group_policy_rejected``: this sender IS allowed
+            # to talk to the bot, they just did not @-mention it.  Only this
+            # case is eligible for the Jev relevance gate — a sender the group
+            # policy rejected stays rejected.
+            return "group_mention_missing"
         return None
 
     def _require_mention_for(self, chat_id: str) -> bool:
@@ -6280,6 +6324,56 @@ class FeishuAdapter(BasePlatformAdapter):
         if rule and rule.require_mention is not None:
             return rule.require_mention
         return self._require_mention
+
+    # --- Jev channel autoreply -----------------------------------------------
+
+    def _jev_settings(self):
+        """Effective Jev settings, or ``None`` when the module is unavailable."""
+        try:
+            from agent import jev_policy
+
+            return jev_policy.load_jev_settings()
+        except Exception:
+            logger.debug("[Feishu] Jev policy unavailable", exc_info=True)
+            return None
+
+    def _jev_channel_autoreply_enabled(self) -> bool:
+        """May an unmentioned group message be judged instead of dropped?"""
+        settings = self._jev_settings()
+        if settings is None:
+            return False
+        try:
+            from agent import jev_policy
+
+            return jev_policy.channel_autoreply_active(settings)
+        except Exception:
+            logger.debug("[Feishu] Jev autoreply gate check failed", exc_info=True)
+            return False
+
+    async def _jev_message_in_scope(
+        self, *, text: str, chat_name: str, sender_name: str,
+    ) -> bool:
+        """Ask Jev whether this unmentioned group message is ours to answer.
+
+        Fails closed: an unconfigured, undecided, or unreachable Jev returns
+        False, which reproduces the pre-Jev behavior of dropping the message.
+        """
+        settings = self._jev_settings()
+        if settings is None:
+            return False
+        try:
+            from agent import jev_policy
+
+            verdict = await jev_policy.judge_channel_relevance_async(
+                text,
+                settings=settings,
+                channel_name=chat_name or "",
+                sender_name=sender_name or "",
+            )
+        except Exception:
+            logger.warning("[Feishu] Jev relevance check raised; staying quiet", exc_info=True)
+            return False
+        return verdict is True
 
     # --- Group policy ---------------------------------------------------------
 

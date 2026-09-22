@@ -87,6 +87,33 @@ def _a2a_source_context_prompt(platform: str, user_name: str, user_id: str) -> s
     return "\n".join(lines) + "\n"
 
 
+#: A2A callers may describe the conversation the request came from in the
+#: ``<source>`` envelope.  When it says the request arrived in a group/channel
+#: and did not @-mention this agent, the Jev relevance gate applies — exactly as
+#: it does for an unmentioned Feishu group message.  A caller that says nothing
+#: is treated as a direct request and is never gated: dropping a plain RPC call
+#: would strand the caller waiting for an answer it will never get.
+_CHANNEL_CHAT_TYPES = frozenset({"group", "channel", "supergroup"})
+
+#: Emitted instead of a normal answer when the gate declines a channel request,
+#: so the calling agent can tell "nothing to say here" apart from an empty reply.
+JEV_OUT_OF_SCOPE_REPLY = (
+    "SKIPPED: this channel message falls outside the agent's configured "
+    "business scope; no reply was produced."
+)
+
+
+def _is_unmentioned_channel_request(source_meta: dict) -> bool:
+    """Did this request arrive in a channel without @-mentioning us?"""
+    chat_type = str(source_meta.get("chat_type") or "").strip().lower()
+    if chat_type not in _CHANNEL_CHAT_TYPES:
+        return False
+    mentioned = source_meta.get("mentioned")
+    if mentioned is None:
+        mentioned = source_meta.get("mention")
+    return not bool(mentioned)
+
+
 def _profile_agent_kwargs(session_id: str) -> dict[str, object]:
     """Resolve the current profile into explicit AIAgent kwargs."""
     return build_profile_agent_kwargs(
@@ -199,10 +226,43 @@ class HermesA2AExecutor(AgentExecutor):
                 )
             return
 
+        # ── Jev channel gate ────────────────────────────────────────────
+        # Only for a request the caller labelled as an unmentioned channel
+        # message.  A direct A2A call carries no chat_type and is never gated.
+        if _is_unmentioned_channel_request(_source_meta):
+            if not await self._jev_channel_request_in_scope(user_input, _source_meta):
+                try:
+                    await updater.complete(
+                        updater.new_agent_message(
+                            [
+                                text_to_message(
+                                    JEV_OUT_OF_SCOPE_REPLY,
+                                    context_id=task.context_id,
+                                    task_id=task.id,
+                                ).parts[0]
+                            ],
+                            metadata={"hermes": {"jev": {"in_scope": False}}},
+                        )
+                    )
+                finally:
+                    # No agent was created for this task, so only the bindings
+                    # installed above this point need releasing.
+                    if _identity_token is not None:
+                        reset_current_user_env_identity(_identity_token)
+                    clear_session_vars(_session_tokens)
+                    async with self._lock:
+                        self._cancel_events.pop(task.id, None)
+                        self._task_event_queues.pop(task.id, None)
+                return
+
         # The context id is the stable Hermes approval/clarify session key.
         # Keep it separate from the transient task id so a follow-up A2A turn
         # can reuse session approvals and the same response route.
         agent = await self._get_agent(agent_session_id, task_id=task.id)
+        # Difficulty-based model routing for this turn.  No-op unless
+        # HERMES_JEV_COMPLEXITY_ROUTING is on; restores the profile model when a
+        # turn resolves to no band, so the cached agent never stays banded.
+        await self._apply_jev_complexity_route(agent, user_input)
         agent._pending_source_meta = _source_meta  # per-request 注入，供 _run_agent_conversation 使用
 
         # ── 路径 C：构建 Session Context Prompt，动态注入 agent.ephemeral_system_prompt ──
@@ -476,6 +536,70 @@ class HermesA2AExecutor(AgentExecutor):
         if normalized_context_id:
             return normalized_context_id
         return f"a2a-{uuid.uuid4().hex}"
+
+    # ── Jev decision gates ──────────────────────────────────────────────
+
+    @staticmethod
+    def _jev_settings():
+        """Effective Jev settings, or ``None`` when the module is unavailable."""
+        try:
+            from agent import jev_policy
+
+            return jev_policy.load_jev_settings()
+        except Exception:
+            logger.debug("Jev policy unavailable", exc_info=True)
+            return None
+
+    async def _jev_channel_request_in_scope(
+        self, user_input: str, source_meta: dict,
+    ) -> bool:
+        """Should this unmentioned channel request be answered at all?
+
+        Returns True whenever the gate is not fully configured — an operator who
+        has not switched channel autoreply on gets the service's normal
+        behavior, and a caller is never silently refused because of a
+        misconfigured or unreachable classifier.
+        """
+        settings = self._jev_settings()
+        if settings is None:
+            return True
+        try:
+            from agent import jev_policy
+
+            if not jev_policy.channel_autoreply_active(settings):
+                return True
+            verdict = await jev_policy.judge_channel_relevance_async(
+                user_input,
+                settings=settings,
+                channel_name=str(source_meta.get("channel") or ""),
+                sender_name=str(source_meta.get("uname") or ""),
+            )
+        except Exception:
+            logger.warning("Jev relevance check raised; answering normally", exc_info=True)
+            return True
+        if verdict is None:
+            # Undecided is not a refusal: an A2A caller is blocking on a reply.
+            return True
+        if not verdict:
+            logger.info("Jev declined an out-of-scope channel request")
+        return bool(verdict)
+
+    async def _apply_jev_complexity_route(self, agent, user_input: str) -> None:
+        """Route this turn to the band model Jev rates the request into."""
+        settings = self._jev_settings()
+        if settings is None:
+            return
+        try:
+            from agent import jev_policy
+
+            if not jev_policy.complexity_routing_active(settings):
+                return
+            tier_model = await asyncio.to_thread(
+                jev_policy.route_model_for_request, user_input, settings=settings
+            )
+            jev_policy.apply_tier_to_agent(agent, tier_model)
+        except Exception:
+            logger.warning("Jev complexity routing failed; keeping the profile model", exc_info=True)
 
     async def _get_agent(self, session_id: str, *, task_id: str | None = None):
         """Return the agent for ``session_id``, evicting cold contexts.

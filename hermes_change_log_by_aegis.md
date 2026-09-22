@@ -176,6 +176,9 @@ Intent: A file is never card content, and card mode must not change which files 
 Feature: Feishu attachment delivery inside a topic.
 Intent: A file the user asks for in a Feishu topic has to arrive. The normal send path keys a message in a topic on `receive_id_type=thread_id`, which Feishu accepts for text and cards but rejects for every attachment kind — audio, file, media, image, and a post carrying one — with a bare field-validation code, so the upload succeeded and the message that would have carried it was dropped. `_send_attachment_message` reads that code as "re-anchor", not "give up": it re-sends through the reply API anchored on a message inside the topic, which places the same upload there without complaint, and only if that also fails does it drop the topic and post flat in the chat, on the grounds that a file in the wrong place beats no file. This replaces a narrower workaround that covered only audio, and leaves every other failure code reported to the caller unretried so a real rejection is still visible.
 
+Feature: Jev channel-admission gate for unmentioned group messages.
+Intent: Let the agent answer a group message that did not @-mention it, but only when that message is genuinely its business. `_admit` now reports a mention miss as `group_mention_missing`, distinct from `group_policy_rejected`, so only a sender the group policy already allows can reach the gate — a rejected sender stays rejected. The drop is deferred until the text has been extracted (the admission step has none), and the gate is skipped entirely for a bot sender, where an unprompted reply invites a bot-to-bot loop, and for a slash command, where an unaddressed `/reset` typed at another bot must never reach this agent's dispatch. The gate fails closed in every direction: feature off, no API key, no business scope, undecided verdict, or a raising classifier all reproduce the pre-Jev drop. An admitted message forces a topic reply on its own `om_*` root even when `FEISHU_REPLY_THREAD` is off, because that switch expresses where an *invited* answer goes and an uninvited one belongs under the message that prompted it; the event is marked `jev_channel_autoreply` so downstream code can tell the two apart.
+
 ## File: `plugins/platforms/feishu/feishu_cardkit.py`
 
 Feature: CardKit three-element card engine.
@@ -212,6 +215,16 @@ Intent: Declare `FEISHU_CARD_OUTPUT`, the card title overrides and the attachmen
 Feature: Feishu automatic-topic reply anchors.
 Intent: Distinguish an `om_*` prospective topic root from a real `omt_*` topic when selecting the outbound reply anchor, so a user message that quotes an earlier message creates its automatic topic under the current message while existing real-topic reply-context behavior remains unchanged.
 
+## File: `agent/jev_client.py`
+
+Feature: TypeSafe Jev (System One) decision client.
+Intent: Give Hermes one typed, calibrated decision surface — `noul` / `choice` / `score` over `POST {base_url}/v1/systemone` — for judgements that happen BEFORE the agent loop and must not become a generation call. Normalize all three primitives to one shape so a `score` reports the band its probability mass actually sits in rather than the rounded expected value, and so `noul` reports its probability as its own confidence. Every failure path — no key, unreachable host, non-JSON body, missing or unparseable answer — returns `None` rather than raising, because a classifier that fails must never drop a user's message or strand a turn without a model. A short TTL+LRU memo keyed by the exact request coalesces repeat decisions (retried deliveries, the same text judged twice) without becoming durable state.
+
+## File: `agent/jev_policy.py`
+
+Feature: Jev channel-admission and complexity-routing policy.
+Intent: Hold the two decisions and their configuration in one place so the gateway, the Feishu adapter and the WORKAGENT A2A executor share identical semantics instead of each inventing their own. Settings resolve env-var-first (`TYPESAFE_*`, `HERMES_JEV_*`), then `config.yaml`'s `jev:` section, then a default, and every read goes through `agent.secret_scope` so a multiplexing gateway cannot serve one profile's business scope or band models to another. Both features are off by default and gated on being *fully* configured — channel autoreply additionally requires a non-empty business scope, complexity routing at least one band model — so a half-configured deployment keeps its pre-Jev behavior rather than acting on a judgement it cannot make. Channel admission is two separate propositions ("is this our topic" and "does it want an answer") asked in one forward pass: folded into a single question both signals collapse toward the middle and the threshold stops meaning anything. A band below `min_confidence` is discarded, which is also what keeps a conversation from oscillating between models and throwing away the prompt cache every turn.
+
 ## File: `gateway/run.py`
 
 Feature: Delegate runtime binding per gateway turn.
@@ -225,6 +238,9 @@ Intent: Mark Feishu tool-progress sends with `hermes_progress` and the long-runn
 
 Feature: Plugin slash-command caller identity binding.
 Intent: Bind the invoking user's userenv identity (from the adapter's `SessionSource`) around plugin-registered slash-command handlers for the duration of the call, mirroring the tool-call path in `agent/tool_executor.py`. Plugin command dispatch runs inside `_handle_message` before `_set_session_env` binds `HERMES_SESSION_*`, so without this binding identity-dependent plugin commands (e.g. `/userenv`) would see no caller and fail closed. Identity must always come from the gateway source, never from message text, and the ContextVar must be reset after the handler returns.
+
+Feature: Jev complexity-based turn model routing.
+Intent: Let a turn run on a model sized to the difficulty of the request. `_apply_jev_complexity_route` is a module-level function, not a method, because the turn-route builder is exercised with a stand-in `self` and must not gain instance-state requirements. It mutates the route in place INCLUDING the signature, since the agent-cache key is derived from it and a band switch has to rebuild the agent rather than reuse one bound to the previous model — the same cache boundary a `/model` switch crosses, which is why banding is confidence-gated rather than applied to every turn. A band pinned to another provider swaps credentials through the existing per-provider resolver; a band on the session's own provider only re-derives `api_mode` for the model being switched to. Every failure — routing off, no band, unresolvable credentials, classifier error, empty message — leaves the route exactly as the session resolved it.
 
 ## File: `tools/user_env_store.py`
 
@@ -310,3 +326,13 @@ Intent: Let authenticated runtime users list, get, set, and delete only their ow
 
 Feature: ext-tools plugin manifest.
 Intent: Declare the plugin's provided tools and commands (`cron_prompt` tool, `/userenv` command) so discovery surfaces what the plugin contributes without inspecting code.
+
+## File: `hermes_cli/config_defaults.py`
+
+Feature: Jev decision-layer configuration surface.
+Intent: Declare the `jev:` section so the endpoint, decision model, feature flags, business scope, thresholds and per-band models are discoverable and documented in one place, with both features defaulting off. Register `TYPESAFE_API_KEY` as the only secret in the set (and `TYPESAFE_BASE_URL` beside it for self-hosted or proxied System One gateways), marked advanced so it does not crowd the ordinary setup flow. The remaining knobs are settings, not credentials, and their canonical home stays config.yaml even though each is also readable from the environment.
+
+## File: `hermes_cli/config.py`
+
+Feature: Jev environment-variable recognition.
+Intent: Keep the `TYPESAFE_MODEL` / `HERMES_JEV_*` keys known to `.env` reload and doctor so an operator who pins them per deployment is not warned about unknown variables. They are deliberately left out of the global-env allowlist in `agent/secret_scope.py`: a multiplexing gateway should be able to serve two business scopes and two sets of band models from one process, which requires these to stay profile-scoped.
