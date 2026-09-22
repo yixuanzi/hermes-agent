@@ -2687,12 +2687,18 @@ def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
 
 
 def _apply_jev_complexity_route(
-    user_message: str, route: dict, session_id: Optional[str] = None,
+    user_message: str,
+    route: dict,
+    session_id: Optional[str] = None,
+    *,
+    model_pinned: bool = False,
 ) -> None:
     """Re-point ``route`` at the model configured for this turn's difficulty.
 
     Off unless ``HERMES_JEV_COMPLEXITY_ROUTING`` is on AND at least one band
-    model is configured.  Jev rates the request low / medium / high in a
+    model is configured AND the session has not pinned its own model with
+    ``/model`` — an explicit human choice outranks the classifier, and a
+    session that pins a model never pays for a decision it would discard.  Jev rates the request low / medium / high in a
     single typed call (sub-second, but it is on the critical path of every
     turn); an unconfigured band, a low-confidence answer, or any transport
     error leaves ``route`` untouched so the turn runs on the session's own
@@ -2713,6 +2719,15 @@ def _apply_jev_complexity_route(
     Callers with no session of their own — the one-shot background-task path —
     pass nothing and are rated per turn, which is what a single-turn task means.
     """
+    if model_pinned:
+        # The user picked this model with /model. An automatic classifier does
+        # not get to overrule an explicit human choice — and silently doing so
+        # would make /model look broken. No Jev call is made at all.
+        logger.debug(
+            "Jev complexity routing skipped: session model pinned by /model (%s)",
+            route.get("model"),
+        )
+        return
     if not (user_message or "").strip():
         return
     try:
@@ -7229,6 +7244,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     resolved_session_key or "", model, override_model,
                     override_runtime.get("provider"),
                 )
+                # Private marker, not a runtime field: the turn router reads it
+                # to leave a user-chosen model alone. Consumers of this dict
+                # either pick known keys or filter by whitelist, so the extra
+                # entry is inert everywhere else.
+                override_runtime["_session_model_pinned"] = True
                 return override_model, override_runtime
             # Override exists but has no api_key — fall through to env-based
             # resolution and apply model/provider from the override on top.
@@ -7292,6 +7312,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             model, runtime_kwargs = self._apply_session_model_override(
                 resolved_session_key, model, runtime_kwargs
             )
+            runtime_kwargs["_session_model_pinned"] = True
 
         # When the config has no model.default but a provider was resolved
         # (e.g. user ran `hermes auth add openai-codex` without `hermes model`),
@@ -7389,7 +7410,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             ),
         }
 
-        _apply_jev_complexity_route(user_message, route, session_id)
+        _apply_jev_complexity_route(
+            user_message,
+            route,
+            session_id,
+            model_pinned=bool(runtime_kwargs.get("_session_model_pinned")),
+        )
 
         service_tier = getattr(self, "_service_tier", None)
         if not service_tier:

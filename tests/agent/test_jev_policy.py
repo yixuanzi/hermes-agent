@@ -17,6 +17,7 @@ _JEV_ENV = [
     "HERMES_JEV_COMPLEXITY_ROUTING", "HERMES_JEV_BUSINESS_SCOPE",
     "HERMES_JEV_RELEVANCE_THRESHOLD", "HERMES_JEV_MIN_CONFIDENCE",
     "HERMES_JEV_MODEL_LOW", "HERMES_JEV_MODEL_MEDIUM", "HERMES_JEV_MODEL_HIGH",
+    "HERMES_JEV_PROVIDER_LOW", "HERMES_JEV_PROVIDER_MEDIUM", "HERMES_JEV_PROVIDER_HIGH",
 ]
 
 
@@ -710,3 +711,79 @@ def test_a_remembered_band_expires():
         now[0] += jp._SESSION_BAND_TTL_SECONDS + 1
         jev_policy.route_model_for_request("b", settings=settings, client=client, session_key="s")
     assert len(client.asked) == 2
+
+
+# --- band resolution: env and config.yaml express the same thing -----------
+#
+# HERMES_JEV_MODEL_<BAND> / HERMES_JEV_PROVIDER_<BAND> override
+# jev.models.<band> per FIELD, so neither surface silently erases the other.
+
+
+def test_a_band_provider_can_come_from_the_environment(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_MODEL_LOW", "env-low")
+    monkeypatch.setenv("HERMES_JEV_PROVIDER_LOW", "openai")
+    assert jev_policy.load_jev_settings().tier_models["low"] == TierModel(
+        model="env-low", provider="openai"
+    )
+
+
+def test_a_model_env_var_keeps_a_provider_configured_in_yaml(jev_env, monkeypatch):
+    jev_env["models"] = {"low": {"model": "cfg-low", "provider": "anthropic"}}
+    monkeypatch.setenv("HERMES_JEV_MODEL_LOW", "env-low")
+    assert jev_policy.load_jev_settings().tier_models["low"] == TierModel(
+        model="env-low", provider="anthropic"
+    )
+
+
+def test_a_provider_env_var_keeps_a_model_configured_in_yaml(jev_env, monkeypatch):
+    jev_env["models"] = {"low": {"model": "cfg-low", "provider": "anthropic"}}
+    monkeypatch.setenv("HERMES_JEV_PROVIDER_LOW", "openai")
+    assert jev_policy.load_jev_settings().tier_models["low"] == TierModel(
+        model="cfg-low", provider="openai"
+    )
+
+
+def test_a_provider_env_var_applies_to_the_shorthand_yaml_form(jev_env, monkeypatch):
+    jev_env["models"] = {"medium": "cfg-medium"}
+    monkeypatch.setenv("HERMES_JEV_PROVIDER_MEDIUM", "xai")
+    assert jev_policy.load_jev_settings().tier_models["medium"] == TierModel(
+        model="cfg-medium", provider="xai"
+    )
+
+
+def test_each_band_resolves_independently(jev_env, monkeypatch):
+    jev_env["models"] = {"low": "cfg-low", "high": {"model": "cfg-high", "provider": "a"}}
+    monkeypatch.setenv("HERMES_JEV_PROVIDER_LOW", "openai")
+    bands = jev_policy.load_jev_settings().tier_models
+    assert bands["low"] == TierModel(model="cfg-low", provider="openai")
+    assert bands["high"] == TierModel(model="cfg-high", provider="a")
+    assert "medium" not in bands
+
+
+def test_a_provider_with_no_model_is_ignored_with_a_warning(jev_env, monkeypatch, caplog):
+    caplog.set_level("WARNING")
+    monkeypatch.setenv("HERMES_JEV_PROVIDER_HIGH", "openai")
+    assert "high" not in jev_policy.load_jev_settings().tier_models
+    assert any("no model" in r.getMessage() for r in caplog.records)
+
+
+def test_an_empty_provider_env_var_is_not_a_provider(jev_env, monkeypatch):
+    jev_env["models"] = {"low": {"model": "cfg-low", "provider": "anthropic"}}
+    monkeypatch.setenv("HERMES_JEV_PROVIDER_LOW", "   ")
+    assert jev_policy.load_jev_settings().tier_models["low"].provider == "anthropic"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("plain-model", ("plain-model", None)),
+        ({"model": "m", "provider": "p"}, ("m", "p")),
+        ({"model": "m"}, ("m", None)),
+        ({"provider": "p"}, ("", "p")),
+        ({}, ("", None)),
+        (None, ("", None)),
+        (123, ("", None)),
+    ],
+)
+def test_a_yaml_band_entry_is_read_in_both_forms(raw, expected):
+    assert jev_policy._configured_tier(raw) == expected

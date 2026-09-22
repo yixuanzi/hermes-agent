@@ -40,6 +40,7 @@ HERMES_JEV_COMPLEXITY_SCOPE=session      # session (default) | turn
 HERMES_JEV_MODEL_LOW=gpt-5-mini
 HERMES_JEV_MODEL_MEDIUM=gpt-5
 HERMES_JEV_MODEL_HIGH=claude-opus-5
+HERMES_JEV_PROVIDER_HIGH=anthropic        # optional, per band
 HERMES_JEV_MIN_CONFIDENCE=0.5
 ```
 
@@ -63,6 +64,28 @@ jev:
 
 These keys are **profile-scoped**, not global: a multiplexing gateway can serve
 two business scopes and two sets of band models from one process.
+
+### Band configuration
+
+The two surfaces express the same thing, so they merge **per field** rather than
+one replacing the other. Each band takes its `model` and `provider` from
+`jev.models.<band>`, and `HERMES_JEV_MODEL_<BAND>` / `HERMES_JEV_PROVIDER_<BAND>`
+override only the field they name:
+
+| `jev.models.low` | `HERMES_JEV_MODEL_LOW` | `HERMES_JEV_PROVIDER_LOW` | result |
+|---|---|---|---|
+| `{model: cfg-low, provider: anthropic}` | — | — | `cfg-low` @ `anthropic` |
+| `{model: cfg-low, provider: anthropic}` | `env-low` | — | `env-low` @ **`anthropic`** |
+| `{model: cfg-low, provider: anthropic}` | — | `openai` | `cfg-low` @ `openai` |
+| `{model: cfg-low, provider: anthropic}` | `env-low` | `openai` | `env-low` @ `openai` |
+| `cfg-medium` (shorthand) | — | `xai` | `cfg-medium` @ `xai` |
+| — | — | `openai` | **ignored**, with a warning — a provider without a model cannot route |
+
+The second row is the one that matters: setting only the model env var keeps the
+provider from `config.yaml` instead of silently discarding it.
+
+`provider` is optional everywhere. Leave it unset for the common case — a band
+that runs on the session's own provider and only swaps the model.
 
 ## Feature 1 — channel admission
 
@@ -231,6 +254,31 @@ Jev rates the request on an ordinal `low / medium / high` scale and the turn run
 on that band's model. A band with no configured model, or an answer below
 `min_confidence`, keeps the agent's default model.
 
+### `/model` wins
+
+A session that pinned its own model with `/model` is **not** rated at all — no
+Jev call is made, and the turn runs on the model the user chose. An automatic
+classifier does not overrule an explicit human choice, and silently doing so
+would make `/model` look broken.
+
+```
+no /model set        ->  [Jev] complexity: high in 1067ms (api) — confidence=1.00 >= 0.50
+                         Jev complexity routing: session-default -> claude-opus-5
+
+/model claude-sonnet-5 ->  (no Jev call)
+                         model stays claude-sonnet-5
+```
+
+The pin travels as a private `_session_model_pinned` marker that
+`_resolve_session_agent_runtime` sets on both `/model` resolution paths (the
+fast path where the override carries its own key, and the fall-through where it
+does not). It is a marker, not a runtime field: `_resolve_turn_agent_config`
+builds the agent's runtime from an explicit key list, so it never reaches
+`AIAgent(**runtime)`.
+
+This covers the session `/model` command only. A `channel_overrides.model` in
+`config.yaml` is still subject to routing — see *Limits worth knowing*.
+
 ### How often the rating happens
 
 `HERMES_JEV_COMPLEXITY_SCOPE` / `jev.complexity_scope`:
@@ -355,9 +403,11 @@ Three steps, in `agent/jev_client.py::_parse_answer` then `judge_complexity`:
 2. **confidence gate**: `confidence < min_confidence` (default `0.5`) → return
    `None` → the turn keeps the session's model. This is what stops a marginal
    rating from moving a conversation onto another model.
-3. **band → model**: `HERMES_JEV_MODEL_{LOW,MEDIUM,HIGH}` (or `jev.models.*`).
-   An unconfigured band is also `None` → default model. So you can configure
-   `HIGH` alone and leave everything else on the session model.
+3. **band → model**: `HERMES_JEV_MODEL_{LOW,MEDIUM,HIGH}` plus the optional
+   `HERMES_JEV_PROVIDER_{LOW,MEDIUM,HIGH}` (or `jev.models.*`) — see
+   *Band configuration* above. An unconfigured band is also `None` → default
+   model. So you can configure `HIGH` alone and leave everything else on the
+   session model.
 
 ### Measured bandings
 
@@ -495,6 +545,10 @@ silence, a timed-out complexity call means the default model.
 
 - Jev is a **decision** surface, not a generator. It does not replace the
   conversational model; it chooses which one runs and whether one runs at all.
+- Complexity routing yields to the session `/model` command, but **not** to a
+  `channel_overrides.model` in `config.yaml` — a channel pinned to a model will
+  still be re-routed by band. If that is wrong for your deployment, the same
+  `_session_model_pinned` marker is where the exemption would go.
 - Calibration is a statistical property, not per-answer correctness. A 0.9
   in-scope probability is right about 90% of the time — set thresholds for the
   cost of the mistake you care about, and remember that a false *negative* here

@@ -197,23 +197,54 @@ class JevSettings:
         return bool(self.api_key)
 
 
+def _configured_tier(raw: Any) -> Tuple[str, Optional[str]]:
+    """Read one ``jev.models.<band>`` entry as ``(model, provider)``.
+
+    Accepts the shorthand ``"model-name"`` and the full
+    ``{model: ..., provider: ...}`` form.
+    """
+    if isinstance(raw, str):
+        return raw.strip(), None
+    if isinstance(raw, dict):
+        model = str(raw.get("model") or "").strip()
+        provider = str(raw.get("provider") or "").strip() or None
+        return model, provider
+    return "", None
+
+
 def _resolve_tier_models(config: Mapping[str, Any]) -> Dict[str, TierModel]:
+    """Resolve each band's model and provider, env overriding config per FIELD.
+
+    ``HERMES_JEV_MODEL_<BAND>`` and ``HERMES_JEV_PROVIDER_<BAND>`` each override
+    only the field they name.  Setting just the model env var therefore keeps a
+    provider configured in ``config.yaml`` instead of silently discarding it —
+    the two surfaces express the same thing, so neither should erase the other.
+    """
     raw_models = config.get("models")
     raw_models = raw_models if isinstance(raw_models, dict) else {}
     resolved: Dict[str, TierModel] = {}
+
     for tier in COMPLEXITY_TIERS:
-        env_value = _env(f"HERMES_JEV_MODEL_{tier.upper()}")
-        if env_value:
-            resolved[tier] = TierModel(model=env_value)
-            continue
-        configured = raw_models.get(tier)
-        if isinstance(configured, str) and configured.strip():
-            resolved[tier] = TierModel(model=configured.strip())
-        elif isinstance(configured, dict):
-            model = str(configured.get("model") or "").strip()
-            if model:
-                provider = str(configured.get("provider") or "").strip() or None
-                resolved[tier] = TierModel(model=model, provider=provider)
+        model, provider = _configured_tier(raw_models.get(tier))
+
+        env_model = _env(f"HERMES_JEV_MODEL_{tier.upper()}")
+        if env_model:
+            model = env_model
+        env_provider = _env(f"HERMES_JEV_PROVIDER_{tier.upper()}")
+        if env_provider:
+            provider = env_provider
+
+        if model:
+            resolved[tier] = TierModel(model=model, provider=provider)
+        elif provider:
+            logger.warning(
+                "[Jev] band %r has a provider (%s) but no model; the band is "
+                "ignored — set HERMES_JEV_MODEL_%s or jev.models.%s",
+                tier,
+                provider,
+                tier.upper(),
+                tier,
+            )
     return resolved
 
 

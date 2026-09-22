@@ -1989,7 +1989,10 @@ DEFAULT_CONFIG = {
         # Below it the turn keeps the session's own model.
         "min_confidence": 0.5,
         # Per-band model. A band left empty keeps the agent's default model.
-        # Either "model-name" or {model: ..., provider: ...}.
+        # Either "model-name" or {model: ..., provider: ...}. The matching
+        # HERMES_JEV_MODEL_<BAND> / HERMES_JEV_PROVIDER_<BAND> env vars override
+        # these per FIELD, so setting only the model env var keeps a provider
+        # configured here.
         "models": {
             "low": "",
             "medium": "",

@@ -250,3 +250,131 @@ def test_the_turn_route_builder_forwards_its_session_id(monkeypatch):
     bound = GatewayRunner._resolve_turn_agent_config.__get__(runner)
     bound("hello", "gpt-5", _route()["runtime"], session_id="sess-xyz")
     assert seen["session_key"] == "sess-xyz"
+
+
+# --- /model pins the session's model ---------------------------------------
+#
+# An explicit `/model` outranks the classifier. The routing call is skipped
+# entirely, so a pinned session does not even pay for a decision.
+
+
+def test_a_pinned_session_keeps_its_model(monkeypatch):
+    _stub_policy(monkeypatch, tier_model=TierModel(model="big-model"))
+    route = _route()
+    _apply_jev_complexity_route("rebuild the auth layer", route, "sess-1", model_pinned=True)
+    assert route["model"] == "session-model"
+
+
+def test_a_pinned_session_is_never_classified(monkeypatch):
+    from agent import jev_policy
+
+    asked = []
+    monkeypatch.setattr(jev_policy, "load_jev_settings", lambda: SimpleNamespace(name="stub"))
+    monkeypatch.setattr(jev_policy, "complexity_routing_active", lambda _s: True)
+
+    def _route_model(_text, settings=None, client=None, session_key=None):
+        asked.append(_text)
+        return TierModel(model="big-model")
+
+    monkeypatch.setattr(jev_policy, "route_model_for_request", _route_model)
+    _apply_jev_complexity_route("…", _route(), "sess-1", model_pinned=True)
+    assert asked == [], "a pinned session must not spend a Jev call"
+
+
+def test_an_unpinned_session_still_routes(monkeypatch):
+    _stub_policy(monkeypatch, tier_model=TierModel(model="big-model"))
+    route = _route()
+    _apply_jev_complexity_route("…", route, "sess-1", model_pinned=False)
+    assert route["model"] == "big-model"
+
+
+def test_the_turn_router_reads_the_pin_from_the_resolved_runtime(monkeypatch):
+    from agent import jev_policy
+    from gateway.run import GatewayRunner
+
+    _stub_policy(monkeypatch, tier_model=TierModel(model="big-model"))
+    runner = SimpleNamespace(_service_tier=None)
+    bound = GatewayRunner._resolve_turn_agent_config.__get__(runner)
+
+    pinned = _route()["runtime"] | {"_session_model_pinned": True}
+    assert bound("hello", "user-chosen-model", pinned)["model"] == "user-chosen-model"
+
+    unpinned = _route()["runtime"]
+    assert bound("hello", "user-chosen-model", unpinned)["model"] == "big-model"
+
+
+def test_the_pin_marker_never_reaches_the_agent_runtime(monkeypatch):
+    # runtime kwargs are splatted into AIAgent(**...), so an internal marker
+    # leaking through would be a TypeError at agent construction.
+    from gateway.run import GatewayRunner
+
+    _stub_policy(monkeypatch, active=False)
+    runner = SimpleNamespace(_service_tier=None)
+    bound = GatewayRunner._resolve_turn_agent_config.__get__(runner)
+
+    route = bound("hello", "m", _route()["runtime"] | {"_session_model_pinned": True})
+    assert "_session_model_pinned" not in route["runtime"]
+
+
+# --- the pin is set by the real /model resolution path ---------------------
+
+
+def _runner_with_override(override: dict):
+    """A GatewayRunner whose session 'sess' carries a /model override."""
+    from gateway.run import GatewayRunner
+    from gateway.session_state import SessionState
+
+    runner = object.__new__(GatewayRunner)
+    state = SessionState()
+    state.conversation.model_override = override
+    runner._sessions = {"sess": state}
+    runner._rehydrate_session_model_override = lambda _key: None
+    return runner
+
+
+def test_a_model_override_with_its_own_key_marks_the_runtime_pinned(monkeypatch):
+    import gateway.run as gateway_run
+
+    runner = _runner_with_override(
+        {"model": "user-chosen", "provider": "openai", "api_key": "sk-user"}
+    )
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda _cfg: "config-model")
+    monkeypatch.setattr(gateway_run, "_credential_pool_for_provider", lambda _p: None)
+
+    model, runtime = runner._resolve_session_agent_runtime(session_key="sess")
+    assert model == "user-chosen"
+    assert runtime.get("_session_model_pinned") is True
+
+
+def test_a_model_override_without_a_key_still_marks_the_runtime_pinned(monkeypatch):
+    import gateway.run as gateway_run
+
+    runner = _runner_with_override({"model": "user-chosen", "provider": "openai"})
+    runner.config = None
+    runner._apply_session_model_override = lambda _k, m, rk: ("user-chosen", rk)
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda _cfg: "config-model")
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {"provider": "openai", "api_key": "sk-env", "base_url": "https://x"},
+    )
+
+    model, runtime = runner._resolve_session_agent_runtime(session_key="sess")
+    assert model == "user-chosen"
+    assert runtime.get("_session_model_pinned") is True
+
+
+def test_a_session_with_no_override_is_not_marked(monkeypatch):
+    import gateway.run as gateway_run
+
+    runner = _runner_with_override(None)
+    runner.config = None
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda _cfg: "config-model")
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {"provider": "openai", "api_key": "sk-env", "base_url": "https://x"},
+    )
+
+    _model, runtime = runner._resolve_session_agent_runtime(session_key="sess")
+    assert "_session_model_pinned" not in runtime
