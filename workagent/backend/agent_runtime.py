@@ -245,6 +245,12 @@ def build_profile_agent_kwargs(
             config_module=config_module,
         ),
     }
+    # Carry the id the profile asked for (e.g. ``custom:glm``) alongside the
+    # canonicalized ``provider`` (``custom``): anything comparing "is this the
+    # provider the agent already runs on" needs the full id, since the
+    # namespace alone cannot distinguish two custom providers.
+    if requested_provider:
+        agent_kwargs["requested_provider"] = requested_provider
     if resolved_model:
         agent_kwargs["model"] = resolved_model
     if resolved_base_url:

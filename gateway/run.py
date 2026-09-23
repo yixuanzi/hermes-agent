@@ -2686,6 +2686,129 @@ def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
     }
 
 
+def _apply_jev_complexity_route(
+    user_message: str,
+    route: dict,
+    session_id: Optional[str] = None,
+    *,
+    model_pinned: bool = False,
+) -> None:
+    """Re-point ``route`` at the model configured for this turn's difficulty.
+
+    Off unless ``HERMES_JEV_COMPLEXITY_ROUTING`` is on AND at least one band
+    model is configured AND the session has not pinned its own model with
+    ``/model`` — an explicit human choice outranks the classifier, and a
+    session that pins a model never pays for a decision it would discard.  Jev rates the request low / medium / high in a
+    single typed call (sub-second, but it is on the critical path of every
+    turn); an unconfigured band, a low-confidence answer, or any transport
+    error leaves ``route`` untouched so the turn runs on the session's own
+    model.
+
+    Mutates ``route`` in place, ``signature`` included: the caller derives
+    the agent-cache key from it, so a band switch correctly rebuilds the
+    agent instead of reusing one bound to the previous model.  That rebuild
+    is the same cache boundary a ``/model`` switch crosses, which is why the
+    default ``complexity_scope: session`` decides the band once per session
+    and reuses it — under that scope a conversation rebuilds at most once.
+    ``complexity_scope: turn`` re-rates every message and can therefore
+    re-route (and rebuild) mid-conversation; confidence gating is what keeps
+    that from happening on every turn.
+
+    ``session_id`` (the session id, not the routing key) keys the per-session
+    band, so a ``/new`` mints a new id and the next turn is rated fresh.
+    Callers with no session of their own — the one-shot background-task path —
+    pass nothing and are rated per turn, which is what a single-turn task means.
+    """
+    if model_pinned:
+        # The user picked this model with /model. An automatic classifier does
+        # not get to overrule an explicit human choice — and silently doing so
+        # would make /model look broken. No Jev call is made at all.
+        logger.debug(
+            "Jev complexity routing skipped: session model pinned by /model (%s)",
+            route.get("model"),
+        )
+        return
+    if not (user_message or "").strip():
+        return
+    try:
+        from agent import jev_policy
+    except Exception:
+        logger.debug("Jev policy unavailable; keeping the session model", exc_info=True)
+        return
+
+    try:
+        settings = jev_policy.load_jev_settings()
+        if not jev_policy.complexity_routing_active(settings):
+            return
+        tier_model = jev_policy.route_model_for_request(
+            user_message, settings=settings, session_key=session_id,
+        )
+    except Exception:
+        logger.warning("Jev complexity routing failed; keeping the session model", exc_info=True)
+        return
+
+    if tier_model is None or not tier_model.model:
+        return
+    if tier_model.model == route["model"] and not tier_model.provider:
+        return
+
+    runtime = route["runtime"]
+    if tier_model.provider:
+        # A band pinned to another provider needs that provider's
+        # credentials, not the session's.  A failure here must not strand
+        # the turn — keep the session runtime and log.
+        try:
+            provider_runtime = _resolve_runtime_agent_kwargs_for_provider(tier_model.provider)
+        except Exception as exc:
+            logger.warning(
+                "Jev band model %s pinned to provider %s but credentials did not "
+                "resolve (%s); keeping the session model",
+                tier_model.model, tier_model.provider, exc,
+            )
+            return
+        for key in (
+            "api_key", "base_url", "provider", "requested_provider",
+            "api_mode", "command", "args", "credential_pool",
+        ):
+            runtime[key] = provider_runtime.get(key)
+        runtime["args"] = list(runtime.get("args") or [])
+    else:
+        # Same provider, different model: api_mode can be model-derived
+        # (OpenCode Zen/Go route models through different API surfaces),
+        # so re-derive it for the model we are switching TO.
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+
+            resolved = resolve_runtime_provider(
+                requested=runtime.get("requested_provider") or runtime.get("provider"),
+                target_model=tier_model.model,
+            )
+            if resolved.get("api_mode"):
+                runtime["api_mode"] = resolved.get("api_mode")
+        except Exception:
+            logger.debug(
+                "Could not re-derive api_mode for Jev band model %s; keeping %s",
+                tier_model.model, runtime.get("api_mode"), exc_info=True,
+            )
+
+    logger.info(
+        "Jev complexity routing: %s -> %s%s",
+        route["model"] or "(default)",
+        tier_model.model,
+        f" via {tier_model.provider}" if tier_model.provider else "",
+    )
+    route["model"] = tier_model.model
+    route["signature"] = (
+        tier_model.model,
+        runtime["provider"],
+        runtime["requested_provider"],
+        runtime["base_url"],
+        runtime["api_mode"],
+        runtime["command"],
+        tuple(runtime["args"]),
+    )
+
+
 def _credential_pool_for_provider(provider: Optional[str]):
     """Return the live credential pool for a provider id (e.g. ``custom:hyper``)."""
     if not provider or not str(provider).strip():
@@ -4748,7 +4871,9 @@ class TurnRunner:
                 log_message="interim_assistant_callback scheduling error",
             )
 
-        turn_route = self._runner._resolve_turn_agent_config(ctx.message, model, runtime_kwargs)
+        turn_route = self._runner._resolve_turn_agent_config(
+            ctx.message, model, runtime_kwargs, session_id=ctx.session_id,
+        )
 
         # Per-platform skip_context_files — messaging platforms can opt out
         # of filesystem-heavy context-file discovery (SOUL.md, AGENTS.md,
@@ -7119,6 +7244,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     resolved_session_key or "", model, override_model,
                     override_runtime.get("provider"),
                 )
+                # Private marker, not a runtime field: the turn router reads it
+                # to leave a user-chosen model alone. Consumers of this dict
+                # either pick known keys or filter by whitelist, so the extra
+                # entry is inert everywhere else.
+                override_runtime["_session_model_pinned"] = True
                 return override_model, override_runtime
             # Override exists but has no api_key — fall through to env-based
             # resolution and apply model/provider from the override on top.
@@ -7182,6 +7312,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             model, runtime_kwargs = self._apply_session_model_override(
                 resolved_session_key, model, runtime_kwargs
             )
+            runtime_kwargs["_session_model_pinned"] = True
 
         # When the config has no model.default but a provider was resolved
         # (e.g. user ran `hermes auth add openai-codex` without `hermes model`),
@@ -7236,13 +7367,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return model, runtime_kwargs
 
-    def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
+    def _resolve_turn_agent_config(
+        self,
+        user_message: str,
+        model: str,
+        runtime_kwargs: dict,
+        *,
+        session_id: Optional[str] = None,
+    ) -> dict:
         """Build the effective model/runtime config for a single turn.
 
-        Always uses the session's primary model/provider.  If `/fast` is
-        enabled and the model supports Priority Processing / Anthropic fast
-        mode, attach `request_overrides` so the API call is marked
-        accordingly.
+        Uses the session's primary model/provider, unless Jev complexity
+        routing is enabled and rates this turn into a band with its own
+        configured model.  If `/fast` is enabled and the model supports
+        Priority Processing / Anthropic fast mode, attach `request_overrides`
+        so the API call is marked accordingly.
         """
         from hermes_cli.models import resolve_fast_mode_overrides
 
@@ -7270,6 +7409,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 tuple(runtime["args"]),
             ),
         }
+
+        _apply_jev_complexity_route(
+            user_message,
+            route,
+            session_id,
+            model_pinned=bool(runtime_kwargs.get("_session_model_pinned")),
+        )
 
         service_tier = getattr(self, "_service_tier", None)
         if not service_tier:

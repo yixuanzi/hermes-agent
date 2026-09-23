@@ -324,6 +324,29 @@ _EXTRA_ENV_KEYS = frozenset({
     "HERMES_COPILOT_ACP_ARGS",
     "COPILOT_CLI_PATH",
     "COPILOT_ACP_BASE_URL",
+    # Jev (TypeSafe System One) decision layer. TYPESAFE_API_KEY is declared in
+    # OPTIONAL_ENV_VARS; the rest are the env-var face of the config.yaml
+    # ``jev:`` section, kept known here so .env reload and doctor don't flag
+    # them. Profile-scoped on purpose: two profiles can serve two business
+    # scopes and two sets of band models from one multiplexing gateway.
+    "TYPESAFE_MODEL",
+    "HERMES_JEV_TIMEOUT",
+    "HERMES_JEV_CHANNEL_AUTOREPLY",
+    "HERMES_JEV_THREAD_AUTOREPLY",
+    "HERMES_JEV_COMPLEXITY_ROUTING",
+    "HERMES_JEV_COMPLEXITY_SCOPE",
+    "HERMES_JEV_BUSINESS_SCOPE",
+    "HERMES_JEV_AGENT_DESCRIPTION",
+    "HERMES_JEV_TOOLS",
+    "HERMES_JEV_REMOTE_AGENTS",
+    "HERMES_JEV_RELEVANCE_THRESHOLD",
+    "HERMES_JEV_MIN_CONFIDENCE",
+    "HERMES_JEV_MODEL_LOW",
+    "HERMES_JEV_MODEL_MEDIUM",
+    "HERMES_JEV_MODEL_HIGH",
+    "HERMES_JEV_PROVIDER_LOW",
+    "HERMES_JEV_PROVIDER_MEDIUM",
+    "HERMES_JEV_PROVIDER_HIGH",
 })
 import yaml
 

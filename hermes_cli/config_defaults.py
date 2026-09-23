@@ -1953,6 +1953,74 @@ DEFAULT_CONFIG = {
     # (apiKey, workspace, peerName, sessions, enabled) comes from the global config.
     "honcho": {},
 
+    # Jev (TypeSafe System One) decision layer — typed, calibrated judgements
+    # made BEFORE the agent loop runs.  Both features are off by default and
+    # both fail safe: with no TYPESAFE_API_KEY, no business_scope, no band
+    # model, or any transport error, every surface keeps its pre-Jev behavior.
+    # Each key below can be overridden by the matching environment variable,
+    # which takes precedence (TYPESAFE_*, HERMES_JEV_*).
+    "jev": {
+        # Endpoint + model for the decision calls. The API key is a secret and
+        # lives in .env as TYPESAFE_API_KEY, never here.
+        "base_url": "https://api.typesafe.ai",
+        "model": "jev-latest",
+        "timeout": 8.0,
+        # Answer group/channel messages that did not @-mention the bot, when
+        # Jev judges them this agent's business. Requires agent_description.
+        "channel_autoreply": False,
+        # Extend that to messages inside an existing group topic/thread. Off by
+        # default: a thread is usually a conversation the agent is already part
+        # of, and re-judging every follow-up would cut one off mid-way. Off, a
+        # thread message is left to the normal path (the mention gate decides).
+        # The first message of a topic is not a thread message and is always
+        # judged when channel_autoreply is on.
+        "thread_autoreply": False,
+        # Rate the task low/medium/high and route it to models.<band>.
+        "complexity_routing": False,
+        # How often that rating is made:
+        #   "session" (default) — rate the first turn of a session and reuse
+        #     that band for the rest of it: one decision, one model, and the
+        #     conversation's prompt cache survives.
+        #   "turn" — rate every turn, following the work as it changes, at the
+        #     cost of a decision per message and a possible mid-conversation
+        #     model switch.
+        "complexity_scope": "session",
+        # Superseded by agent_description; still read as a fallback so an
+        # existing deployment does not lose its channel gate on upgrade.
+        "business_scope": "",
+        # Plain-language description of what this agent is and does. Used by
+        # BOTH decisions: channel admission judges relevance against it (channel
+        # autoreply stays off while it is empty — there is nothing to judge
+        # against), and the complexity question rates the work as this agent
+        # would do it.
+        "agent_description": "",
+        # Specialist agents this one can delegate to, as {name: capability}.
+        # Admission counts a request one of them handles as this agent's
+        # business too — it can hand the work off. Same flexible forms as
+        # `tools`. Complexity ignores it.
+        "remote_agents": {},
+        # A tool inventory. Either a plain string, a {name: description} map, or
+        # a list of names / {name, description} entries — all render to one
+        # readable block. HERMES_JEV_TOOLS overrides this with a plain string.
+        "tools": {},
+        # A channel message is answered when Jev's in-scope probability reaches
+        # this value; raise it to make the bot more reticent.
+        "relevance_threshold": 0.7,
+        # A complexity band is only applied when Jev is at least this confident.
+        # Below it the turn keeps the session's own model.
+        "min_confidence": 0.5,
+        # Per-band model. A band left empty keeps the agent's default model.
+        # Either "model-name" or {model: ..., provider: ...}. The matching
+        # HERMES_JEV_MODEL_<BAND> / HERMES_JEV_PROVIDER_<BAND> env vars override
+        # these per FIELD, so setting only the model env var keeps a provider
+        # configured here.
+        "models": {
+            "low": "",
+            "medium": "",
+            "high": "",
+        },
+    },
+
     # IANA timezone (e.g. "Asia/Kolkata", "America/New_York").
     # Empty string means use server-local time.
     "timezone": "",
@@ -3692,6 +3760,22 @@ OPTIONAL_ENV_VARS = {
         "tools": ["web_search", "web_extract"],
         "password": True,
         "category": "tool",
+    },
+    "TYPESAFE_API_KEY": {
+        "description": "TypeSafe Jev key — typed, calibrated decisions used for channel admission and complexity-based model routing",
+        "prompt": "TypeSafe (Jev) API key",
+        "url": "https://typesafe.ai/",
+        "password": True,
+        "category": "tool",
+        "advanced": True,
+    },
+    "TYPESAFE_BASE_URL": {
+        "description": "TypeSafe Jev endpoint override (self-hosted or proxied System One gateway)",
+        "prompt": "TypeSafe base URL (leave empty for the default)",
+        "url": None,
+        "password": False,
+        "category": "tool",
+        "advanced": True,
     },
     "FIRECRAWL_API_KEY": {
         "description": "Firecrawl API key for web search and scraping",
