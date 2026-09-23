@@ -1985,9 +1985,11 @@ DEFAULT_CONFIG = {
         # The first message of a topic is not a thread message and is always
         # judged when autoreply + channel_autoreply are on.
         "thread_autoreply": False,
-        # Rate the task low/medium/high and route it to models.<band>.
+        # Classify the task as low/medium/high/other and route it to
+        # models.<band>. "other" means it matched no band's criteria and keeps
+        # the agent's default model.
         "complexity_routing": False,
-        # How often that rating is made:
+        # How often that classification is made:
         #   "session" (default) — rate the first turn of a session and reuse
         #     that band for the rest of it: one decision, one model, and the
         #     conversation's prompt cache survives.
@@ -2006,19 +2008,28 @@ DEFAULT_CONFIG = {
         "agent_description": "",
         # Specialist agents this one can delegate to, as {name: capability}.
         # Admission counts a request one of them handles as this agent's
-        # business too — it can hand the work off. Same flexible forms as
-        # `tools`. Complexity ignores it.
+        # business too — it can hand the work off. Either a plain string, a
+        # {name: capability} map, or a list of names / {name, description}
+        # entries — all render to one readable block, and
+        # HERMES_JEV_REMOTE_AGENTS overrides this with a plain string.
+        # Complexity ignores it.
         "remote_agents": {},
-        # A tool inventory. Either a plain string, a {name: description} map, or
-        # a list of names / {name, description} entries — all render to one
-        # readable block. HERMES_JEV_TOOLS overrides this with a plain string.
-        "tools": {},
         # A channel message is answered when Jev's in-scope probability reaches
         # this value; raise it to make the bot more reticent.
         "relevance_threshold": 0.7,
-        # A complexity band is only applied when Jev is at least this confident.
-        # Below it the turn keeps the session's own model.
-        "min_confidence": 0.5,
+        # What each band MEANS. A band left empty uses the built-in default
+        # (see DEFAULT_COMPLEXITY_CRITERIA in agent/jev_policy.py), which
+        # describes a general assistant. Override them when this agent's idea
+        # of "hard" differs — a fleet-wide scan is routine for a SOC agent and
+        # a research project for a support bot. A request matching none of the
+        # three is answered "other" and keeps the default model, so narrow
+        # criteria narrow what gets re-routed rather than mis-routing it.
+        # HERMES_JEV_CRITERIA_<BAND> overrides the matching entry.
+        "criteria": {
+            "low": "",
+            "medium": "",
+            "high": "",
+        },
         # Per-band model. A band left empty keeps the agent's default model.
         # Either "model-name" or {model: ..., provider: ...}. The matching
         # HERMES_JEV_MODEL_<BAND> / HERMES_JEV_PROVIDER_<BAND> env vars override

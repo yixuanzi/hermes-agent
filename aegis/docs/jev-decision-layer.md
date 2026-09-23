@@ -2,17 +2,17 @@
 
 Two judgements that happen **before** the agent loop runs, both backed by
 [TypeSafe Jev](https://typesafe.ai/) ("System One"): a typed-decision model that
-answers propositions and ordinal ratings in a single forward pass and returns
-*calibrated* probabilities instead of prose.
+answers propositions, categorical choices and ordinal ratings in a single
+forward pass and returns *calibrated* probabilities instead of prose.
 
 | # | Feature | Flag | Surfaces |
 |---|---------|------|----------|
 | 1 | **Channel admission** — answer a group message that did not `@`-mention the bot, when it is the agent's business | `HERMES_JEV_CHANNEL_AUTOREPLY` (+ `HERMES_JEV_THREAD_AUTOREPLY` inside topics; `HERMES_JEV_AUTOREPLY` is the master switch for the stage — **gateway only**) | Feishu/Lark gateway, WORKAGENT A2A service |
-| 2 | **Complexity routing** — rate each turn low/medium/high and run it on that band's model | `HERMES_JEV_COMPLEXITY_ROUTING` | Gateway (all platforms), WORKAGENT A2A service |
+| 2 | **Complexity routing** — classify each turn low/medium/high/`other` against configurable criteria and run it on that band's model (`other` → the default model) | `HERMES_JEV_COMPLEXITY_ROUTING` (+ `HERMES_JEV_CRITERIA_{LOW,MEDIUM,HIGH}` to define the bands) | Gateway (all platforms), WORKAGENT A2A service |
 
 Both are **off by default** and independent — enabling one does not enable the
 other. Both **fail safe**: with no API key, no business scope, no band model, a
-low-confidence answer, or any transport error, every surface keeps exactly the
+unreadable answer, or any transport error, every surface keeps exactly the
 behavior it had before Jev existed.
 
 ## Configuration
@@ -39,13 +39,16 @@ HERMES_JEV_RELEVANCE_THRESHOLD=0.7
 # Feature 2
 HERMES_JEV_COMPLEXITY_ROUTING=true
 HERMES_JEV_COMPLEXITY_SCOPE=session      # session (default) | turn
+# What each band MEANS. Empty = the built-in generic criterion.
+HERMES_JEV_CRITERIA_LOW="A greeting, or one lookup answered from a single tool call."
+HERMES_JEV_CRITERIA_MEDIUM="Triaging one alert, one query, or a short script."
+HERMES_JEV_CRITERIA_HIGH="An incident investigation, a fleet-wide assessment, or an architecture plan."
 HERMES_JEV_MODEL_LOW=gpt-5-mini
 HERMES_JEV_MODEL_MEDIUM=gpt-5
 HERMES_JEV_MODEL_HIGH=claude-opus-5
 HERMES_JEV_PROVIDER_HIGH=anthropic        # optional, per band
-HERMES_JEV_MIN_CONFIDENCE=0.5
+
 HERMES_JEV_AGENT_DESCRIPTION="Hermes security-operations assistant for a SOC team."
-HERMES_JEV_TOOLS="threat_intel: reputation lookup; siem_query: run a SIEM query"
 ```
 
 ```yaml
@@ -62,9 +65,11 @@ jev:
   business_scope: ""
   agent_description: ""    
   remote_agents: ""
-  tools: {}                      # complexity context only
   relevance_threshold: 0.7
-  min_confidence: 0.5
+  criteria:                      # "" = the built-in generic criterion
+    low: ""
+    medium: ""
+    high: ""
   models:
     low: ""
     medium: ""
@@ -257,9 +262,9 @@ questions in a single forward pass, so the second costs no extra round trip.
 read when `agent_description` is empty, so an existing deployment keeps its gate
 on upgrade; prefer the new key, which both decisions share.
 
-Note what is **not** here: `tools`. That inventory rates how much *work* a
-request is, which is the complexity question's job. Admission only asks whether
-the request is this agent's business at all.
+Note what is **not** here: anything about how the request will be *executed*.
+Admission asks only whether the request is this agent's business; how much work
+it is belongs to the complexity question.
 
 Empty optional keys are **dropped, not sent as `""`** — an empty string is a
 value the model would try to interpret.
@@ -413,19 +418,21 @@ answer, and silently refusing it would strand them.
 
 ## Feature 2 — complexity routing
 
-Jev rates the request on an ordinal `low / medium / high` scale and the turn runs
-on that band's model. A band with no configured model, or an answer below
-`min_confidence`, keeps the agent's default model.
+Jev picks one of `low` / `medium` / `high` / `other` for the request and the turn
+runs on that band's model. Each band's meaning is configurable
+(`HERMES_JEV_CRITERIA_<BAND>` / `jev.criteria.<band>`); `other` means the request
+matched none of them. `other`, a band with no configured model, or an
+unreadable answer all keep the agent's default model.
 
 ### `/model` wins
 
-A session that pinned its own model with `/model` is **not** rated at all — no
+A session that pinned its own model with `/model` is **not** classified at all — no
 Jev call is made, and the turn runs on the model the user chose. An automatic
 classifier does not overrule an explicit human choice, and silently doing so
 would make `/model` look broken.
 
 ```
-no /model set        ->  [Jev] complexity: high in 1067ms (api) — confidence=1.00 >= 0.50
+no /model set        ->  [Jev] complexity: high in 1067ms (api) — confidence=1.00
                          Jev complexity routing: session-default -> claude-opus-5
 
 /model claude-sonnet-5 ->  (no Jev call)
@@ -442,14 +449,14 @@ builds the agent's runtime from an explicit key list, so it never reaches
 This covers the session `/model` command only. A `channel_overrides.model` in
 `config.yaml` is still subject to routing — see *Limits worth knowing*.
 
-### How often the rating happens
+### How often the classification happens
 
 `HERMES_JEV_COMPLEXITY_SCOPE` / `jev.complexity_scope`:
 
 | value | behavior | cost |
 |---|---|---|
-| **`session`** (default) | Rate the first turn of a session that yields a decision, reuse that band for every later turn of the same session. | One decision per conversation. One model throughout — the prompt cache survives. |
-| `turn` | Rate every turn. | One decision per message. The model can change mid-conversation, which rebuilds the agent each time it does. |
+| **`session`** (default) | Classify the first turn of a session that yields a decision, reuse that band for every later turn of the same session. A confident `other` counts as a decision and is reused too. | One decision per conversation. One model throughout — the prompt cache survives. |
+| `turn` | Classify every turn. | One decision per message. The model can change mid-conversation, which rebuilds the agent each time it does. |
 
 Measured on the same three-turn conversation, bands configured
 `low=gpt-5-mini`, `medium=gpt-5`, `high=claude-opus-5`:
@@ -482,8 +489,10 @@ the band. The gateway's one-shot background-task path has no session of its own
 and is therefore always rated per turn, which is what a single-turn task means.
 
 An **undecided** turn is deliberately not remembered: a transport error or a
-single low-confidence rating must not pin a whole session to the default model,
-so the next turn tries again. Only a decided band is stored.
+transport error must not pin a whole session to the default model, so the next
+turn tries again. `other` *is* remembered — it routes to the same default model,
+but it is a decision rather than a failure, and re-asking it every turn would
+buy nothing.
 
 The **band** is remembered, not the model — re-pointing `HERMES_JEV_MODEL_HIGH`
 at a different model takes effect on the next turn of an existing session. Bands
@@ -493,28 +502,50 @@ explicitly.
 
 ### The exact request
 
-Built by `judge_complexity()` + `_COMPLEXITY_QUESTION` in `agent/jev_policy.py`.
-Deliberately a **`score`**, not a `choice`: complexity is ordinal, and `score`
-returns an ordered distribution plus a legend, so "probably medium, maybe high"
-is expressible. A `choice` would flatten that into unrelated categories.
+Built by `judge_complexity()` + `_COMPLEXITY_QUESTION` + `_complexity_criteria()`
+in `agent/jev_policy.py`. A **`choice`** over four options, three of which carry
+a criterion the deployment can replace.
+
+It used to be a `score` over `["low","medium","high"]`, on the reasoning that
+complexity is ordinal. Two things broke that:
+
+- **A `score` has no way to say "none of these."** Every request had to land
+  somewhere on the low→high line, so a request the bands did not describe was
+  still routed by whichever band it was forced onto.
+- **A `score`'s rungs are defined by the instructions, which are a code
+  constant.** Once the rungs are configurable they belong in the options, and a
+  `choice` is what carries a per-option description.
+
+The ordinal signal is not actually lost: the answer still returns a full
+distribution over the four options, so "probably medium, maybe high" is still
+expressible and still logged.
 
 ```json
 {
   "model": "jev-latest",
   "state": {
     "request": "查一下 8.8.8.8 的威胁情报",
-    "agent": "Hermes security-operations assistant for a SOC team.",
-    "tools": "threat_intel: look up reputation for an IP, domain or file hash\nsiem_query: run a saved query against the SIEM\nasset_lookup: resolve a host to owner, environment and criticality"
+    "agent": "Hermes security-operations assistant for a SOC team."
   },
   "questions": {
     "complexity": {
-      "type": "score",
-      "instructions": "How much reasoning depth and how many steps does it take to fully answer `request`? low = a greeting, lookup, or single short factual answer. medium = a focused task needing a few steps, a tool call, or a short piece of code. high = multi-step work needing planning, deep analysis, cross-referencing, or a substantial code change. Judge the work as it would be done by the assistant described in `agent`, using the tools listed in `tools`: a request that one of those capabilities answers directly is cheaper than one that has to be reasoned out or composed from several steps.",
-      "criteria": ["low", "medium", "high"]
+      "type": "choice",
+      "instructions": "How much reasoning depth and how many steps does it take to fully answer `request`? Each option's criterion says when it applies. Pick `other` when the request fits none of them — do not stretch a criterion to cover it. Judge the work as it would be done by the assistant described in `agent`: a request that assistant answers directly is cheaper than one it has to reason out or compose from several steps.",
+      "criteria": {
+        "low": "A greeting, an acknowledgement, or a single short factual answer or lookup that needs no reasoning.",
+        "medium": "A focused task needing a few steps, wiki maintenance, a brief analysis and comparison or information retrieval and summarization",
+        "high": "Multi-step work needing planning, deep analysis, cross-referencing several sources, incident response or a substantial code change.",
+        "other": "The request fits none of the other options — it is outside what they describe, not merely between two of them."
+      }
     }
   }
 }
 ```
+
+The instructions **frame** the decision; they do not define the bands. That
+separation is deliberate: the definitions are configurable, and instructions
+that also defined them would contradict an override instead of being replaced
+by it. A test asserts no default criterion string appears in the instructions.
 
 #### `state` fields
 
@@ -522,12 +553,17 @@ is expressible. A `choice` would flatten that into unrelated categories.
 |---|---|---|---|
 | `request` | **yes** | the turn's user message | What is being rated. |
 | `agent` | no — omitted when empty | `HERMES_JEV_AGENT_DESCRIPTION` / `jev.agent_description` | Complexity is the cost of the task *as this agent would do it*. |
-| `tools` | no — omitted when empty | `HERMES_JEV_TOOLS` / `jev.tools` | A request one of these answers directly is a `low`; the same request without the tool may be a `medium`. |
 
-Still **no** business scope, no channel, no sender. `agent` and `tools` describe
-the *executor* and are stable per agent, so they cannot make the same request
-band differently from one room to the next — which is exactly why the channel
-and the sender stay out.
+`request` and `agent` are the whole state; a test asserts that as a closed set.
+No business scope, no channel, no sender. `agent` describes the *executor* and
+is stable per agent, so it cannot make the same request band differently from
+one room to the next — which is exactly why the channel and the sender stay out.
+
+There used to be a third field, `tools`: a hand-maintained inventory of what the
+agent could do. It is **gone**, along with `HERMES_JEV_TOOLS` and `jev.tools`.
+It was a second copy of what `agent` already says, it never tracked the live
+toolset (`platform_toolsets`, enabled plugins), and a band criterion — which is
+configuration now — says the same thing better. See *What the context buys*.
 
 The question is built to name **only the fields actually sent**: referencing a
 state key the request does not carry is worse than sending no context at all.
@@ -535,45 +571,56 @@ state key the request does not carry is worse than sending no context at all.
 ##### What the context buys
 
 Measured on the same endpoint, same requests, with and without a SOC agent
-description and a four-tool inventory:
+description:
 
-| request | `request` only | `+agent +tools` |
+| request | `request` only | `+agent` |
 |---|---|---|
-| 查一下 8.8.8.8 的威胁情报 | `medium` (0.54) | **`low` (0.77)** |
-| 这台主机 web-prod-07 是谁负责的？ | `low` (0.74) | `low` (0.64) |
-| 帮我把过去24小时的登录失败告警拉出来看看有没有异常 | `medium` (0.84) | `medium` (0.69) |
-| 重新设计整个零信任接入架构，并给出分阶段迁移方案 | `high` (1.00) | `high` (0.96) |
-| 写个正则匹配一下邮箱 | `medium` (0.51) | `low` (0.29) |
+| 谢谢 | `low` (0.99) | `low` (0.96) |
+| 查一下 8.8.8.8 的威胁情报 | `medium` (0.56) | `medium` (0.56) |
+| 这台主机 web-prod-07 是谁负责的？ | `low` (0.87) | `low` (0.70) |
+| 生产环境 WAF 报了一批 SQL 注入告警，有人看一下吗 | `high` (**0.27**) | **`medium` (0.51)** |
+| 重新设计整个零信任接入架构，并给出分阶段迁移方案 | `high` (0.98) | `high` (0.98) |
+| 今晚吃什么？ | `low` (0.52) | **`other` (0.80)** |
 
-Row 1 is the point: with a `threat_intel` tool that request really is one
-lookup, and the band moves to `low` with *higher* confidence than the
-context-free `medium` it displaced. The clear cases are unchanged. Note row 5 —
-the direction is right but 0.29 falls under the default `min_confidence`, so
-that turn keeps the session model; context sharpens the common cases, it does
-not make every case confident.
+Row 4 is what `agent` buys: an under-specified alert goes from an unusable
+`high` (0.27, a near-coin-flip) to a settled `medium`, because a SOC
+assistant triaging an alert batch is a known shape of work. Row 6 is the cost —
+see *`other` absorbs off-domain work* below.
 
-#### Configuring the inventory
+##### The criterion replaces the tool inventory
 
-`HERMES_JEV_TOOLS` is a plain string (env vars have no structure). `jev.tools`
-in `config.yaml` also accepts a map or a list, all rendering to the same
-readable block:
+The state used to carry a `tools` inventory too, and it did buy something: a
+threat-intel lookup moved from `medium` (0.54) to `low` (0.77) when a
+`threat_intel` tool was listed. That is gone with the field.
 
-```yaml
-jev:
-  agent_description: "Hermes security-operations assistant for a SOC team."
-  tools:
-    threat_intel: look up reputation for an IP, domain or file hash
-    siem_query:   run a saved query against the SIEM and return rows
+A **band criterion** buys the same thing and more, because it says directly what
+the inventory only implied. Same agent description, default `low` criterion vs.
+one that names the lookups this deployment actually does:
+
+```bash
+HERMES_JEV_CRITERIA_LOW="A greeting or acknowledgement, or a single lookup answered from one fact or one query: an IP/domain/hash reputation, an asset's owner, one alert's details."
 ```
 
-Keep it to what changes the *cost* of a request. This is hand-maintained
-configuration, not the agent's live toolset — it does not track
-`platform_toolsets` or enabled plugins, so an inventory that drifts from reality
-will mis-band in whichever direction it is wrong.
+| request | default `low` criterion | tuned `low` criterion |
+|---|---|---|
+| 查一下 8.8.8.8 的威胁情报 | `medium` (0.58) | **`low` (0.95)** |
+| 这台主机 web-prod-07 是谁负责的？ | `low` (0.68) | **`low` (0.99)** |
+| 谢谢 | `low` (0.95) | `low` (0.93) |
+| 把 users 表加个 email 唯一索引 | `medium` (0.66) | `medium` (0.50) |
+| 重新设计整个零信任接入架构，并给出分阶段迁移方案 | `high` (0.98) | `high` (0.92) |
 
-`criteria` is `COMPLEXITY_TIERS`, and the band names are **also the rung labels
-the question defines**. Renaming a tier silently rewrites the question, which is
-why the constant carries a "keep them stable" note.
+The tuned criterion beats what the four-tool inventory achieved on both lookup
+rows (0.95 and 0.99 against 0.77 and 0.64), and it does it without a second
+hand-maintained list of the agent's capabilities to keep in sync. That is why
+the inventory was removed rather than kept alongside: it was a worse version of
+a lever that now exists, and one that silently mis-bands when it drifts from the
+live toolset.
+
+The option names come from `COMPLEXITY_TIERS` plus `COMPLEXITY_OTHER`, and they
+are **also** the suffixes of `HERMES_JEV_MODEL_*`, `HERMES_JEV_PROVIDER_*` and
+`HERMES_JEV_CRITERIA_*`. Renaming one rewrites the question and breaks the
+config surface at the same time, which is why the constant carries a "keep them
+stable" note.
 
 #### What `request` actually contains
 
@@ -584,10 +631,10 @@ is called with `ctx.message`, after that assembly.
 
 Measured: prefixing the same three requests with a realistic
 `<source>{"platform":"feishu","channel":"oc_ops","uid":"ou_abc","uname":"张三"}</source>`
-changed no band and moved confidence by ≤0.02 (`low` 1.00→0.98, `medium`
-0.81→0.80, `high` 1.00→1.00). The envelope is short and reads as metadata, so it
-does not distort the rating — but it is the honest answer to "what text is
-being rated".
+changed no band and moved confidence by ≤0.08 (`low` 0.99→0.96, the ~0.5 index
+case 0.51→0.43 with its band unchanged, `high` 0.99→0.99). The envelope is short
+and reads as metadata, so it does not distort the rating — but it is the honest
+answer to "what text is being rated".
 
 ### How a band is picked
 
@@ -595,78 +642,189 @@ Response:
 
 ```json
 {"answers": {"complexity": {
-  "type": "score",
-  "score": 2,
-  "legend": {"0": "low", "1": "medium", "2": "high"},
-  "probabilities": {"0": 0, "1": 0, "2": 1},
-  "confidence": 1
+  "type": "choice",
+  "choice": "high",
+  "probabilities": {"low": 0, "medium": 0, "high": 0.98, "other": 0.02},
+  "confidence": 0.98
 }}}
 ```
 
-Three steps, in `agent/jev_client.py::_parse_answer` then `judge_complexity`:
+Two steps, in `agent/jev_client.py::_parse_answer` then `judge_complexity`:
 
-1. **argmax of `probabilities`**, mapped back through `legend` — *not* the
-   rounded `score`. A 0.5/0.5 split between `low` and `high` has an expected
-   value of 1.0, which would round to `medium` — a band with **zero**
-   probability mass. `score` is used only as a fallback when the service returns
-   no distribution at all.
-2. **confidence gate**: `confidence < min_confidence` (default `0.5`) → return
-   `None` → the turn keeps the session's model. This is what stops a marginal
-   rating from moving a conversation onto another model.
-3. **band → model**: `HERMES_JEV_MODEL_{LOW,MEDIUM,HIGH}` plus the optional
+1. **the returned `choice`**, or the argmax of `probabilities` when the service
+   sends no explicit pick. An answer that is not one of the four options is
+   treated as undecided rather than guessed at.
+2. **band → model**: `HERMES_JEV_MODEL_{LOW,MEDIUM,HIGH}` plus the optional
    `HERMES_JEV_PROVIDER_{LOW,MEDIUM,HIGH}` (or `jev.models.*`) — see
    *Band configuration* above. An unconfigured band is also `None` → default
    model. So you can configure `HIGH` alone and leave everything else on the
    session model.
 
+`other` returns the string `"other"`, not `None`. The routing result is the same
+— the default model — but the distinction matters for the session memo: `other`
+is **remembered** for the session, while an undecided turn is not. Otherwise a
+session whose first turn falls outside every band would pay for a classification
+on every subsequent turn to be told the same thing.
+
+#### There is no confidence floor
+
+There used to be one: `HERMES_JEV_MIN_CONFIDENCE` / `jev.min_confidence`,
+default 0.5, below which the band was discarded and the turn kept the session's
+model. It is **gone**, and it went out with `other`.
+
+Its job was to catch "the model cannot tell". Under a `score` over three bare
+rungs that was the only signal available — a thin, flat distribution was the
+model's only way to express doubt. `other` is that signal now, and it is an
+explicit one.
+
+What was left of the floor was worse than nothing: it discarded **correct**
+bands whose probability mass had merely split with the residual. Measured, a
+report-layout request bands `medium` at 0.30 — the band is right, `other` is
+just a plausible runner-up. Throwing that away routed the turn to the default
+model for a reason that had nothing to do with the band being wrong. Having both
+mechanisms also meant every criterion you wrote moved confidence, so the
+threshold needed re-tuning each time.
+
+The confidence is still on every log line. It is diagnostic now, not a gate:
+a band that keeps coming back thin is a band whose criterion needs rewriting.
+
+### What each band means
+
+`HERMES_JEV_CRITERIA_{LOW,MEDIUM,HIGH}` / `jev.criteria.<band>`, merging the same
+way the band models do: env overrides config per band, and a band left empty
+falls back to the built-in criterion in `DEFAULT_COMPLEXITY_CRITERIA`. A blank
+string is a fallback, not an empty description — sending an option with nothing
+written against it strips exactly the calibration the answer is then gated on.
+
+The defaults describe a **general assistant** and are phrased in terms of effort.
+Override them when this agent's idea of "hard" differs: a fleet-wide scan is
+routine for a SOC agent and a research project for a support bot.
+
+`other` is **not** configurable. It is defined by the other three — "fits none of
+them" — so a deployment describing it separately could only create overlap with
+bands it also defined.
+
 ### Measured bandings
 
 Live, against the configured endpoint:
 
-One measured run, `min_confidence` 0.5:
+One measured run, **default criteria and no `agent` context** — so nothing tells
+Jev what this assistant is for:
 
 | request | band | confidence | effect |
 |---|---|---|---|
-| 谢谢 | `low` | 1.00 | → `HERMES_JEV_MODEL_LOW` |
-| 今晚吃什么？ | `low` | 0.75 | → `HERMES_JEV_MODEL_LOW` |
-| 把 users 表加个 email 唯一索引 | `medium` | 0.81 | → `HERMES_JEV_MODEL_MEDIUM` |
-| 帮我把这份周报排版一下 | `medium` | 0.68 | → `HERMES_JEV_MODEL_MEDIUM` |
-| 重新设计整个零信任接入架构，并给出分阶段迁移方案 | `high` | 1.00 | → `HERMES_JEV_MODEL_HIGH` |
-| 生产环境 WAF 报了一批 SQL 注入告警，有人看一下吗 | `high` | **0.22** | **default model** — below `min_confidence` |
+| 谢谢 | `low` | 0.99 | → `HERMES_JEV_MODEL_LOW` |
+| 今晚吃什么？ | `low` | 0.52 | → `HERMES_JEV_MODEL_LOW` |
+| 把 users 表加个 email 唯一索引 | `low` / `medium` | ~0.5 | **unstable — see below** |
+| 帮我把这份周报排版一下 | `medium` | 0.51 | → `HERMES_JEV_MODEL_MEDIUM` |
+| 重新设计整个零信任接入架构，并给出分阶段迁移方案 | `high` | 0.98 | → `HERMES_JEV_MODEL_HIGH` |
+| 生产环境 WAF 报了一批 SQL 注入告警，有人看一下吗 | `high` | **0.27** | → `HERMES_JEV_MODEL_HIGH` |
 
-The last row is the gate doing its job: an under-specified alert could be a
-one-line "yes that's a false positive" or a full investigation, Jev says so with
-a low confidence, and the turn declines to move off the session model rather
-than guessing.
+Every row routes — there is no floor. The last one is the case worth watching:
+an under-specified alert could be a one-line "false positive" or a full
+investigation, and 0.27 says Jev knows that. It still runs on the `high` model.
+If that is wrong for your deployment, the fix is a `medium` criterion that names
+alert triage, not a threshold — see *Tuning*.
+
+### `other` absorbs off-domain work once `agent` is configured
+
+Same requests, same default criteria, with a SOC `agent` description added to
+the state:
+
+| request | no context | `+agent` |
+|---|---|---|
+| 谢谢 | `low` (0.99) | `low` (0.96) |
+| 今晚吃什么？ | `low` (0.52) | **`other` (0.80)** |
+| 把 users 表加个 email 唯一索引 | `medium` (0.83) | `medium` (0.66) |
+| 帮我把这份周报排版一下 | `medium` (0.50) | `medium` (**0.30**) |
+| 重新设计整个零信任接入架构，并给出分阶段迁移方案 | `high` (0.98) | `high` (0.98) |
+| 生产环境 WAF 报了一批 SQL 注入告警，有人看一下吗 | `high` (**0.27**) | **`medium` (0.51)** |
+
+**Read this before turning the feature on.** "今晚吃什么？" is a real request
+that any generic reading bands as `low`, but it is not what a SOC assistant's
+bands describe, so it becomes `other` and runs on the default model. This is the
+feature behaving as specified — `other` means "matched none of the three
+criteria", and the criteria are read in the context of `agent`. The consequence
+is that **a narrow `agent_description` narrows what gets re-routed**, and a
+deployment that wants off-domain work banded by effort anyway should widen the
+criteria rather than fight the question.
+
+Removing the `tools` inventory made this much less aggressive: with the
+inventory in the state, rows 3 and 4 were `other` at 0.88 and 0.96 — a unique
+index and a report layout, both perfectly ordinary `medium` work, pushed off the
+routing table. With `agent` alone they stay `medium`.
+
+Row 4 shows the residual still taking mass: `medium` survives but at 0.30, under
+the gate, so that turn reaches the default model anyway — through an undecided
+answer rather than an `other`.
+
+Two wordings that push back against this were measured and **rejected**: telling
+the model that "outside the subject area is not a reason to pick `other`" moved
+those rows back into bands, but at 0.37–0.50 confidence, against a clean 0.80+
+for `other`. That was measured while a confidence floor still existed, and under
+it those rows reached the default model anyway; the wordings are still rejected
+now, because splitting the mass three ways to avoid a legible `other` makes the
+answer less readable for no change in routing.
+
+A narrow criterion set has the mirror-image cost: with SOC-specific criteria
+that never mention greetings, `谢谢` fell to `low` (0.44) with `other` at 0.42 —
+under the gate. If you write your own criteria, make sure the cheap ambient
+traffic your agent actually receives is described by one of them.
 
 ### Numbers here are one run, not constants
 
-Jev's probabilities move a few points between runs on identical input — the
-complexity rows above drifted 0.75↔0.79, 0.78↔0.81, 0.22↔0.26 across two
-measurements; the chosen *band* did not change. Two consequences:
+Jev's probabilities move a few points between runs on identical input, and at
+~0.5 **the band moves too**. Measured on "把 users 表加个 email 唯一索引" with no
+`agent` context: `medium` 0.83 in one session, then `low` 0.47–0.53 across five
+consecutive calls in another. Five calls in a row agree with each other; runs
+separated in time do not.
+
+Settled cases do not do this — "谢谢" was `low` 0.98–0.99 and the zero-trust
+redesign `high` 0.99 across every repeat. **The confidence figure is what tells
+the two apart**, which is the main reason it is still logged now that it gates
+nothing: a band that keeps printing ~0.5 is one whose criterion does not
+separate your traffic.
+
+Three consequences:
 
 - Treat every figure in this document as illustrative of the **separation**
   between cases, not as a reproducible constant.
-- A case sitting within a few points of `relevance_threshold` or
-  `min_confidence` **will flap** between runs. Set thresholds with margin; if a
-  particular message type matters, measure it rather than reasoning from these
-  tables.
+- A case sitting within a few points of `relevance_threshold` **will flap**
+  between runs. Set it with margin; if a particular message type matters,
+  measure it rather than reasoning from these tables.
+- A complexity case sitting near ~0.5 will change **band** between runs, and
+  with no confidence floor that now means it changes **model**. Under
+  `complexity_scope: session` (the default) it is decided once per conversation,
+  so the flap is between conversations rather than within one; under `turn` it
+  is per message. Either way the fix is a criterion that claims the case
+  outright.
 
 ### Tuning
 
-`min_confidence` (default `0.5`) is the only knob, and it trades routing
-coverage against stability:
+**The criteria are the only knob**, and they are the right one: they say what
+you actually mean, where a threshold could only say "act on fewer answers".
 
-- **raise it** (0.7+) — fewer turns get banded, more run on the session model;
-  use this if you see model churn mid-conversation
-- **lower it** (0.2–0.3) — nearly every turn gets banded; only sensible when all
-  three bands are configured and the models are close in behavior
+- a request type landing in the wrong band → name it in the right band's
+  criterion
+- a request type you would rather not re-route at all → leave it out of all
+  three and let `other` take it
+- a band that keeps coming back thin in the log → its criterion does not
+  describe your traffic; rewrite it
 
-The question text itself is a code constant, not configuration. The rung
-definitions ("low = a greeting, lookup, or single short factual answer…") are
-generic on purpose — if your workload needs domain-specific rungs, that is a
-change to `_COMPLEXITY_QUESTION`, and the band names must stay `low`/`medium`/
-`high` because `HERMES_JEV_MODEL_*` and `jev.models.*` key off them.
+Two knobs that no longer exist: `HERMES_JEV_MIN_CONFIDENCE` (see *There is no
+confidence floor*) and `HERMES_JEV_TOOLS` (see *The criterion replaces the tool
+inventory*). Both were removed in favour of criteria, which do the same jobs
+directly.
+
+The **band definitions are configuration**; the question's framing is still a
+code constant, and the band names must stay `low`/`medium`/`high` because
+`HERMES_JEV_MODEL_*`, `HERMES_JEV_CRITERIA_*` and `jev.models.*` /
+`jev.criteria.*` all key off them.
+
+Note that adding the fourth option costs a few points of confidence on
+genuinely ambiguous requests, because `other` is a plausible competitor for
+probability mass. That no longer changes any routing decision — it only makes
+the log line look less settled.
 
 ### Prompt-caching note
 
@@ -679,10 +837,11 @@ boundary **at most once** — the band is decided on the first turn and reused, 
 there is no mid-conversation switch to invalidate the cache. This is the main
 reason `session` is the default rather than `turn`.
 
-Under `complexity_scope: turn` every message can re-route and therefore rebuild.
-`min_confidence` is the brake there: it keeps a marginal rating from moving the
-turn at all. Raise it if you see churn; the fallback is always the session's own
-model.
+Under `complexity_scope: turn` every message can re-route and therefore rebuild,
+and with the confidence floor gone there is no longer a brake on that. If you
+see churn, the fix is `complexity_scope: session` (the default) rather than a
+threshold — `session` crosses the cache boundary at most once by construction,
+where a threshold only made churn less frequent.
 
 On the WORKAGENT A2A service the agent is long-lived, so the band is applied to
 it in place. Its whole runtime — model, provider, credentials, `base_url`,
@@ -726,16 +885,17 @@ layer decided and what it cost. Real output:
 INFO  [Jev] channel admission: ANSWER in 1260ms (api) — in_scope=0.98 wants_answer=0.97 threshold=0.70 chat=安全运营大群
 INFO  [Jev] channel admission: ANSWER in 0ms (cache) — in_scope=0.98 wants_answer=0.97 threshold=0.70 chat=安全运营大群
 INFO  [Jev] channel admission: STAY QUIET in 1132ms (api) — in_scope=0.02 wants_answer=0.47 threshold=0.70 chat=安全运营大群
-INFO  [Jev] complexity: high in 1077ms (api) — confidence=1.00 >= 0.50
+INFO  [Jev] complexity: high in 1077ms (api) — confidence=1.00
 INFO  [Jev] complexity: high reused for this session (scope=session) -> claude-opus-5
-INFO  [Jev] complexity: high REJECTED in 871ms (api) — confidence=0.27 < 0.50, keeping the default model
+INFO  [Jev] complexity: high in 871ms (api) — confidence=0.27
+INFO  [Jev] complexity: OTHER in 964ms (api) — confidence=0.88, no band's criteria matched; keeping the default model
 WARN  [Jev] channel admission: UNDECIDED in 15ms (api) — ConnectError; caller keeps its default
 WARN  [Jev] complexity: UNDECIDED in 6ms (api) — ConnectError; keeping the default model
 ```
 
 | level | when | why that level |
 |---|---|---|
-| `INFO` | a decision was reached — `ANSWER` / `STAY QUIET`, a band, a band `REJECTED` for low confidence, or a band `reused` from the session | This is the record of what the layer did. `STAY QUIET` is logged as loudly as `ANSWER`, because a silent bot is exactly what an operator comes to the log to explain. A `reused` line has no latency figure: nothing was asked. |
+| `INFO` | a decision was reached — `ANSWER` / `STAY QUIET`, a band, `OTHER`, or a band `reused` from the session | This is the record of what the layer did. `STAY QUIET` is logged as loudly as `ANSWER`, because a silent bot is exactly what an operator comes to the log to explain. A `reused` line has no latency figure: nothing was asked. The `confidence=` figure on a band line gates nothing — it is there so a band that keeps coming back thin is visible as a criterion that needs rewriting. |
 | `WARNING` | `UNDECIDED` — transport error, or an answer missing from the response | Something is wrong with the classifier, and the feature silently degraded. |
 | `DEBUG` | skipped — empty text, or no client because `TYPESAFE_API_KEY` is unset | Ordinary and expected; would otherwise flood the log on every turn with the feature off. |
 
@@ -769,8 +929,8 @@ silence, a timed-out complexity call means the default model.
 
 | File | Role |
 |---|---|
-| `agent/jev_client.py` | transport + the `noul` / `choice` / `score` primitives, `_parse_answer` (legend/argmax normalization), TTL+LRU decision memo |
-| `agent/jev_policy.py` | `_SCOPE_QUESTION`, `_WANTS_ANSWER_QUESTION`, `_COMPLEXITY_QUESTION`, `_relevance_state`, settings resolution, feature gates, band → model |
+| `agent/jev_client.py` | transport + the `noul` / `choice` / `score` primitives (`choice` carries a per-option criterion), `_parse_answer` (legend/argmax normalization), TTL+LRU decision memo |
+| `agent/jev_policy.py` | `_SCOPE_QUESTION`, `_WANTS_ANSWER_QUESTION`, `_COMPLEXITY_QUESTION`, `DEFAULT_COMPLEXITY_CRITERIA`, `_complexity_criteria`, `_relevance_state`, settings resolution, feature gates, band → model |
 | `gateway/run.py` | `_apply_jev_complexity_route` on the turn route |
 | `plugins/platforms/feishu/adapter.py` | `_admit` → `group_mention_missing`, the gate, the forced topic reply |
 | `workagent/backend/a2a_service/executor.py` | both gates on the A2A turn |
@@ -779,6 +939,9 @@ silence, a timed-out complexity call means the default model.
 
 - Jev is a **decision** surface, not a generator. It does not replace the
   conversational model; it chooses which one runs and whether one runs at all.
+- `other` and a rejected band both end on the default model, so a deployment
+  with narrow criteria routes less, not wrongly. The failure mode to watch for
+  is the opposite one: criteria so broad that everything lands in `high`.
 - Complexity routing yields to the session `/model` command, but **not** to a
   `channel_overrides.model` in `config.yaml` — a channel pinned to a model will
   still be re-routed by band. If that is wrong for your deployment, the same
@@ -789,9 +952,14 @@ silence, a timed-out complexity call means the default model.
   is silent.
 - Every decision is one extra HTTP round trip. Measured on the configured
   endpoint: admission ≈ 471 input / 39 output tokens, $0.0000198; complexity
-  ≈ 395 / 19 tokens, $0.0000166; **0.9–1.3s** each through a proxy (see
-  *Measured latency* above). A channel message with both features on costs two
-  calls — the two states differ (`business_scope` + `message` vs. `request`), so
+  ≈ 534 / 47 tokens, $0.0000224; **0.9–1.3s** each through a proxy (see
+  *Measured latency* above). Complexity got **more** expensive with the four
+  described options, not less: it was ≈ 395 / 19 when it was a `score` over
+  three bare rungs plus a tool inventory. The four criteria are ~140 input
+  tokens, and a 4-way distribution is a longer answer than a 3-rung score. That
+  is the price of the options being configurable and of `other` existing;
+  writing *shorter* criteria is the lever if it matters. A channel message with both features on costs two
+  calls — the two states differ (`agent` + `message` vs. `agent` + `request`), so
   they cannot share a request, and keeping them separate is what lets each
   feature be toggled on its own.
 - The decision memo in `JevClient` is keyed on the exact `(model, endpoint,

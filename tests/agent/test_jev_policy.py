@@ -15,11 +15,12 @@ _JEV_ENV = [
     "TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_MODEL",
     "HERMES_JEV_TIMEOUT", "HERMES_JEV_CHANNEL_AUTOREPLY",
     "HERMES_JEV_COMPLEXITY_ROUTING", "HERMES_JEV_BUSINESS_SCOPE",
-    "HERMES_JEV_RELEVANCE_THRESHOLD", "HERMES_JEV_MIN_CONFIDENCE",
+    "HERMES_JEV_RELEVANCE_THRESHOLD",
     "HERMES_JEV_MODEL_LOW", "HERMES_JEV_MODEL_MEDIUM", "HERMES_JEV_MODEL_HIGH",
     "HERMES_JEV_PROVIDER_LOW", "HERMES_JEV_PROVIDER_MEDIUM", "HERMES_JEV_PROVIDER_HIGH",
-    "HERMES_JEV_AGENT_DESCRIPTION", "HERMES_JEV_TOOLS", "HERMES_JEV_REMOTE_AGENTS",
+    "HERMES_JEV_AGENT_DESCRIPTION", "HERMES_JEV_REMOTE_AGENTS",
     "HERMES_JEV_AUTOREPLY", "HERMES_JEV_THREAD_AUTOREPLY",
+    "HERMES_JEV_CRITERIA_LOW", "HERMES_JEV_CRITERIA_MEDIUM", "HERMES_JEV_CRITERIA_HIGH",
 ]
 
 
@@ -37,15 +38,16 @@ def _noul(probability: float):
     return _parse_answer("noul", {"type": "noul", "noul": probability})
 
 
-def _score(label: str, confidence: float):
+def _band(label: str, confidence: float):
+    """A complexity answer as Jev returns it: a choice over the four options."""
     return _parse_answer(
-        "score",
+        "choice",
         {
-            "type": "score",
-            "legend": {"0": "low", "1": "medium", "2": "high"},
+            "type": "choice",
+            "choice": label,
             "probabilities": {
-                str(i): (1.0 if name == label else 0.0)
-                for i, name in enumerate(("low", "medium", "high"))
+                name: (1.0 if name == label else 0.0)
+                for name in jev_policy.COMPLEXITY_CHOICES
             },
             "confidence": confidence,
         },
@@ -78,7 +80,6 @@ def test_defaults_apply_with_no_env_and_no_config(jev_env):
     assert settings.channel_autoreply is False
     assert settings.complexity_routing is False
     assert settings.relevance_threshold == pytest.approx(0.7)
-    assert settings.min_confidence == pytest.approx(0.5)
     assert settings.tier_models == {}
 
 
@@ -92,7 +93,6 @@ def test_config_yaml_supplies_settings_when_no_env_is_set(jev_env):
             "complexity_routing": True,
             "business_scope": "from config",
             "relevance_threshold": 0.9,
-            "min_confidence": 0.25,
             "models": {"low": "cfg-low", "high": {"model": "cfg-high", "provider": "openai"}},
         }
     )
@@ -104,7 +104,6 @@ def test_config_yaml_supplies_settings_when_no_env_is_set(jev_env):
     assert settings.complexity_routing is True
     assert settings.business_scope == "from config"
     assert settings.relevance_threshold == pytest.approx(0.9)
-    assert settings.min_confidence == pytest.approx(0.25)
     assert settings.tier_models["low"] == TierModel(model="cfg-low")
     assert settings.tier_models["high"] == TierModel(model="cfg-high", provider="openai")
     assert "medium" not in settings.tier_models
@@ -305,21 +304,39 @@ async def test_judge_channel_relevance_async_mirrors_the_sync_call():
 
 @pytest.mark.parametrize("band", ["low", "medium", "high"])
 def test_a_confident_band_is_returned(band):
-    client = _StubClient({"complexity": _score(band, 0.9)})
+    client = _StubClient({"complexity": _band(band, 0.9)})
     settings = jev_policy.JevSettings(api_key="k")
     assert jev_policy.judge_complexity("…", settings=settings, client=client) == band
 
 
-def test_a_band_below_min_confidence_is_discarded():
-    client = _StubClient({"complexity": _score("high", 0.26)})
-    settings = jev_policy.JevSettings(api_key="k", min_confidence=0.5)
-    assert jev_policy.judge_complexity("…", settings=settings, client=client) is None
-
-
-def test_lowering_min_confidence_accepts_the_same_answer():
-    client = _StubClient({"complexity": _score("high", 0.26)})
-    settings = jev_policy.JevSettings(api_key="k", min_confidence=0.2)
+@pytest.mark.parametrize("confidence", [0.99, 0.5, 0.26, 0.01, 0.0])
+def test_there_is_no_confidence_floor(confidence):
+    # `other` is how the model says "I cannot place this" now. A thin-spread
+    # answer is still a pick, and discarding it was throwing away CORRECT
+    # bands whose mass had split with the residual — measured, a report-layout
+    # task banded `medium` at 0.30.
+    client = _StubClient({"complexity": _band("high", confidence)})
+    settings = jev_policy.JevSettings(api_key="k")
     assert jev_policy.judge_complexity("…", settings=settings, client=client) == "high"
+
+
+def test_the_settings_no_longer_carry_a_confidence_floor():
+    assert not hasattr(jev_policy.JevSettings(), "min_confidence")
+
+
+def test_the_min_confidence_environment_variable_is_no_longer_read(
+    jev_env, monkeypatch
+):
+    monkeypatch.setenv("HERMES_JEV_MIN_CONFIDENCE", "0.9")
+    jev_env["min_confidence"] = 0.9
+    settings = jev_policy.load_jev_settings()
+    assert not hasattr(settings, "min_confidence")
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    client = _StubClient({"complexity": _band("high", 0.05)})
+    assert jev_policy.judge_complexity(
+        "…", settings=jev_policy.load_jev_settings(), client=client,
+    ) == "high"
 
 
 def test_an_unreachable_service_yields_no_band():
@@ -328,7 +345,7 @@ def test_an_unreachable_service_yields_no_band():
 
 
 def test_empty_text_is_not_classified():
-    client = _StubClient({"complexity": _score("high", 0.9)})
+    client = _StubClient({"complexity": _band("high", 0.9)})
     settings = jev_policy.JevSettings(api_key="k")
     assert jev_policy.judge_complexity("  ", settings=settings, client=client) is None
     assert client.asked == []
@@ -336,9 +353,150 @@ def test_empty_text_is_not_classified():
 
 @pytest.mark.asyncio
 async def test_judge_complexity_async_mirrors_the_sync_call():
-    client = _StubClient({"complexity": _score("medium", 0.9)})
+    client = _StubClient({"complexity": _band("medium", 0.9)})
     settings = jev_policy.JevSettings(api_key="k")
     assert await jev_policy.judge_complexity_async("…", settings=settings, client=client) == "medium"
+
+
+# --- the fourth option: `other` --------------------------------------------
+#
+# The three bands' criteria are configurable, so they will not cover everything
+# that arrives. Asked as a `score` the model had to place every request on the
+# low→high line and an out-of-criteria request still got routed by whichever
+# band it was forced onto. `other` gives it somewhere honest to go.
+
+
+def test_other_is_returned_as_a_real_answer():
+    client = _StubClient({"complexity": _band("other", 0.95)})
+    settings = jev_policy.JevSettings(api_key="k")
+    assert jev_policy.judge_complexity("…", settings=settings, client=client) == "other"
+
+
+def test_other_routes_to_the_default_model():
+    settings = jev_policy.JevSettings(
+        api_key="k",
+        tier_models={t: jev_policy.TierModel(model=f"{t}-model")
+                     for t in jev_policy.COMPLEXITY_TIERS},
+    )
+    assert jev_policy.resolve_tier_model("other", settings) is None
+
+
+def test_a_models_entry_named_other_cannot_create_a_fourth_band():
+    # `other` means "the default model". A stray jev.models.other must not
+    # quietly turn the residual into a routable band.
+    settings = jev_policy.JevSettings(
+        api_key="k", tier_models={"other": jev_policy.TierModel(model="sneaky")},
+    )
+    assert jev_policy.resolve_tier_model("other", settings) is None
+
+
+def test_other_is_not_gated_on_confidence_either():
+    client = _StubClient({"complexity": _band("other", 0.2)})
+    settings = jev_policy.JevSettings(api_key="k")
+    assert jev_policy.judge_complexity("…", settings=settings, client=client) == "other"
+
+
+def test_an_answer_outside_the_four_options_is_undecided():
+    client = _StubClient({"complexity": _band("gigantic", 0.99)})
+    settings = jev_policy.JevSettings(api_key="k")
+    assert jev_policy.judge_complexity("…", settings=settings, client=client) is None
+
+
+def test_other_says_so_in_the_log(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient({"complexity": _band("other", 0.95)})
+    settings = jev_policy.JevSettings(api_key="k")
+    jev_policy.judge_complexity("…", settings=settings, client=client)
+
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "OTHER" in line
+    assert "default model" in line
+    assert "ms" in line
+
+
+# --- what each band MEANS is configurable ----------------------------------
+
+
+def test_the_four_options_reach_the_wire_with_their_criteria():
+    client = _StubClient({"complexity": _band("low", 0.9)})
+    settings = jev_policy.JevSettings(api_key="k")
+    jev_policy.judge_complexity("…", settings=settings, client=client)
+
+    _, questions = client.asked[0]
+    question = questions["complexity"]
+    assert question["type"] == "choice"
+    assert list(question["criteria"]) == list(jev_policy.COMPLEXITY_CHOICES)
+    assert all(question["criteria"].values()), "every option must carry a criterion"
+
+
+def test_the_instructions_do_not_also_define_the_bands():
+    # The definitions live in `criteria` precisely so an override REPLACES
+    # them. Instructions that defined them too would contradict the override.
+    for band, criterion in jev_policy.DEFAULT_COMPLEXITY_CRITERIA.items():
+        assert criterion not in jev_policy._COMPLEXITY_QUESTION, band
+
+
+def test_an_unconfigured_band_uses_the_built_in_criterion():
+    criteria = jev_policy._complexity_criteria(jev_policy.JevSettings())
+    for band in jev_policy.COMPLEXITY_TIERS:
+        assert criteria[band] == jev_policy.DEFAULT_COMPLEXITY_CRITERIA[band]
+    assert criteria["other"] == jev_policy._OTHER_CRITERION
+
+
+def test_a_configured_band_replaces_only_its_own_criterion():
+    settings = jev_policy.JevSettings(
+        complexity_criteria={"high": "A fleet-wide campaign."},
+    )
+    criteria = jev_policy._complexity_criteria(settings)
+    assert criteria["high"] == "A fleet-wide campaign."
+    assert criteria["low"] == jev_policy.DEFAULT_COMPLEXITY_CRITERIA["low"]
+    assert criteria["medium"] == jev_policy.DEFAULT_COMPLEXITY_CRITERIA["medium"]
+
+
+def test_a_blank_criterion_falls_back_rather_than_sending_nothing():
+    # An empty option description is worse than a default one: it strips the
+    # calibration the answer is then gated on.
+    settings = jev_policy.JevSettings(complexity_criteria={"low": "   ", "medium": ""})
+    criteria = jev_policy._complexity_criteria(settings)
+    assert criteria["low"] == jev_policy.DEFAULT_COMPLEXITY_CRITERIA["low"]
+    assert criteria["medium"] == jev_policy.DEFAULT_COMPLEXITY_CRITERIA["medium"]
+
+
+def test_the_residual_criterion_is_not_configurable():
+    settings = jev_policy.JevSettings(
+        complexity_criteria={"other": "anything I feel like"},
+    )
+    assert jev_policy._complexity_criteria(settings)["other"] == jev_policy._OTHER_CRITERION
+
+
+def test_criteria_come_from_config(jev_env):
+    jev_env["criteria"] = {"low": "from config"}
+    assert jev_policy.load_jev_settings().complexity_criteria == {"low": "from config"}
+
+
+def test_criteria_come_from_the_environment(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_CRITERIA_MEDIUM", "from env")
+    assert jev_policy.load_jev_settings().complexity_criteria == {"medium": "from env"}
+
+
+def test_the_environment_wins_per_band(jev_env, monkeypatch):
+    # Same rule as the band models: env overrides config per FIELD, so setting
+    # one band's criterion in the environment leaves the others as configured.
+    jev_env["criteria"] = {"low": "config low", "high": "config high"}
+    monkeypatch.setenv("HERMES_JEV_CRITERIA_LOW", "env low")
+    resolved = jev_policy.load_jev_settings().complexity_criteria
+    assert resolved == {"low": "env low", "high": "config high"}
+
+
+def test_configured_criteria_reach_the_wire(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_CRITERIA_HIGH", "A fleet-wide campaign.")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    jev_policy.judge_complexity(
+        "…", settings=jev_policy.load_jev_settings(), client=client,
+    )
+    _, questions = client.asked[0]
+    assert questions["complexity"]["criteria"]["high"] == "A fleet-wide campaign."
 
 
 # --- band → model ----------------------------------------------------------
@@ -352,7 +510,7 @@ def test_resolve_tier_model_returns_none_for_an_unconfigured_band():
 
 
 def test_route_model_for_request_is_a_no_op_while_routing_is_off(jev_env):
-    client = _StubClient({"complexity": _score("high", 0.9)})
+    client = _StubClient({"complexity": _band("high", 0.9)})
     assert jev_policy.route_model_for_request("…", client=client) is None
     assert client.asked == []
 
@@ -363,7 +521,7 @@ def test_route_model_for_request_returns_the_band_model():
         complexity_routing=True,
         tier_models={"high": TierModel(model="big-model")},
     )
-    client = _StubClient({"complexity": _score("high", 0.9)})
+    client = _StubClient({"complexity": _band("high", 0.9)})
     assert jev_policy.route_model_for_request("…", settings=settings, client=client).model == "big-model"
 
 
@@ -373,7 +531,7 @@ def test_a_band_with_no_configured_model_keeps_the_default():
         complexity_routing=True,
         tier_models={"high": TierModel(model="big-model")},
     )
-    client = _StubClient({"complexity": _score("low", 0.9)})
+    client = _StubClient({"complexity": _band("low", 0.9)})
     assert jev_policy.route_model_for_request("…", settings=settings, client=client) is None
 
 
@@ -632,10 +790,10 @@ def test_an_undecided_admission_warns_rather_than_passing_silently(caplog):
     assert "ms" in record.getMessage()
 
 
-def test_an_accepted_band_logs_its_label_confidence_and_latency(caplog):
+def test_a_band_logs_its_label_confidence_and_latency(caplog):
     caplog.set_level("INFO")
-    client = _StubClient({"complexity": _score("high", 0.9)})
-    settings = jev_policy.JevSettings(api_key="k", min_confidence=0.5)
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    settings = jev_policy.JevSettings(api_key="k")
     jev_policy.judge_complexity("…", settings=settings, client=client)
 
     line = _jev_records(caplog)[-1].getMessage()
@@ -644,16 +802,17 @@ def test_an_accepted_band_logs_its_label_confidence_and_latency(caplog):
     assert "ms" in line
 
 
-def test_a_rejected_band_says_why_it_was_rejected(caplog):
+def test_a_thin_band_is_applied_but_its_confidence_is_still_logged(caplog):
+    # The number is no longer a gate, but it is the thing an operator reads to
+    # decide whether a band criterion needs rewriting — so it stays on the line.
     caplog.set_level("INFO")
-    client = _StubClient({"complexity": _score("high", 0.22)})
-    settings = jev_policy.JevSettings(api_key="k", min_confidence=0.5)
-    jev_policy.judge_complexity("…", settings=settings, client=client)
+    client = _StubClient({"complexity": _band("high", 0.22)})
+    settings = jev_policy.JevSettings(api_key="k")
+    assert jev_policy.judge_complexity("…", settings=settings, client=client) == "high"
 
     line = _jev_records(caplog)[-1].getMessage()
-    assert "REJECTED" in line
-    assert "confidence=0.22" in line and "0.50" in line
-    assert "default model" in line
+    assert "confidence=0.22" in line
+    assert "REJECTED" not in line
 
 
 def test_an_undecided_band_warns_rather_than_passing_silently(caplog):
@@ -683,7 +842,7 @@ def test_a_client_without_ask_detailed_is_still_timed(caplog):
     # _StubClient implements only the minimal ``ask`` contract; the policy
     # layer times it itself so the log line is never missing its latency.
     caplog.set_level("INFO")
-    client = _StubClient({"complexity": _score("low", 0.9)})
+    client = _StubClient({"complexity": _band("low", 0.9)})
     assert not hasattr(client, "ask_detailed")
     settings = jev_policy.JevSettings(api_key="k")
     jev_policy.judge_complexity("…", settings=settings, client=client)
@@ -735,7 +894,7 @@ def _routing_settings(scope="session"):
 
 
 def test_session_scope_rates_once_and_reuses_the_band():
-    client = _StubClient({"complexity": _score("high", 0.9)})
+    client = _StubClient({"complexity": _band("high", 0.9)})
     settings = _routing_settings("session")
 
     first = jev_policy.route_model_for_request("big task", settings=settings,
@@ -746,8 +905,37 @@ def test_session_scope_rates_once_and_reuses_the_band():
     assert len(client.asked) == 1, "the follow-up must not be classified again"
 
 
+def test_session_scope_remembers_other_too():
+    # `other` is a confident answer that happens to route to the default model.
+    # Not remembering it would make a session whose first turn falls outside
+    # every band pay for a classification on every single turn, to be told the
+    # same thing each time.
+    client = _StubClient({"complexity": _band("other", 0.95)})
+    settings = _routing_settings("session")
+
+    first = jev_policy.route_model_for_request("a poem please", settings=settings,
+                                               client=client, session_key="sess-o")
+    second = jev_policy.route_model_for_request("another one", settings=settings,
+                                                client=client, session_key="sess-o")
+    assert first is second is None, "other keeps the default model"
+    assert len(client.asked) == 1
+
+
+def test_an_undecided_turn_is_still_not_remembered():
+    # The contrast with `other`: a transient failure must not pin a session to
+    # the default model, so the next turn tries again.
+    settings = _routing_settings("session")
+    jev_policy.route_model_for_request("big task", settings=settings,
+                                       client=_StubClient(None), session_key="sess-u")
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    again = jev_policy.route_model_for_request("big task", settings=settings,
+                                               client=client, session_key="sess-u")
+    assert again.model == "high-model"
+    assert len(client.asked) == 1, "the retry really did reach the classifier"
+
+
 def test_turn_scope_rates_every_turn():
-    client = _StubClient({"complexity": _score("high", 0.9)})
+    client = _StubClient({"complexity": _band("high", 0.9)})
     settings = _routing_settings("turn")
 
     jev_policy.route_model_for_request("big task", settings=settings,
@@ -759,8 +947,8 @@ def test_turn_scope_rates_every_turn():
 
 def test_turn_scope_can_move_a_conversation_between_bands():
     settings = _routing_settings("turn")
-    high = _StubClient({"complexity": _score("high", 0.9)})
-    low = _StubClient({"complexity": _score("low", 0.9)})
+    high = _StubClient({"complexity": _band("high", 0.9)})
+    low = _StubClient({"complexity": _band("low", 0.9)})
 
     assert jev_policy.route_model_for_request("big", settings=settings,
                                               client=high, session_key="s").model == "high-model"
@@ -770,8 +958,8 @@ def test_turn_scope_can_move_a_conversation_between_bands():
 
 def test_session_scope_keeps_the_first_band_even_when_the_work_changes():
     settings = _routing_settings("session")
-    high = _StubClient({"complexity": _score("high", 0.9)})
-    low = _StubClient({"complexity": _score("low", 0.9)})
+    high = _StubClient({"complexity": _band("high", 0.9)})
+    low = _StubClient({"complexity": _band("low", 0.9)})
 
     assert jev_policy.route_model_for_request("big", settings=settings,
                                               client=high, session_key="s").model == "high-model"
@@ -782,7 +970,7 @@ def test_session_scope_keeps_the_first_band_even_when_the_work_changes():
 
 
 def test_each_session_is_rated_independently():
-    client = _StubClient({"complexity": _score("high", 0.9)})
+    client = _StubClient({"complexity": _band("high", 0.9)})
     settings = _routing_settings("session")
 
     jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s1")
@@ -791,7 +979,7 @@ def test_each_session_is_rated_independently():
 
 
 def test_session_scope_without_a_session_key_degrades_to_per_turn():
-    client = _StubClient({"complexity": _score("high", 0.9)})
+    client = _StubClient({"complexity": _band("high", 0.9)})
     settings = _routing_settings("session")
 
     jev_policy.route_model_for_request("a", settings=settings, client=client)
@@ -806,24 +994,27 @@ def test_an_undecided_turn_is_not_remembered_so_the_next_turn_retries():
     assert jev_policy.route_model_for_request("a", settings=settings,
                                               client=broken, session_key="s") is None
 
-    working = _StubClient({"complexity": _score("high", 0.9)})
+    working = _StubClient({"complexity": _band("high", 0.9)})
     assert jev_policy.route_model_for_request("b", settings=settings,
                                               client=working, session_key="s").model == "high-model"
 
 
-def test_a_low_confidence_turn_is_not_remembered_either():
+def test_a_thin_band_is_remembered_like_any_other():
+    # There is no confidence floor, so a thin answer is a decision: it bands
+    # the turn AND pins the session, exactly as a confident one would.
     settings = _routing_settings("session")
-    unsure = _StubClient({"complexity": _score("high", 0.1)})
+    unsure = _StubClient({"complexity": _band("high", 0.1)})
     assert jev_policy.route_model_for_request("a", settings=settings,
-                                              client=unsure, session_key="s") is None
+                                              client=unsure, session_key="s").model == "high-model"
 
-    sure = _StubClient({"complexity": _score("low", 0.9)})
+    never_asked = _StubClient({"complexity": _band("low", 0.9)})
     assert jev_policy.route_model_for_request("b", settings=settings,
-                                              client=sure, session_key="s").model == "low-model"
+                                              client=never_asked, session_key="s").model == "high-model"
+    assert never_asked.asked == []
 
 
 def test_forgetting_a_session_makes_the_next_turn_rate_again():
-    client = _StubClient({"complexity": _score("high", 0.9)})
+    client = _StubClient({"complexity": _band("high", 0.9)})
     settings = _routing_settings("session")
 
     jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s")
@@ -839,7 +1030,7 @@ def test_forgetting_nothing_is_harmless():
 
 def test_a_reused_band_is_logged_with_its_scope(caplog):
     caplog.set_level("INFO")
-    client = _StubClient({"complexity": _score("high", 0.9)})
+    client = _StubClient({"complexity": _band("high", 0.9)})
     settings = _routing_settings("session")
 
     jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s")
@@ -853,7 +1044,7 @@ def test_a_reused_band_is_logged_with_its_scope(caplog):
 def test_a_remembered_band_still_honors_the_current_band_model():
     # The band is remembered, not the model: re-pointing a band at another
     # model must take effect on the next turn of an existing session.
-    client = _StubClient({"complexity": _score("high", 0.9)})
+    client = _StubClient({"complexity": _band("high", 0.9)})
     settings = _routing_settings("session")
     jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s")
 
@@ -868,7 +1059,7 @@ def test_a_remembered_band_still_honors_the_current_band_model():
 
 def test_the_session_memo_is_bounded():
     settings = _routing_settings("session")
-    client = _StubClient({"complexity": _score("low", 0.9)})
+    client = _StubClient({"complexity": _band("low", 0.9)})
     for i in range(jev_policy._SESSION_BAND_MAX_ENTRIES + 10):
         jev_policy.route_model_for_request("x", settings=settings,
                                            client=client, session_key=f"s{i}")
@@ -879,7 +1070,7 @@ def test_a_remembered_band_expires():
     import agent.jev_policy as jp
 
     settings = _routing_settings("session")
-    client = _StubClient({"complexity": _score("high", 0.9)})
+    client = _StubClient({"complexity": _band("high", 0.9)})
     now = [1000.0]
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(jp.time, "monotonic", lambda: now[0])
@@ -965,64 +1156,82 @@ def test_a_yaml_band_entry_is_read_in_both_forms(raw, expected):
     assert jev_policy._configured_tier(raw) == expected
 
 
-# --- complexity context: what the agent is and what it can do --------------
+# --- complexity context: what the agent is -------------------------------
 #
-# Complexity is a property of the task AS THIS AGENT WOULD DO IT: a request one
-# of its tools answers directly is cheaper than one it has to reason out. These
-# are stable per agent (unlike channel/sender), so they do not make the same
-# request band differently from one room to the next.
+# Complexity is a property of the task AS THIS AGENT WOULD DO IT. `agent` is
+# stable per agent (unlike channel/sender), so it cannot make the same request
+# band differently from one room to the next.
 
 
 def test_the_complexity_state_is_just_the_request_when_nothing_is_configured():
-    state, question = jev_policy._complexity_request("x", jev_policy.JevSettings())
+    state, question, _ = jev_policy._complexity_request("x", jev_policy.JevSettings())
     assert state == {"request": "x"}
     assert question == jev_policy._COMPLEXITY_QUESTION
 
 
-def test_agent_and_tools_join_the_complexity_state():
-    settings = jev_policy.JevSettings(
-        agent_description="A SOC assistant.", tools="threat_intel: reputation lookup",
-    )
-    state, question = jev_policy._complexity_request("x", settings)
-    assert state == {
-        "request": "x",
-        "agent": "A SOC assistant.",
-        "tools": "threat_intel: reputation lookup",
-    }
-    assert "`agent`" in question and "`tools`" in question
+def test_the_agent_description_joins_the_complexity_state():
+    settings = jev_policy.JevSettings(agent_description="A SOC assistant.")
+    state, question, _ = jev_policy._complexity_request("x", settings)
+    assert state == {"request": "x", "agent": "A SOC assistant."}
+    assert "`agent`" in question
 
 
 @pytest.mark.parametrize(
-    "agent_description, tools, expect_agent, expect_tools",
-    [
-        ("A SOC assistant.", "", True, False),
-        ("", "threat_intel: x", False, True),
-        ("A SOC assistant.", "threat_intel: x", True, True),
-        ("", "", False, False),
-        ("   ", "   ", False, False),
-    ],
+    "agent_description, expect_agent",
+    [("A SOC assistant.", True), ("", False), ("   ", False), (None, False)],
 )
 def test_the_question_names_only_the_fields_actually_sent(
-    agent_description, tools, expect_agent, expect_tools
+    agent_description, expect_agent
 ):
     # A question referencing a state key the request does not carry is worse
     # than no context at all.
-    settings = jev_policy.JevSettings(agent_description=agent_description, tools=tools)
-    state, question = jev_policy._complexity_request("x", settings)
+    settings = jev_policy.JevSettings(agent_description=agent_description or "")
+    state, question, _ = jev_policy._complexity_request("x", settings)
     assert ("agent" in state) is expect_agent
-    assert ("tools" in state) is expect_tools
     assert ("`agent`" in question) is expect_agent
-    assert ("`tools`" in question) is expect_tools
 
 
-def test_a_structured_tool_inventory_is_rendered_for_the_wire():
-    # JevSettings is constructed directly in places, so the state must carry a
-    # readable block rather than a nested object.
+def test_the_complexity_state_carries_nothing_but_request_and_agent():
+    # The state is a closed set, asserted as such: anything else added here
+    # either duplicates `agent` or varies per room, and both make the same
+    # request band differently from one turn to the next.
     settings = jev_policy.JevSettings(
-        tools={"threat_intel": "reputation lookup", "terminal": "run shell"},
+        api_key="k",
+        agent_description="A SOC assistant.",
+        remote_agents={"avgc": "vuln scanning"},
+        complexity_criteria={"high": "A campaign."},
     )
-    state, _ = jev_policy._complexity_request("x", settings)
-    assert state["tools"] == "threat_intel: reputation lookup\nterminal: run shell"
+    state, _, _ = jev_policy._complexity_request("scan this subnet", settings)
+    assert set(state) == {"request", "agent"}
+
+
+@pytest.mark.parametrize("stale", ["tools", "business_scope", "remote_agents"])
+def test_no_tool_inventory_reaches_the_complexity_request(stale):
+    # `tools` was a second, hand-maintained copy of what the agent can do. It
+    # drifted from the live toolset and duplicated what `agent` already says;
+    # a band criterion is the supported way to tell Jev that a kind of request
+    # is cheap for this deployment.
+    settings = jev_policy.JevSettings(
+        api_key="k", agent_description="A SOC assistant.",
+        remote_agents={"avgc": "vuln scanning"},
+    )
+    state, question, _ = jev_policy._complexity_request("x", settings)
+    assert stale not in state
+    assert f"`{stale}`" not in question
+
+
+def test_the_settings_no_longer_carry_a_tool_inventory():
+    assert not hasattr(jev_policy.JevSettings(), "tools")
+
+
+def test_the_tools_environment_variable_is_no_longer_read(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_TOOLS", "threat_intel: x")
+    jev_env["tools"] = {"threat_intel": "x"}
+    settings = jev_policy.load_jev_settings()
+    assert not hasattr(settings, "tools")
+    state, question, _ = jev_policy._complexity_request("x", settings)
+    assert state == {"request": "x"}
+    assert question == jev_policy._COMPLEXITY_QUESTION
 
 
 @pytest.mark.parametrize(
@@ -1041,46 +1250,29 @@ def test_a_structured_tool_inventory_is_rendered_for_the_wire():
         ("  spaced  ", "spaced"),
     ],
 )
-def test_tool_inventory_forms(raw, expected):
-    assert jev_policy._normalize_tools(raw) == expected
+def test_inventory_forms(raw, expected):
+    # Still exercised: `remote_agents` accepts exactly these forms.
+    assert jev_policy._normalize_inventory(raw) == expected
 
 
-def test_the_context_comes_from_env_and_config(jev_env, monkeypatch):
+def test_the_agent_description_comes_from_env_and_config(jev_env, monkeypatch):
     jev_env["agent_description"] = "from config"
-    jev_env["tools"] = {"a": "x"}
-    settings = jev_policy.load_jev_settings()
-    assert settings.agent_description == "from config"
-    assert settings.tools == "a: x"
+    assert jev_policy.load_jev_settings().agent_description == "from config"
 
     monkeypatch.setenv("HERMES_JEV_AGENT_DESCRIPTION", "from env")
-    monkeypatch.setenv("HERMES_JEV_TOOLS", "b: y")
-    settings = jev_policy.load_jev_settings()
-    assert settings.agent_description == "from env"
-    assert settings.tools == "b: y"
+    assert jev_policy.load_jev_settings().agent_description == "from env"
 
 
 def test_the_context_reaches_the_request_judge_complexity_sends():
-    client = _StubClient({"complexity": _score("low", 0.9)})
+    client = _StubClient({"complexity": _band("low", 0.9)})
     settings = jev_policy.JevSettings(
-        api_key="k", agent_description="A SOC assistant.", tools="threat_intel: x",
+        api_key="k", agent_description="A SOC assistant.",
     )
     jev_policy.judge_complexity("look up an IP", settings=settings, client=client)
 
     state, questions = client.asked[0]
     assert state["agent"] == "A SOC assistant."
-    assert state["tools"] == "threat_intel: x"
-    assert "`tools`" in questions["complexity"]["instructions"]
-
-
-def test_the_tool_inventory_does_not_leak_into_the_admission_request():
-    # `tools` rates how much WORK a request is; admission only asks whether the
-    # request is this agent's business at all.
-    client = _StubClient({"in_scope": _noul(0.9), "wants_answer": _noul(0.9)})
-    settings = _settings(tools="threat_intel: x")
-    jev_policy.judge_channel_relevance("hello", settings=settings, client=client)
-
-    state, _ = client.asked[0]
-    assert "tools" not in state
+    assert "`agent`" in questions["complexity"]["instructions"]
 
 
 # --- admission scope: the agent, plus what it can delegate to --------------
@@ -1214,7 +1406,7 @@ def test_the_log_omits_delegation_when_it_was_not_asked(caplog):
     assert "delegatable" not in _jev_records(caplog)[-1].getMessage()
 
 
-def test_remote_agents_accept_the_same_forms_as_tools(jev_env, monkeypatch):
+def test_remote_agents_accept_every_inventory_form(jev_env, monkeypatch):
     jev_env["remote_agents"] = [{"name": "avgc", "description": "vuln scanning"}]
     assert jev_policy.load_jev_settings().remote_agents == "avgc: vuln scanning"
 
@@ -1227,7 +1419,7 @@ def test_remote_agents_do_not_reach_the_complexity_request():
     settings = jev_policy.JevSettings(
         agent_description="A SOC assistant.", remote_agents={"avgc": "vuln scanning"},
     )
-    state, _ = jev_policy._complexity_request("scan this subnet", settings)
+    state, _, _ = jev_policy._complexity_request("scan this subnet", settings)
     assert "remote_agents" not in state
 
 

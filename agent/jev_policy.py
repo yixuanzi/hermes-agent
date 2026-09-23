@@ -6,13 +6,16 @@ Two independent, independently-gated decisions sit in front of the agent loop:
    normally dropped.  With ``HERMES_JEV_CHANNEL_AUTOREPLY`` on, Jev is asked
    whether the message falls inside the agent's configured business scope; only
    then is the message admitted (and answered in a topic/thread under it).
-2. **Complexity routing** — with ``HERMES_JEV_COMPLEXITY_ROUTING`` on, Jev rates
-   the request low / medium / high and the turn is routed to the model
-   configured for that band.  Unconfigured band → the agent's default model.
+2. **Complexity routing** — with ``HERMES_JEV_COMPLEXITY_ROUTING`` on, Jev picks
+   one of low / medium / high / ``other`` for the request and the turn is routed
+   to the model configured for that band.  Each band's criteria are configurable
+   (``HERMES_JEV_CRITERIA_<BAND>`` / ``jev.criteria.<band>``); ``other`` means
+   none of them matched.  ``other``, or an unconfigured band → the agent's
+   default model.
 
 Both are OFF by default and both fail *safe*: with no API key, no configured
-scope, no configured band model, a low-confidence answer, or any transport
-error, the caller keeps the exact behavior it had before Jev existed.
+scope, no configured band model, an unreadable answer, or any transport error,
+the caller keeps the exact behavior it had before Jev existed.
 
 Settings resolve env-var-first (the operator-facing interface), then
 ``config.yaml``'s ``jev:`` section, then the built-in default.  Secrets and
@@ -36,15 +39,60 @@ from agent.jev_client import (
     JevCallStats,
     JevClient,
     JevDecision,
+    choice,
     noul,
-    score,
 )
 
 logger = logging.getLogger(__name__)
 
-#: Ordered low → high. The band names are also the ``score`` criteria sent to
-#: Jev, so renaming one changes the question — keep them stable.
+#: The routable bands, ordered low → high. Each is an option name sent to Jev
+#: and the suffix of ``HERMES_JEV_MODEL_<BAND>``, so renaming one changes both
+#: the question and the config surface — keep them stable.
 COMPLEXITY_TIERS = ("low", "medium", "high")
+
+#: The fourth option: the request matched none of the three bands' criteria.
+#:
+#: This exists because the bands' criteria are *configurable*, and a narrow set
+#: of criteria will not cover everything that arrives. Asked as a ``score`` the
+#: model had to place every request somewhere on the low→high line, so a
+#: request outside the criteria still landed on a band and was routed by it.
+#: As a ``choice`` with an explicit residual, "none of these" is an answer the
+#: model can give — and it routes to the agent's default model rather than to
+#: whichever band it was forced onto.
+COMPLEXITY_OTHER = "other"
+
+#: Everything Jev may answer with. ``other`` last: it is the residual, not a
+#: fourth band, and nothing may treat it as one.
+COMPLEXITY_CHOICES = COMPLEXITY_TIERS + (COMPLEXITY_OTHER,)
+
+#: What each band means, when the deployment does not say.
+#:
+#: These are *defaults for a general assistant*. A deployment that knows its own
+#: workload should override them — the whole point of making them configurable
+#: is that "hard" is domain-specific: a fleet-wide scan is routine for a SOC
+#: agent and a research project for a support bot.
+DEFAULT_COMPLEXITY_CRITERIA: Dict[str, str] = {
+    "low": (
+        "A greeting, an acknowledgement, or a single short factual answer or "
+        "lookup that needs no reasoning."
+    ),
+    "medium": (
+        "A focused task needing a few steps, wiki maintenance, a brief analysis and comparison or "
+        "information retrieval and summarization"
+    ),
+    "high": (
+        "Multi-step work needing planning, deep analysis, cross-referencing, "
+        "several sources, incident response or a substantial code change."
+    ),
+}
+
+#: The residual's criterion. Not configurable: it is defined by the other three
+#: rather than on its own, so letting a deployment describe it would only
+#: create a way for it to overlap them.
+_OTHER_CRITERION = (
+    "The request fits none of the other options — it is outside what they "
+    "describe, not merely between two of them."
+)
 
 #: How often a session pays for a complexity decision.
 #:
@@ -91,33 +139,32 @@ _WANTS_ANSWER_QUESTION = (
     "at a specific named person."
 )
 
+# The band definitions live in the `criteria` of the ``choice`` question, not
+# in these instructions. They are configurable, and instructions that also
+# defined them would contradict an override instead of being replaced by it.
+# What stays here is the framing: what is being decided, and that `other` is a
+# real answer rather than a fallback the model should avoid.
 _COMPLEXITY_QUESTION = (
     "How much reasoning depth and how many steps does it take to fully answer "
-    "`request`? low = a greeting, lookup, or single short factual answer. "
-    "medium = a focused task needing a few steps, a tool call, or a short piece "
-    "of code. high = multi-step work needing planning, deep analysis, "
-    "cross-referencing, or a substantial code change."
+    "`request`? Each option's criterion says when it applies. Pick `other` "
+    "when the request fits none of them — do not stretch a criterion to cover "
+    "it."
 )
 
 
-def _complexity_question(*, has_agent: bool, has_tools: bool) -> str:
+def _complexity_question(*, has_agent: bool) -> str:
     """The complexity question, naming only the context fields actually sent.
 
     A question that references a state key the request does not carry is worse
-    than no context at all, so the clause is built from what is present.
+    than no context at all, so the executor clause appears only when ``agent``
+    does.
     """
-    if not has_agent and not has_tools:
+    if not has_agent:
         return _COMPLEXITY_QUESTION
-    if has_agent and has_tools:
-        subject = "the assistant described in `agent`, using the tools listed in `tools`"
-    elif has_agent:
-        subject = "the assistant described in `agent`"
-    else:
-        subject = "an assistant with the tools listed in `tools`"
     return _COMPLEXITY_QUESTION + (
-        f" Judge the work as it would be done by {subject}: a request that one of "
-        "those capabilities answers directly is cheaper than one that has to be "
-        "reasoned out or composed from several steps."
+        " Judge the work as it would be done by the assistant described in "
+        "`agent`: a request that assistant answers directly is cheaper than one "
+        "it has to reason out or compose from several steps."
     )
 
 
@@ -184,8 +231,8 @@ def _as_float(raw: Any, default: float) -> float:
         return default
 
 
-def _normalize_tools(raw: Any) -> str:
-    """Render a configured tool inventory as one readable block.
+def _normalize_inventory(raw: Any) -> str:
+    """Render a configured ``name: description`` inventory as one readable block.
 
     Accepts the env-var form (a plain string, passed through), a mapping of
     ``name -> description``, or a list of names / ``{name, description}``
@@ -257,11 +304,12 @@ class JevSettings:
     complexity_scope: str = DEFAULT_COMPLEXITY_SCOPE
     business_scope: str = ""
     agent_description: str = ""
-    tools: str = ""
     remote_agents: str = ""
     relevance_threshold: float = 0.7
-    min_confidence: float = 0.5
     tier_models: Dict[str, TierModel] = field(default_factory=dict)
+    #: Per-band criteria for the complexity question. Missing or empty entries
+    #: fall back to ``DEFAULT_COMPLEXITY_CRITERIA``; ``other`` is never here.
+    complexity_criteria: Dict[str, str] = field(default_factory=dict)
 
     @property
     def configured(self) -> bool:
@@ -277,6 +325,42 @@ class JevSettings:
         silently lose its gate on upgrade.
         """
         return self.agent_description or self.business_scope
+
+
+def _resolve_complexity_criteria(config: Mapping[str, Any]) -> Dict[str, str]:
+    """Read each band's criterion, env overriding config, config overriding default.
+
+    Only the three bands are configurable. ``other`` is derived from them and is
+    added at request time, so a deployment cannot accidentally describe the
+    residual in a way that overlaps a band it also defined.
+    """
+    raw = config.get("criteria")
+    raw_criteria = raw if isinstance(raw, Mapping) else {}
+    resolved: Dict[str, str] = {}
+    for tier in COMPLEXITY_TIERS:
+        text = (_env(f"HERMES_JEV_CRITERIA_{tier.upper()}") or "").strip()
+        if not text:
+            text = str(raw_criteria.get(tier) or "").strip()
+        if text:
+            resolved[tier] = text
+    return resolved
+
+
+def _complexity_criteria(settings: JevSettings) -> Dict[str, str]:
+    """The four options sent to Jev, in ``COMPLEXITY_CHOICES`` order.
+
+    Built here rather than at load time so a ``JevSettings`` constructed
+    directly — which tests and embedders do — sends the same payload as one
+    that came from env and config.
+    """
+    configured = settings.complexity_criteria or {}
+    criteria = {
+        tier: (str(configured.get(tier) or "").strip()
+               or DEFAULT_COMPLEXITY_CRITERIA[tier])
+        for tier in COMPLEXITY_TIERS
+    }
+    criteria[COMPLEXITY_OTHER] = _OTHER_CRITERION
+    return criteria
 
 
 def _configured_tier(raw: Any) -> Tuple[str, Optional[str]]:
@@ -362,15 +446,14 @@ def load_jev_settings() -> JevSettings:
         agent_description=str(
             pick("HERMES_JEV_AGENT_DESCRIPTION", "agent_description") or ""
         ).strip(),
-        tools=_normalize_tools(pick("HERMES_JEV_TOOLS", "tools")),
-        remote_agents=_normalize_tools(
+        remote_agents=_normalize_inventory(
             pick("HERMES_JEV_REMOTE_AGENTS", "remote_agents")
         ),
         relevance_threshold=_as_float(
             pick("HERMES_JEV_RELEVANCE_THRESHOLD", "relevance_threshold"), 0.7
         ),
-        min_confidence=_as_float(pick("HERMES_JEV_MIN_CONFIDENCE", "min_confidence"), 0.5),
         tier_models=_resolve_tier_models(config),
+        complexity_criteria=_resolve_complexity_criteria(config),
     )
 
 
@@ -540,7 +623,7 @@ def _relevance_request(
         "in_scope": noul(_SCOPE_QUESTION),
         "wants_answer": noul(_WANTS_ANSWER_QUESTION),
     }
-    remote_agents = _normalize_tools(settings.remote_agents)
+    remote_agents = _normalize_inventory(settings.remote_agents)
     if remote_agents:
         state["remote_agents"] = remote_agents
         questions["delegatable"] = noul(_DELEGATABLE_QUESTION)
@@ -633,30 +716,30 @@ async def judge_channel_relevance_async(
 
 def _complexity_request(
     text: str, settings: JevSettings
-) -> Tuple[Dict[str, str], str]:
-    """Build the complexity state and the question that matches it.
+) -> Tuple[Dict[str, str], str, Dict[str, str]]:
+    """Build the complexity state, question and per-option criteria.
 
-    ``request`` is always present.  ``agent`` and ``tools`` describe the
-    *executor*, which genuinely changes how much work a request is — a request
-    one of the agent's tools answers directly is cheaper than one it has to
-    reason out.  Unlike the channel or the sender, these are stable per agent,
-    so adding them does not make the same request band differently from one
-    room to the next.  Either is omitted when unconfigured.
+    ``request`` is always present.  ``agent`` describes the *executor*, which
+    genuinely changes how much work a request is; unlike the channel or the
+    sender it is stable per agent, so it cannot make the same request band
+    differently from one room to the next.  It is omitted when unconfigured.
+
+    There is deliberately no tool inventory here.  It was a second,
+    hand-maintained copy of what the agent can do — it drifted from the live
+    toolset, it duplicated what ``agent`` already says, and the band criteria
+    are configurable now, which is the supported way to tell Jev that a
+    particular kind of request is cheap for this deployment.
+
+    The criteria come back alongside because they are part of the same
+    question: the instructions only frame the decision, and the band
+    definitions — which a deployment can replace — live in the options.
     """
     state: Dict[str, str] = {"request": text}
     agent_description = str(settings.agent_description or "").strip()
-    # ``load_jev_settings`` already renders this, but ``JevSettings`` is
-    # constructed directly too — normalize here so the wire payload is always
-    # the readable block Jev is asked about, never a nested object.
-    tools = _normalize_tools(settings.tools)
     if agent_description:
         state["agent"] = agent_description
-    if tools:
-        state["tools"] = tools
-    question = _complexity_question(
-        has_agent=bool(agent_description), has_tools=bool(tools)
-    )
-    return state, question
+    question = _complexity_question(has_agent=bool(agent_description))
+    return state, question, _complexity_criteria(settings)
 
 
 def judge_complexity(
@@ -665,11 +748,28 @@ def judge_complexity(
     settings: JevSettings,
     client: Optional[JevClient] = None,
 ) -> Optional[str]:
-    """Rate the request ``low`` / ``medium`` / ``high``.
+    """Pick the band for ``text``: ``low`` / ``medium`` / ``high`` / ``other``.
 
-    ``None`` when Jev could not answer, or answered below
-    ``min_confidence`` — an uncalibrated guess must not move a turn onto a
-    different model, so the caller keeps its default.
+    ``other`` is a real answer, not a failure: it says the request matched none
+    of the configured criteria, and the caller routes it to the default model.
+    It is returned rather than collapsed to ``None`` so ``session`` scope can
+    remember it — otherwise a session whose first turn falls outside every band
+    would pay for a classification on every subsequent turn to be told the same
+    thing.
+
+    ``None`` means Jev could not answer at all — a transport error, or a label
+    outside the four options. The caller keeps its default *and* the decision is
+    not remembered, so the next turn tries again.
+
+    There is no confidence floor. There was one (``min_confidence``, default
+    0.5) back when the question was a ``score`` over three rungs and a
+    thin-spread answer was the only way the model could say "I cannot tell".
+    ``other`` is that signal now, and the floor had turned into a way to discard
+    *correct* bands: a request whose mass splits with the residual — measured, a
+    report-layout task at ``medium`` 0.30 — is banded right, just not
+    emphatically, and throwing it away bought nothing the residual does not
+    already cover. The confidence is still logged, so a thin answer stays
+    visible without being acted on.
     """
     if not (text or "").strip():
         logger.debug("[Jev] complexity skipped: empty request")
@@ -679,12 +779,12 @@ def judge_complexity(
         logger.debug("[Jev] complexity skipped: no client (TYPESAFE_API_KEY unset)")
         return None
 
-    state, question = _complexity_request(text, settings)
+    state, question, criteria = _complexity_request(text, settings)
     answers, stats = _ask(
-        client, state, {"complexity": score(question, COMPLEXITY_TIERS)},
+        client, state, {"complexity": choice(question, criteria)},
     )
     decision = (answers or {}).get("complexity")
-    if decision is None or decision.label not in COMPLEXITY_TIERS:
+    if decision is None or decision.label not in COMPLEXITY_CHOICES:
         logger.warning(
             "[Jev] complexity: UNDECIDED in %.0fms (%s) — %s; keeping the default model",
             stats.elapsed_ms,
@@ -692,24 +792,21 @@ def judge_complexity(
             stats.error or "no usable band in response",
         )
         return None
-    if decision.confidence < settings.min_confidence:
+    if decision.label == COMPLEXITY_OTHER:
         logger.info(
-            "[Jev] complexity: %s REJECTED in %.0fms (%s) — confidence=%.2f < %.2f, "
-            "keeping the default model",
-            decision.label,
+            "[Jev] complexity: OTHER in %.0fms (%s) — confidence=%.2f, no band's "
+            "criteria matched; keeping the default model",
             stats.elapsed_ms,
             stats.source,
             decision.confidence,
-            settings.min_confidence,
         )
-        return None
+        return COMPLEXITY_OTHER
     logger.info(
-        "[Jev] complexity: %s in %.0fms (%s) — confidence=%.2f >= %.2f",
+        "[Jev] complexity: %s in %.0fms (%s) — confidence=%.2f",
         decision.label,
         stats.elapsed_ms,
         stats.source,
         decision.confidence,
-        settings.min_confidence,
     )
     return decision.label
 
@@ -731,8 +828,13 @@ async def judge_complexity_async(
 def resolve_tier_model(
     tier: Optional[str], settings: Optional[JevSettings] = None
 ) -> Optional[TierModel]:
-    """The model configured for ``tier``, or ``None`` to keep the default."""
-    if not tier:
+    """The model configured for ``tier``, or ``None`` to keep the default.
+
+    ``other`` is rejected explicitly rather than by falling off the end of the
+    lookup: it must keep meaning "the default model" even if a deployment ever
+    puts an ``other`` key in ``jev.models``.
+    """
+    if not tier or tier == COMPLEXITY_OTHER:
         return None
     settings = settings if settings is not None else load_jev_settings()
     return settings.tier_models.get(tier)
@@ -806,9 +908,10 @@ def route_model_for_request(
     Under ``complexity_scope: session`` (the default) the band is decided on the
     first turn that yields one and reused for the rest of the session, so a
     conversation runs on one model rather than switching under itself. An
-    undecided turn is deliberately NOT remembered — a transient error or one
-    low-confidence rating must not pin a whole session to the default model, so
-    the next turn tries again.
+    undecided turn is deliberately NOT remembered — a transport error must not
+    pin a whole session to the default model, so the next turn tries again.
+    ``other`` IS remembered: it is an answer that happens to route to the
+    default model, and re-asking it every turn would buy nothing.
 
     ``session_key`` should be the session **id**, not the routing key: a reset
     mints a new id, which is what makes a fresh conversation re-rate. Without
@@ -948,8 +1051,8 @@ def apply_tier_to_agent(agent: Any, tier_model: Optional[TierModel]) -> Optional
     Used by surfaces that reuse one cached ``AIAgent`` across turns (the
     WORKAGENT A2A executor). The agent's own runtime is captured the first time
     this runs and restored whenever a turn resolves to no band, so turning the
-    feature off — or a single low-confidence turn — never leaves the agent
-    stranded on the previous band.
+    feature off — or a single ``other`` turn — never leaves the agent stranded
+    on the previous band.
 
     A band pinned to a *different provider* is honored: its credentials are
     resolved and the agent is swapped onto them in place. A band with no

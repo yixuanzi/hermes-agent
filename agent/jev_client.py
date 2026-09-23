@@ -28,7 +28,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence, Union
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +54,32 @@ def noul(instructions: str) -> Dict[str, Any]:
     return {"type": "noul", "instructions": instructions}
 
 
-def choice(instructions: str, criteria: Sequence[str]) -> Dict[str, Any]:
-    """Pick one of ``criteria``. The answer carries a per-option distribution."""
+def choice(
+    instructions: str,
+    criteria: Union[Sequence[str], Mapping[str, Optional[str]]],
+) -> Dict[str, Any]:
+    """Pick one of ``criteria``. The answer carries a per-option distribution.
+
+    ``criteria`` is either bare option names or a mapping of option name to a
+    one-line description of when that option applies.  Descriptions are worth
+    supplying: measured against the live endpoint, the same four options asked
+    about "hi" answered ``low`` at confidence **0.35** with bare names and
+    **1.00** with descriptions.  Bare names do not just read worse: a
+    thin-spread answer is one the caller has less reason to trust, and the
+    logged confidence is what an operator reads to decide whether a criterion
+    needs rewriting.
+    """
+    if isinstance(criteria, Mapping):
+        rendered: Dict[str, Optional[str]] = {}
+        for name, description in criteria.items():
+            text = str(description).strip() if description is not None else ""
+            rendered[str(name)] = text or None
+    else:
+        rendered = {str(name): None for name in criteria}
     return {
         "type": "choice",
         "instructions": instructions,
-        "criteria": {str(name): None for name in criteria},
+        "criteria": rendered,
     }
 
 

@@ -346,3 +346,44 @@ def test_stats_report_an_unconfigured_client():
     assert answers is None
     assert stats.error == "not configured"
     assert stats.over_wire == 0
+
+
+# --- choice criteria carry descriptions ------------------------------------
+#
+# Descriptions are not cosmetic. Measured against the live endpoint, the same
+# four complexity options asked about "hi" answered `low` at confidence 0.35
+# with bare names and 1.00 with one-line descriptions. The confidence is what
+# an operator reads to tell a settled answer from a coin-flip, so bare names
+# cost the answer its legibility even though nothing gates on the number.
+
+
+def test_bare_option_names_still_work():
+    question = jev_client.choice("pick one", ["low", "high"])
+    assert question["type"] == "choice"
+    assert question["criteria"] == {"low": None, "high": None}
+
+
+def test_a_mapping_sends_each_options_criterion():
+    question = jev_client.choice(
+        "pick one", {"low": "A lookup.", "high": "A campaign."},
+    )
+    assert question["criteria"] == {"low": "A lookup.", "high": "A campaign."}
+
+
+def test_option_order_is_preserved():
+    # The caller's order is the order the options are presented in.
+    question = jev_client.choice("pick one", {"c": "x", "a": "y", "b": "z"})
+    assert list(question["criteria"]) == ["c", "a", "b"]
+
+
+@pytest.mark.parametrize("blank", ["", "   ", None])
+def test_a_blank_criterion_becomes_a_bare_name(blank):
+    # An empty string on the wire is not "no description" — it is a
+    # description that says nothing. Send the option bare instead.
+    question = jev_client.choice("pick one", {"low": blank})
+    assert question["criteria"] == {"low": None}
+
+
+def test_criteria_keys_are_stringified():
+    question = jev_client.choice("pick one", {1: "first", 2: "second"})
+    assert question["criteria"] == {"1": "first", "2": "second"}
