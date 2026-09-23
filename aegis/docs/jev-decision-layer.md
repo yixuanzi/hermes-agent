@@ -89,14 +89,41 @@ that runs on the session's own provider and only swaps the model.
 
 ## Feature 1 — channel admission
 
-Only an **unmentioned group/channel message from a human** reaches the gate.
-Everything else is untouched:
+Every **unmentioned group/channel message from a human** reaches the gate —
+including when `require_mention` is off and the message would have been answered
+anyway. Everything else is untouched:
 
 - a DM, or a message that *does* `@`-mention the bot → normal flow, no Jev call
 - a sender the group policy already rejects → still rejected
 - a **bot** sender → still dropped (an unprompted reply invites a bot-to-bot loop)
 - a **slash command** → still dropped (an unaddressed `/reset` typed at another
   bot must never reach this agent's dispatch)
+
+### When the gate runs
+
+The gate is **not** tied to the mention-drop path. It judges an unaddressed
+message whether the mention gate was about to drop it or the group admits
+unaddressed messages outright:
+
+| `require_mention` | `HERMES_JEV_CHANNEL_AUTOREPLY` | @-mentioned | outcome |
+|---|---|---|---|
+| `true` | off | no | dropped |
+| `true` | off | yes | answered |
+| `true` | **on** | no | **judged** |
+| `true` | on | yes | answered |
+| `false` | off | no | answered |
+| `false` | off | yes | answered |
+| `false` | **on** | no | **judged** |
+| `false` | on | yes | answered |
+
+The `require_mention: false` + autoreply `on` row is the one that matters: that
+configuration answers *every* message in the group, so it is where a
+business-scope filter is worth the most. Turning the feature on changes only the
+two unmentioned rows — a mentioned message behaves identically either way, and
+every `off` row keeps its pre-Jev behavior exactly.
+
+The flag is read *before* `_mentions_self()`, which can parse a post payload, so
+a disabled feature adds nothing to the hot path.
 
 ### The exact request
 

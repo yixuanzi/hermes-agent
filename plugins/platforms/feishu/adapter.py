@@ -4171,12 +4171,25 @@ class FeishuAdapter(BasePlatformAdapter):
 
         reason = self._admit(sender, message)
         is_bot = _is_bot_sender(sender)
-        # An unmentioned group message is normally dropped here.  With Jev
-        # channel autoreply configured, defer that drop until the text has been
-        # extracted so Jev can decide whether it is our business — but never for
-        # a bot sender, where an unprompted reply invites a bot-to-bot loop.
+        # Jev judges any group message that did not @-mention us, whether the
+        # mention gate was about to drop it (``group_mention_missing``) or the
+        # group admits unaddressed messages outright (``reason is None``, i.e.
+        # require_mention is off).  Both are "非 mention 的消息"; tying the gate
+        # to the drop path alone left require_mention=false — the configuration
+        # that answers *everything* in a group — completely unguarded.
+        #
+        # Never for a bot sender: an unprompted reply invites a bot-to-bot loop.
+        # The flag is checked before ``_mentions_self``, which can parse a post
+        # payload, so a disabled feature costs nothing on the hot path.
         jev_gate_pending = False
-        if reason == "group_mention_missing" and not is_bot and self._jev_channel_autoreply_enabled():
+        is_group = getattr(message, "chat_type", "p2p") != "p2p"
+        if (
+            reason in (None, "group_mention_missing")
+            and is_group
+            and not is_bot
+            and self._jev_channel_autoreply_enabled()
+            and not self._mentions_self(message)
+        ):
             jev_gate_pending = True
             reason = None
         if reason is not None:
@@ -6313,9 +6326,9 @@ class FeishuAdapter(BasePlatformAdapter):
             return "group_policy_rejected"
         if require_mention and not self._mentions_self(message):
             # Distinct from ``group_policy_rejected``: this sender IS allowed
-            # to talk to the bot, they just did not @-mention it.  Only this
-            # case is eligible for the Jev relevance gate — a sender the group
-            # policy rejected stays rejected.
+            # to talk to the bot, they just did not @-mention it.  The caller
+            # may hand that case to the Jev relevance gate instead of dropping
+            # it; a sender the group policy rejected stays rejected either way.
             return "group_mention_missing"
         return None
 

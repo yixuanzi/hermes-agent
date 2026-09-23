@@ -1,5 +1,5 @@
 {
-  "dangerous_pattern": "(rm\\s+-rf|git\\s+push|drop\\s+(table|database)|shutdown|reboot|mkfs|:\\(\\)\\{)",
+  "dangerous_pattern": "(rm\\s+-rf\\s/\\s|git\\s+push|drop\\s+(table|database)|shutdown|reboot|mkfs|:\\(\\)\\{)",
   "admin": {
     "summary": "完全访问",
     "prompt_constraints": [

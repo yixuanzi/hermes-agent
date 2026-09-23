@@ -117,13 +117,17 @@ def test_an_unimportable_policy_module_keeps_the_bot_quiet(monkeypatch):
 # --- the admission hand-off ------------------------------------------------
 
 
-def _handoff_adapter(monkeypatch, *, autoreply_on: bool):
+def _handoff_adapter(
+    monkeypatch, *, autoreply_on: bool, require_mention: bool = True, mentioned: bool = False,
+):
     """An adapter whose _process_inbound_message only records its kwargs."""
     from tests.gateway.feishu_helpers import install_dedup_state
 
-    adapter = make_adapter_skeleton(require_mention=True, group_policy="open", allow_bots="all")
+    adapter = make_adapter_skeleton(
+        require_mention=require_mention, group_policy="open", allow_bots="all",
+    )
     install_dedup_state(adapter)
-    stub_mention(adapter, False)
+    stub_mention(adapter, mentioned)
     monkeypatch.setattr(
         type(adapter), "_jev_channel_autoreply_enabled", lambda self: autoreply_on
     )
@@ -145,17 +149,63 @@ def _event(*, sender_type="user", chat_type="group", message_id="om_1"):
     )
 
 
-def test_an_unmentioned_group_message_is_dropped_while_autoreply_is_off(monkeypatch):
-    adapter, seen = _handoff_adapter(monkeypatch, autoreply_on=False)
-    asyncio.run(adapter._handle_message_event_data(_event()))
-    assert seen == []
+# The full admission matrix for a human group message: require_mention x
+# HERMES_JEV_CHANNEL_AUTOREPLY x whether the bot was @-mentioned.
+#
+# The row that matters is require_mention=False + autoreply=True + no mention.
+# Tying the gate to the drop path alone left that combination unguarded — and
+# require_mention=False is precisely the configuration where the bot would
+# otherwise answer EVERY message in the group, so it is the one that most needs
+# a business-scope filter. Every autoreply=False row must keep the exact
+# behavior it had before the gate existed.
+_ADMISSION_MATRIX = [
+    # require_mention, autoreply, mentioned, expected outcome
+    pytest.param(True,  False, False, "dropped",  id="mention_required:off:no_mention_dropped"),
+    pytest.param(True,  False, True,  "normal",   id="mention_required:off:mentioned_normal"),
+    pytest.param(True,  True,  False, "judged",   id="mention_required:on:no_mention_judged"),
+    pytest.param(True,  True,  True,  "normal",   id="mention_required:on:mentioned_normal"),
+    pytest.param(False, False, False, "normal",   id="mention_optional:off:no_mention_normal"),
+    pytest.param(False, False, True,  "normal",   id="mention_optional:off:mentioned_normal"),
+    pytest.param(False, True,  False, "judged",   id="mention_optional:on:no_mention_judged"),
+    pytest.param(False, True,  True,  "normal",   id="mention_optional:on:mentioned_normal"),
+]
 
 
-def test_an_unmentioned_group_message_is_deferred_to_the_gate_when_autoreply_is_on(monkeypatch):
-    adapter, seen = _handoff_adapter(monkeypatch, autoreply_on=True)
+@pytest.mark.parametrize("require_mention, autoreply, mentioned, expected", _ADMISSION_MATRIX)
+def test_the_admission_matrix(monkeypatch, require_mention, autoreply, mentioned, expected):
+    adapter, seen = _handoff_adapter(
+        monkeypatch, autoreply_on=autoreply,
+        require_mention=require_mention, mentioned=mentioned,
+    )
     asyncio.run(adapter._handle_message_event_data(_event()))
-    assert len(seen) == 1
-    assert seen[0]["jev_gate_pending"] is True
+
+    if expected == "dropped":
+        assert seen == [], "the message should never reach inbound processing"
+        return
+    assert len(seen) == 1, "the message should reach inbound processing"
+    assert seen[0]["jev_gate_pending"] is (expected == "judged")
+
+
+def test_turning_autoreply_on_changes_only_the_unmentioned_rows(monkeypatch):
+    # Guards the backward-compatibility claim above as one assertion rather
+    # than eight: enabling the feature must not alter a mentioned message.
+    changed = []
+    for require_mention in (True, False):
+        for mentioned in (True, False):
+            outcomes = []
+            for autoreply in (False, True):
+                adapter, seen = _handoff_adapter(
+                    monkeypatch, autoreply_on=autoreply,
+                    require_mention=require_mention, mentioned=mentioned,
+                )
+                asyncio.run(adapter._handle_message_event_data(_event()))
+                outcomes.append(
+                    "dropped" if not seen
+                    else ("judged" if seen[0]["jev_gate_pending"] else "normal")
+                )
+            if outcomes[0] != outcomes[1]:
+                changed.append((require_mention, mentioned))
+    assert changed == [(True, False), (False, False)]
 
 
 def test_a_bot_sender_is_never_answered_unprompted(monkeypatch):
