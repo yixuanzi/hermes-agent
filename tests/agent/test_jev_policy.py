@@ -225,7 +225,11 @@ def test_build_client_carries_the_resolved_settings(jev_env, monkeypatch):
 
 
 def _settings(**overrides):
-    base = dict(api_key="k", business_scope="security operations", channel_autoreply=True)
+    base = dict(
+        api_key="k",
+        agent_description="A security operations assistant.",
+        channel_autoreply=True,
+    )
     base.update(overrides)
     return jev_policy.JevSettings(**base)
 
@@ -261,10 +265,11 @@ def test_both_propositions_ride_in_one_request():
     assert len(client.asked) == 1
     state, questions = client.asked[0]
     assert set(questions) == {"in_scope", "wants_answer"}
-    assert state["business_scope"] == "security operations"
+    assert state["agent"] == "A security operations assistant."
     assert state["message"] == "hello"
     assert state["channel"] == "ops"
     assert state["sender"] == "zhang"
+    assert "remote_agents" not in state
 
 
 def test_a_partial_answer_is_undecided_not_a_yes():
@@ -1066,12 +1071,160 @@ def test_the_context_reaches_the_request_judge_complexity_sends():
     assert "`tools`" in questions["complexity"]["instructions"]
 
 
-def test_the_relevance_request_is_unaffected_by_the_complexity_context():
-    # agent/tools describe the executor and belong to the complexity question;
-    # admission is judged against business_scope alone.
+def test_the_tool_inventory_does_not_leak_into_the_admission_request():
+    # `tools` rates how much WORK a request is; admission only asks whether the
+    # request is this agent's business at all.
     client = _StubClient({"in_scope": _noul(0.9), "wants_answer": _noul(0.9)})
-    settings = _settings(agent_description="A SOC assistant.", tools="threat_intel: x")
+    settings = _settings(tools="threat_intel: x")
     jev_policy.judge_channel_relevance("hello", settings=settings, client=client)
 
     state, _ = client.asked[0]
-    assert "agent" not in state and "tools" not in state
+    assert "tools" not in state
+
+
+# --- admission scope: the agent, plus what it can delegate to --------------
+
+
+def test_admission_is_judged_against_the_agent_description():
+    settings = jev_policy.JevSettings(agent_description="A SOC assistant.")
+    state, _questions = jev_policy._relevance_request("hi", settings)
+    assert state["agent"] == "A SOC assistant."
+    assert "business_scope" not in state
+
+
+def test_business_scope_is_still_honored_when_no_agent_description_is_set():
+    # An existing deployment must not lose its channel gate on upgrade.
+    settings = jev_policy.JevSettings(business_scope="legacy scope")
+    assert settings.admission_scope == "legacy scope"
+    state, _ = jev_policy._relevance_request("hi", settings)
+    assert state["agent"] == "legacy scope"
+
+
+def test_the_agent_description_wins_over_the_legacy_scope():
+    settings = jev_policy.JevSettings(
+        agent_description="A SOC assistant.", business_scope="legacy scope",
+    )
+    assert settings.admission_scope == "A SOC assistant."
+
+
+def test_the_gate_opens_on_either_key(jev_env, monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    monkeypatch.setenv("HERMES_JEV_CHANNEL_AUTOREPLY", "true")
+    assert jev_policy.channel_autoreply_active() is False, "neither key set"
+
+    monkeypatch.setenv("HERMES_JEV_BUSINESS_SCOPE", "legacy")
+    assert jev_policy.channel_autoreply_active() is True, "legacy key still works"
+
+    monkeypatch.delenv("HERMES_JEV_BUSINESS_SCOPE")
+    monkeypatch.setenv("HERMES_JEV_AGENT_DESCRIPTION", "A SOC assistant.")
+    assert jev_policy.channel_autoreply_active() is True
+
+
+def test_remote_agents_add_a_third_proposition():
+    # Asked separately, NOT folded into the scope question with an "or":
+    # the compound form collapsed the separation from ~0.85 to ~0.2.
+    settings = jev_policy.JevSettings(
+        agent_description="A SOC assistant.",
+        remote_agents={"avgc": "vulnerability scanning"},
+    )
+    state, questions = jev_policy._relevance_request("scan this subnet", settings)
+    assert state["remote_agents"] == "avgc: vulnerability scanning"
+    assert set(questions) == {"in_scope", "wants_answer", "delegatable"}
+    assert "`remote_agents`" in questions["delegatable"]["instructions"]
+    assert "`remote_agents`" not in questions["in_scope"]["instructions"]
+
+
+def test_without_remote_agents_only_two_propositions_are_asked():
+    settings = jev_policy.JevSettings(agent_description="A SOC assistant.")
+    _state, questions = jev_policy._relevance_request("hi", settings)
+    assert set(questions) == {"in_scope", "wants_answer"}
+
+
+def _remote_settings(**overrides):
+    base = dict(
+        api_key="k",
+        agent_description="An alert-triage assistant.",
+        remote_agents={"avgc": "vulnerability scanning"},
+        channel_autoreply=True,
+    )
+    base.update(overrides)
+    return jev_policy.JevSettings(**base)
+
+
+def test_a_delegatable_request_is_admitted_even_when_out_of_the_agents_own_scope():
+    client = _StubClient({
+        "in_scope": _noul(0.07), "delegatable": _noul(0.97), "wants_answer": _noul(0.98),
+    })
+    assert jev_policy.judge_channel_relevance(
+        "scan this subnet", settings=_remote_settings(), client=client,
+    ) is True
+
+
+def test_a_request_in_the_agents_own_scope_is_admitted_without_delegation():
+    client = _StubClient({
+        "in_scope": _noul(0.95), "delegatable": _noul(0.41), "wants_answer": _noul(0.97),
+    })
+    assert jev_policy.judge_channel_relevance(
+        "is this alert a false positive?", settings=_remote_settings(), client=client,
+    ) is True
+
+
+def test_neither_ours_nor_delegatable_stays_quiet():
+    client = _StubClient({
+        "in_scope": _noul(0.02), "delegatable": _noul(0.02), "wants_answer": _noul(0.90),
+    })
+    assert jev_policy.judge_channel_relevance(
+        "what's for dinner?", settings=_remote_settings(), client=client,
+    ) is False
+
+
+def test_delegatable_alone_is_not_enough_without_a_request_for_action():
+    client = _StubClient({
+        "in_scope": _noul(0.10), "delegatable": _noul(0.95), "wants_answer": _noul(0.04),
+    })
+    assert jev_policy.judge_channel_relevance(
+        "we already scanned that subnet", settings=_remote_settings(), client=client,
+    ) is False
+
+
+def test_a_missing_delegatable_answer_is_undecided_not_a_fallback():
+    # The question was asked, so an absent answer means the response was
+    # incomplete — that is undecided, not "no delegation".
+    client = _StubClient({"in_scope": _noul(0.95), "wants_answer": _noul(0.97)})
+    assert jev_policy.judge_channel_relevance(
+        "hi", settings=_remote_settings(), client=client,
+    ) is None
+
+
+def test_the_admission_log_reports_the_delegation_probability(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient({
+        "in_scope": _noul(0.07), "delegatable": _noul(0.97), "wants_answer": _noul(0.98),
+    })
+    jev_policy.judge_channel_relevance("scan", settings=_remote_settings(), client=client)
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "delegatable=0.97" in line and "ANSWER" in line
+
+
+def test_the_log_omits_delegation_when_it_was_not_asked(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient({"in_scope": _noul(0.9), "wants_answer": _noul(0.9)})
+    jev_policy.judge_channel_relevance("hi", settings=_settings(), client=client)
+    assert "delegatable" not in _jev_records(caplog)[-1].getMessage()
+
+
+def test_remote_agents_accept_the_same_forms_as_tools(jev_env, monkeypatch):
+    jev_env["remote_agents"] = [{"name": "avgc", "description": "vuln scanning"}]
+    assert jev_policy.load_jev_settings().remote_agents == "avgc: vuln scanning"
+
+    monkeypatch.setenv("HERMES_JEV_REMOTE_AGENTS", "aegis: compliance Q&A")
+    assert jev_policy.load_jev_settings().remote_agents == "aegis: compliance Q&A"
+
+
+def test_remote_agents_do_not_reach_the_complexity_request():
+    # Delegation changes whether a message is OURS, not how hard the work is.
+    settings = jev_policy.JevSettings(
+        agent_description="A SOC assistant.", remote_agents={"avgc": "vuln scanning"},
+    )
+    state, _ = jev_policy._complexity_request("scan this subnet", settings)
+    assert "remote_agents" not in state

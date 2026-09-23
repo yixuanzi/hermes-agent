@@ -1966,8 +1966,15 @@ DEFAULT_CONFIG = {
         "model": "jev-latest",
         "timeout": 8.0,
         # Answer group/channel messages that did not @-mention the bot, when
-        # Jev judges them to be inside business_scope. Requires business_scope.
+        # Jev judges them this agent's business. Requires agent_description.
         "channel_autoreply": False,
+        # Extend that to messages inside an existing group topic/thread. Off by
+        # default: a thread is usually a conversation the agent is already part
+        # of, and re-judging every follow-up would cut one off mid-way. Off, a
+        # thread message is left to the normal path (the mention gate decides).
+        # The first message of a topic is not a thread message and is always
+        # judged when channel_autoreply is on.
+        "thread_autoreply": False,
         # Rate the task low/medium/high and route it to models.<band>.
         "complexity_routing": False,
         # How often that rating is made:
@@ -1978,15 +1985,20 @@ DEFAULT_CONFIG = {
         #     cost of a decision per message and a possible mid-conversation
         #     model switch.
         "complexity_scope": "session",
-        # Plain-language description of what this agent is responsible for.
-        # Channel autoreply stays off while this is empty — there is nothing to
-        # judge relevance against.
+        # Superseded by agent_description; still read as a fallback so an
+        # existing deployment does not lose its channel gate on upgrade.
         "business_scope": "",
-        # Context for the COMPLEXITY question only: what this agent is and what
-        # it can do. A request one of its tools answers directly is cheaper than
-        # one it must reason out, so these change the band, not just the wording.
-        # Both optional; each is omitted from the request when empty.
+        # Plain-language description of what this agent is and does. Used by
+        # BOTH decisions: channel admission judges relevance against it (channel
+        # autoreply stays off while it is empty — there is nothing to judge
+        # against), and the complexity question rates the work as this agent
+        # would do it.
         "agent_description": "",
+        # Specialist agents this one can delegate to, as {name: capability}.
+        # Admission counts a request one of them handles as this agent's
+        # business too — it can hand the work off. Same flexible forms as
+        # `tools`. Complexity ignores it.
+        "remote_agents": {},
         # A tool inventory. Either a plain string, a {name: description} map, or
         # a list of names / {name, description} entries — all render to one
         # readable block. HERMES_JEV_TOOLS overrides this with a plain string.

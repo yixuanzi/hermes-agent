@@ -7,7 +7,7 @@ answers propositions and ordinal ratings in a single forward pass and returns
 
 | # | Feature | Flag | Surfaces |
 |---|---------|------|----------|
-| 1 | **Channel admission** — answer a group message that did not `@`-mention the bot, when it falls inside the agent's business scope | `HERMES_JEV_CHANNEL_AUTOREPLY` | Feishu/Lark gateway, WORKAGENT A2A service |
+| 1 | **Channel admission** — answer a group message that did not `@`-mention the bot, when it is the agent's business | `HERMES_JEV_CHANNEL_AUTOREPLY` (+ `HERMES_JEV_THREAD_AUTOREPLY` for messages inside a topic) | Feishu/Lark gateway, WORKAGENT A2A service |
 | 2 | **Complexity routing** — rate each turn low/medium/high and run it on that band's model | `HERMES_JEV_COMPLEXITY_ROUTING` | Gateway (all platforms), WORKAGENT A2A service |
 
 Both are **off by default** and independent — enabling one does not enable the
@@ -31,6 +31,7 @@ HERMES_JEV_TIMEOUT=8
 
 # Feature 1
 HERMES_JEV_CHANNEL_AUTOREPLY=true
+HERMES_JEV_THREAD_AUTOREPLY=false       # also judge inside topics
 HERMES_JEV_BUSINESS_SCOPE="Security operations: alert triage, vulnerability and asset management, incident response, policy and compliance questions."
 HERMES_JEV_RELEVANCE_THRESHOLD=0.7
 
@@ -53,10 +54,12 @@ jev:
   model: jev-latest
   timeout: 8.0
   channel_autoreply: false
+  thread_autoreply: false        # also judge inside topics
   complexity_routing: false
   complexity_scope: session      # session | turn
   business_scope: ""
-  agent_description: ""          # complexity context only
+  agent_description: ""    
+  remote_agents: ""
   tools: {}                      # complexity context only
   relevance_threshold: 0.7
   min_confidence: 0.5
@@ -103,6 +106,27 @@ anyway. Everything else is untouched:
 - a **slash command** → still dropped (an unaddressed `/reset` typed at another
   bot must never reach this agent's dispatch)
 
+### Messages inside a topic
+
+A message already inside a group topic/thread needs a second opt-in,
+`HERMES_JEV_THREAD_AUTOREPLY` / `jev.thread_autoreply`, **default off**. A
+thread is usually a conversation the agent is already part of, and re-judging
+every follow-up would cut one off mid-way.
+
+| message | `THREAD_AUTOREPLY` off (default) | on |
+|---|---|---|
+| top-level group message | **judged** | **judged** |
+| inside a topic (`thread_id` or `root_id` set) | not judged — left to the normal path | **judged** |
+
+"Not judged" is not "never answered": the gate simply does not apply, so the
+mention gate decides exactly as it did before Jev existed — dropped under
+`require_mention: true`, answered under `require_mention: false`.
+
+The **first** message of a topic carries neither `thread_id` nor `root_id` (the
+bot creates the topic from its own reply), so it is a top-level message and is
+always judged while channel autoreply is on. This sub-switch cannot open the
+gate on its own — `HERMES_JEV_CHANNEL_AUTOREPLY` still has to be on.
+
 ### When the gate runs
 
 The gate is **not** tied to the mention-drop path. It judges an unaddressed
@@ -139,15 +163,20 @@ questions in a single forward pass, so the second costs no extra round trip.
 {
   "model": "jev-latest",
   "state": {
-    "business_scope": "网络安全运营：告警研判、漏洞与资产管理、应急响应流程、安全策略与合规咨询。",
-    "message": "生产环境 WAF 刚刚报了一批 SQL 注入告警，有人看一下吗",
+    "agent": "Hermes 安全运营助手，服务于 SOC 团队：做告警研判、查资产与漏洞、答应急响应流程与合规问题。",
+    "message": "谁能帮忙扫一下这个网段的漏洞？",
+    "remote_agents": "avgc: 漏洞扫描与资产清点\naegis: 安全策略与合规问答",
     "channel": "安全运营大群",
     "sender": "张三"
   },
   "questions": {
     "in_scope": {
       "type": "noul",
-      "instructions": "`business_scope` lists what the assistant is responsible for. `message` was posted in a group chat the assistant is a member of. Is `message` about a topic covered by `business_scope`?"
+      "instructions": "`agent` describes an assistant that is a member of this group chat. `message` was posted in that chat. Is `message` about something that assistant handles?"
+    },
+    "delegatable": {
+      "type": "noul",
+      "instructions": "`remote_agents` lists specialist agents that the assistant can hand work to. `message` was posted in a group chat. Is `message` about something one of `remote_agents` handles?"
     },
     "wants_answer": {
       "type": "noul",
@@ -161,10 +190,19 @@ questions in a single forward pass, so the second costs no extra round trip.
 
 | key | required | source | why it is there |
 |---|---|---|---|
-| `business_scope` | **yes** | `HERMES_JEV_BUSINESS_SCOPE` / `jev.business_scope`, verbatim | The *only* definition of "our business". Both questions reference it by name, so its wording is the real tuning surface — see below. |
+| `agent` | **yes** | `HERMES_JEV_AGENT_DESCRIPTION` / `jev.agent_description`, verbatim | What this assistant is. Relevance is judged against it, so its wording is the real tuning surface. The same key feeds the complexity question. |
 | `message` | **yes** | the inbound text | What is being judged. |
+| `remote_agents` | no — omitted when empty | `HERMES_JEV_REMOTE_AGENTS` / `jev.remote_agents` | Specialists this agent can delegate to. A request one of them handles is this agent's business too — it can hand the work off. Adds the `delegatable` question. |
 | `channel` | no — omitted when empty | Feishu: chat display name, falling back to `chat_id`. A2A: `<source>.channel` | Lets the model read the room. "有人看一下吗" in `安全运营大群` reads differently than in a random group. |
-| `sender` | no — omitted when empty | Feishu: resolved display name. A2A: `<source>.uname` | Supports the "directed at a specific named person" clause in question 2. |
+| `sender` | no — omitted when empty | Feishu: resolved display name. A2A: `<source>.uname` | Supports the "directed at a specific named person" clause. |
+
+`jev.business_scope` was the earlier name for the `agent` source. It is still
+read when `agent_description` is empty, so an existing deployment keeps its gate
+on upgrade; prefer the new key, which both decisions share.
+
+Note what is **not** here: `tools`. That inventory rates how much *work* a
+request is, which is the complexity question's job. Admission only asks whether
+the request is this agent's business at all.
 
 Empty optional keys are **dropped, not sent as `""`** — an empty string is a
 value the model would try to interpret.
@@ -189,8 +227,9 @@ A2A probability may differ slightly from the same text sent through Feishu.
 ### The decision
 
 ```python
-admit = in_scope.probability >= relevance_threshold \
-    and wants_answer.probability >= relevance_threshold
+ours  = in_scope.probability >= relevance_threshold \
+    or (delegatable is not None and delegatable.probability >= relevance_threshold)
+admit = ours and wants_answer.probability >= relevance_threshold
 ```
 
 A `noul` answer is a bare probability — Jev returns no separate `confidence`
@@ -203,6 +242,42 @@ field for it, because for a proposition the probability *is* the confidence:
 
 **Both** must clear the bar, and one threshold governs both. If either answer is
 missing from the response the verdict is `None` (undecided) — not a yes.
+
+### Delegation is its own question
+
+Adding `remote_agents` by widening the scope question — "something the assistant
+handles itself **or** can delegate to one of `remote_agents`" — was measured and
+rejected. The disjunction makes the model hedge and the threshold stops
+discriminating:
+
+| message | scope question alone | folded "handles or delegates" | split into two questions |
+|---|---|---|---|
+| 好的收到，谢谢 | 0.14 | 0.50 | 0.17 / deleg 0.10 |
+| 帮我把这份周报排版一下 | 0.13 | **0.62** | 0.15 / deleg 0.08 |
+| 生产环境 WAF 报了一批 SQL 注入告警 | 0.97 | **0.77** | 0.95 / deleg 0.85 |
+| 有谁知道 P1 事件要多久上报？ | 0.96 | **0.81** | 0.96 / deleg 0.82 |
+
+Folded, the gap collapses from ~0.85 to ~0.15 and an off-topic request reaches
+0.62 — close enough to a 0.7 threshold to be one wording change away from firing.
+Split, both propositions stay crisp and the verdict ORs them. Jev answers all
+three in one forward pass, so the extra question costs no extra round trip.
+
+This is the same lesson as the scope / wants-answer split below, found twice.
+
+#### What delegation buys
+
+With a deliberately narrow agent (`只负责告警研判`) and two remote specialists
+(`avgc: 漏洞扫描与资产清点`, `aegis: 安全策略与合规问答`):
+
+| message | without `remote_agents` | with `remote_agents` |
+|---|---|---|
+| 这条告警是不是误报？ | scope 0.95 → **answer** | scope 0.95, deleg 0.41 → **answer** |
+| 谁能帮忙扫一下这个网段的漏洞？ | scope 0.10 → quiet | scope 0.07, **deleg 0.97 → answer** |
+| 等保三级对日志留存有什么要求？ | scope 0.18 → quiet | scope 0.12, **deleg 0.90 → answer** |
+| 今晚吃什么？ | scope 0.02 → quiet | scope 0.02, deleg 0.02 → quiet |
+
+The agent's own work is unaffected (row 1 — delegation correctly reads low), the
+two requests it would hand off are now admitted, and off-topic stays out.
 
 ### Why two questions and not one
 

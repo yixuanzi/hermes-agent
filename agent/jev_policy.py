@@ -67,9 +67,21 @@ _SESSION_BAND_TTL_SECONDS = 24 * 60 * 60.0
 # toward the middle and makes the threshold meaningless; asked apart they
 # separate cleanly, and Jev answers both in one forward pass anyway.
 _SCOPE_QUESTION = (
-    "`business_scope` lists what the assistant is responsible for. `message` was "
-    "posted in a group chat the assistant is a member of. Is `message` about a "
-    "topic covered by `business_scope`?"
+    "`agent` describes an assistant that is a member of this group chat. "
+    "`message` was posted in that chat. Is `message` about something that "
+    "assistant handles?"
+)
+
+# Delegation is asked as its OWN proposition rather than folded into the scope
+# question with an "or".  Measured: the compound form ("handles itself OR can
+# delegate") collapsed the separation from ~0.85 to ~0.2 — in-scope fell
+# 0.97 -> 0.77 while an off-topic request rose 0.13 -> 0.62, close enough to the
+# threshold to fire.  Same lesson as the scope/wants-answer split: a disjunction
+# makes the model hedge, and the threshold stops discriminating.
+_DELEGATABLE_QUESTION = (
+    "`remote_agents` lists specialist agents that the assistant can hand work to. "
+    "`message` was posted in a group chat. Is `message` about something one of "
+    "`remote_agents` handles?"
 )
 
 _WANTS_ANSWER_QUESTION = (
@@ -239,11 +251,13 @@ class JevSettings:
     model: str = DEFAULT_JEV_MODEL
     timeout: float = DEFAULT_JEV_TIMEOUT
     channel_autoreply: bool = False
+    thread_autoreply: bool = False
     complexity_routing: bool = False
     complexity_scope: str = DEFAULT_COMPLEXITY_SCOPE
     business_scope: str = ""
     agent_description: str = ""
     tools: str = ""
+    remote_agents: str = ""
     relevance_threshold: float = 0.7
     min_confidence: float = 0.5
     tier_models: Dict[str, TierModel] = field(default_factory=dict)
@@ -252,6 +266,16 @@ class JevSettings:
     def configured(self) -> bool:
         """Can the client reach Jev at all?"""
         return bool(self.api_key)
+
+    @property
+    def admission_scope(self) -> str:
+        """What channel admission is judged against.
+
+        ``agent_description`` is the source; ``business_scope`` is the older
+        key it replaced and is still honored so an existing deployment does not
+        silently lose its gate on upgrade.
+        """
+        return self.agent_description or self.business_scope
 
 
 def _configured_tier(raw: Any) -> Tuple[str, Optional[str]]:
@@ -323,6 +347,9 @@ def load_jev_settings() -> JevSettings:
         channel_autoreply=_as_bool(
             pick("HERMES_JEV_CHANNEL_AUTOREPLY", "channel_autoreply"), False
         ),
+        thread_autoreply=_as_bool(
+            pick("HERMES_JEV_THREAD_AUTOREPLY", "thread_autoreply"), False
+        ),
         complexity_routing=_as_bool(
             pick("HERMES_JEV_COMPLEXITY_ROUTING", "complexity_routing"), False
         ),
@@ -334,6 +361,9 @@ def load_jev_settings() -> JevSettings:
             pick("HERMES_JEV_AGENT_DESCRIPTION", "agent_description") or ""
         ).strip(),
         tools=_normalize_tools(pick("HERMES_JEV_TOOLS", "tools")),
+        remote_agents=_normalize_tools(
+            pick("HERMES_JEV_REMOTE_AGENTS", "remote_agents")
+        ),
         relevance_threshold=_as_float(
             pick("HERMES_JEV_RELEVANCE_THRESHOLD", "relevance_threshold"), 0.7
         ),
@@ -360,25 +390,45 @@ def build_client(settings: Optional[JevSettings] = None) -> Optional[JevClient]:
 # ---------------------------------------------------------------------------
 
 
-def channel_autoreply_active(settings: Optional[JevSettings] = None) -> bool:
+def channel_autoreply_active(
+    settings: Optional[JevSettings] = None, *, in_thread: bool = False,
+) -> bool:
     """Is unprompted in-channel answering fully configured and switched on?
 
-    Requires the flag, a reachable Jev, and a business scope — without a scope
+    Requires the flag, a reachable Jev, and an agent description — without one
     there is nothing to judge relevance against, so the gate stays closed and
     non-mention messages keep being dropped.
+
+    ``in_thread`` marks a message inside an existing group topic/thread. Those
+    need their own opt-in (``thread_autoreply``, default off): a thread is
+    usually a conversation the agent is already part of, and re-judging every
+    follow-up would cut one off mid-way. Off, a thread message is simply left to
+    the normal path — the mention gate decides it, exactly as before.
     """
     settings = settings if settings is not None else load_jev_settings()
     if not settings.channel_autoreply:
         return False
+    if in_thread and not settings.thread_autoreply:
+        logger.debug(
+            "[Jev] channel autoreply is on but HERMES_JEV_THREAD_AUTOREPLY is off; "
+            "leaving this thread message to the normal path"
+        )
+        return False
     if not settings.configured:
         logger.debug("[Jev] channel autoreply requested but TYPESAFE_API_KEY is unset")
         return False
-    if not settings.business_scope:
+    if not settings.admission_scope:
         logger.warning(
-            "[Jev] channel autoreply is on but HERMES_JEV_BUSINESS_SCOPE / jev.business_scope "
-            "is empty — keeping the mention gate closed"
+            "[Jev] channel autoreply is on but HERMES_JEV_AGENT_DESCRIPTION / "
+            "jev.agent_description is empty — there is nothing to judge relevance "
+            "against, so the mention gate stays closed"
         )
         return False
+    if not settings.agent_description and settings.business_scope:
+        logger.debug(
+            "[Jev] channel admission is using the legacy business_scope; "
+            "HERMES_JEV_AGENT_DESCRIPTION replaces it"
+        )
     return True
 
 
@@ -429,19 +479,36 @@ def _ask(
     )
 
 
-def _relevance_state(
+def _relevance_request(
     text: str,
+    settings: "JevSettings",
     *,
-    business_scope: str,
     channel_name: str = "",
     sender_name: str = "",
-) -> Dict[str, str]:
-    state = {"business_scope": business_scope, "message": text}
+) -> Tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
+    """Build the admission state and the scope question that matches it.
+
+    Admission is judged against what the assistant IS (``agent``) and what it
+    can hand off to (``remote_agents``) — a question this agent would delegate
+    is just as much its business as one it answers itself.
+    """
+    state: Dict[str, str] = {
+        "agent": settings.admission_scope,
+        "message": text,
+    }
+    questions = {
+        "in_scope": noul(_SCOPE_QUESTION),
+        "wants_answer": noul(_WANTS_ANSWER_QUESTION),
+    }
+    remote_agents = _normalize_tools(settings.remote_agents)
+    if remote_agents:
+        state["remote_agents"] = remote_agents
+        questions["delegatable"] = noul(_DELEGATABLE_QUESTION)
     if channel_name:
         state["channel"] = channel_name
     if sender_name:
         state["sender"] = sender_name
-    return state
+    return state, questions
 
 
 def judge_channel_relevance(
@@ -465,22 +532,16 @@ def judge_channel_relevance(
         logger.debug("[Jev] channel admission skipped: no client (TYPESAFE_API_KEY unset)")
         return None
 
-    answers, stats = _ask(
-        client,
-        _relevance_state(
-            text,
-            business_scope=settings.business_scope,
-            channel_name=channel_name,
-            sender_name=sender_name,
-        ),
-        {
-            "in_scope": noul(_SCOPE_QUESTION),
-            "wants_answer": noul(_WANTS_ANSWER_QUESTION),
-        },
+    state, questions = _relevance_request(
+        text, settings, channel_name=channel_name, sender_name=sender_name,
     )
+    answers, stats = _ask(client, state, questions)
     in_scope = (answers or {}).get("in_scope")
     wants_answer = (answers or {}).get("wants_answer")
-    if in_scope is None or wants_answer is None:
+    delegatable = (answers or {}).get("delegatable")
+    if in_scope is None or wants_answer is None or (
+        "delegatable" in questions and delegatable is None
+    ):
         logger.warning(
             "[Jev] channel admission: UNDECIDED in %.0fms (%s) — %s; caller keeps its default",
             stats.elapsed_ms,
@@ -488,17 +549,20 @@ def judge_channel_relevance(
             stats.error or "answer missing from response",
         )
         return None
-    admit = (
-        in_scope.probability >= settings.relevance_threshold
-        and wants_answer.probability >= settings.relevance_threshold
+    # Ours to answer, or ours to hand off — both are the agent's business.
+    ours = in_scope.probability >= settings.relevance_threshold or (
+        delegatable is not None
+        and delegatable.probability >= settings.relevance_threshold
     )
+    admit = ours and wants_answer.probability >= settings.relevance_threshold
     logger.info(
-        "[Jev] channel admission: %s in %.0fms (%s) — in_scope=%.2f wants_answer=%.2f "
-        "threshold=%.2f chat=%s",
+        "[Jev] channel admission: %s in %.0fms (%s) — in_scope=%.2f%s "
+        "wants_answer=%.2f threshold=%.2f chat=%s",
         "ANSWER" if admit else "STAY QUIET",
         stats.elapsed_ms,
         stats.source,
         in_scope.probability,
+        f" delegatable={delegatable.probability:.2f}" if delegatable is not None else "",
         wants_answer.probability,
         settings.relevance_threshold,
         channel_name or "-",

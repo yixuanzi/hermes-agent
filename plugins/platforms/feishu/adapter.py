@@ -4183,11 +4183,18 @@ class FeishuAdapter(BasePlatformAdapter):
         # payload, so a disabled feature costs nothing on the hot path.
         jev_gate_pending = False
         is_group = getattr(message, "chat_type", "p2p") != "p2p"
+        # A message already inside a topic carries thread_id (a live omt_*) or
+        # root_id (the om_* the topic was keyed on). The FIRST message of a
+        # topic has neither — the bot creates the topic from its own reply — so
+        # a top-level group message is judged regardless of this sub-switch.
+        in_thread = bool(
+            getattr(message, "thread_id", None) or getattr(message, "root_id", None)
+        )
         if (
             reason in (None, "group_mention_missing")
             and is_group
             and not is_bot
-            and self._jev_channel_autoreply_enabled()
+            and self._jev_channel_autoreply_enabled(in_thread=in_thread)
             and not self._mentions_self(message)
         ):
             jev_gate_pending = True
@@ -6350,15 +6357,19 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.debug("[Feishu] Jev policy unavailable", exc_info=True)
             return None
 
-    def _jev_channel_autoreply_enabled(self) -> bool:
-        """May an unmentioned group message be judged instead of dropped?"""
+    def _jev_channel_autoreply_enabled(self, *, in_thread: bool = False) -> bool:
+        """May an unmentioned group message be judged instead of dropped?
+
+        ``in_thread`` messages need their own opt-in — see
+        ``jev_policy.channel_autoreply_active``.
+        """
         settings = self._jev_settings()
         if settings is None:
             return False
         try:
             from agent import jev_policy
 
-            return jev_policy.channel_autoreply_active(settings)
+            return jev_policy.channel_autoreply_active(settings, in_thread=in_thread)
         except Exception:
             logger.debug("[Feishu] Jev autoreply gate check failed", exc_info=True)
             return False

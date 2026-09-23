@@ -58,7 +58,9 @@ def _adapter_with_jev(monkeypatch, *, active: bool, verdict):
 
     adapter = make_adapter_skeleton()
     monkeypatch.setattr(jev_policy, "load_jev_settings", lambda: SimpleNamespace(name="stub"))
-    monkeypatch.setattr(jev_policy, "channel_autoreply_active", lambda _s: active)
+    monkeypatch.setattr(
+        jev_policy, "channel_autoreply_active", lambda _s, **_kw: active,
+    )
 
     async def _judge(text, **_kwargs):
         return verdict
@@ -118,9 +120,15 @@ def test_an_unimportable_policy_module_keeps_the_bot_quiet(monkeypatch):
 
 
 def _handoff_adapter(
-    monkeypatch, *, autoreply_on: bool, require_mention: bool = True, mentioned: bool = False,
+    monkeypatch, *, autoreply_on: bool, require_mention: bool = True,
+    mentioned: bool = False, thread_on: bool = False,
 ):
-    """An adapter whose _process_inbound_message only records its kwargs."""
+    """An adapter whose _process_inbound_message only records its kwargs.
+
+    The autoreply gate is stubbed at the adapter boundary but keeps the real
+    in_thread contract, so the matrix exercises how the adapter classifies a
+    message rather than re-testing the policy's own flag handling.
+    """
     from tests.gateway.feishu_helpers import install_dedup_state
 
     adapter = make_adapter_skeleton(
@@ -129,7 +137,9 @@ def _handoff_adapter(
     install_dedup_state(adapter)
     stub_mention(adapter, mentioned)
     monkeypatch.setattr(
-        type(adapter), "_jev_channel_autoreply_enabled", lambda self: autoreply_on
+        type(adapter),
+        "_jev_channel_autoreply_enabled",
+        lambda self, *, in_thread=False: autoreply_on and (thread_on or not in_thread),
     )
     seen: list[dict] = []
 
@@ -140,11 +150,14 @@ def _handoff_adapter(
     return adapter, seen
 
 
-def _event(*, sender_type="user", chat_type="group", message_id="om_1"):
+def _event(*, sender_type="user", chat_type="group", message_id="om_1",
+           thread_id=None, root_id=None):
+    message = make_message(message_id=message_id, chat_type=chat_type)
+    message.thread_id = thread_id
+    message.root_id = root_id
     return SimpleNamespace(
         event=SimpleNamespace(
-            sender=make_sender(sender_type=sender_type),
-            message=make_message(message_id=message_id, chat_type=chat_type),
+            sender=make_sender(sender_type=sender_type), message=message,
         )
     )
 
@@ -319,3 +332,90 @@ def test_an_unmentioned_slash_command_is_dropped_without_consulting_jev(monkeypa
     run(text="/reset")
     assert adapter._dispatch_inbound_event.await_count == 0
     assert adapter._judged == []
+
+
+# --- the thread sub-switch -------------------------------------------------
+#
+# A message inside an existing topic is a conversation the agent is usually
+# already part of, so judging every follow-up needs its own opt-in. The FIRST
+# message of a topic carries neither thread_id nor root_id — the bot creates
+# the topic from its own reply — so it is never gated by this sub-switch.
+
+
+_THREAD_MATRIX = [
+    # thread markers, thread_autoreply, expected
+    pytest.param({}, False, "judged", id="top_level:thread_off_still_judged"),
+    pytest.param({}, True, "judged", id="top_level:thread_on_judged"),
+    pytest.param({"thread_id": "omt_1"}, False, "dropped", id="live_thread:off_not_judged"),
+    pytest.param({"thread_id": "omt_1"}, True, "judged", id="live_thread:on_judged"),
+    pytest.param({"root_id": "om_root"}, False, "dropped", id="rooted_thread:off_not_judged"),
+    pytest.param({"root_id": "om_root"}, True, "judged", id="rooted_thread:on_judged"),
+]
+
+
+@pytest.mark.parametrize("markers, thread_on, expected", _THREAD_MATRIX)
+def test_the_thread_sub_switch(monkeypatch, markers, thread_on, expected):
+    adapter, seen = _handoff_adapter(
+        monkeypatch, autoreply_on=True, require_mention=True, thread_on=thread_on,
+    )
+    asyncio.run(adapter._handle_message_event_data(_event(**markers)))
+
+    if expected == "dropped":
+        assert seen == [], "require_mention should drop it once the gate declines"
+        return
+    assert len(seen) == 1
+    assert seen[0]["jev_gate_pending"] is True
+
+
+def test_an_unjudged_thread_message_follows_the_normal_path(monkeypatch):
+    # thread_autoreply off does not mean "never answer in a thread" — it means
+    # the gate does not apply, so the mention gate decides as it always did.
+    adapter, seen = _handoff_adapter(
+        monkeypatch, autoreply_on=True, require_mention=False, thread_on=False,
+    )
+    asyncio.run(adapter._handle_message_event_data(_event(thread_id="omt_1")))
+    assert len(seen) == 1
+    assert seen[0]["jev_gate_pending"] is False, "answered, but never judged"
+
+
+def test_the_thread_sub_switch_cannot_open_the_gate_on_its_own(monkeypatch):
+    adapter, seen = _handoff_adapter(
+        monkeypatch, autoreply_on=False, require_mention=True, thread_on=True,
+    )
+    asyncio.run(adapter._handle_message_event_data(_event(thread_id="omt_1")))
+    assert seen == []
+
+
+# --- the policy-level flag -------------------------------------------------
+
+
+def test_thread_autoreply_defaults_to_off():
+    from agent import jev_policy
+
+    settings = jev_policy.JevSettings(
+        api_key="k", agent_description="A SOC assistant.", channel_autoreply=True,
+    )
+    assert settings.thread_autoreply is False
+    assert jev_policy.channel_autoreply_active(settings) is True
+    assert jev_policy.channel_autoreply_active(settings, in_thread=True) is False
+
+
+def test_thread_autoreply_on_opens_the_gate_inside_threads():
+    from agent import jev_policy
+
+    settings = jev_policy.JevSettings(
+        api_key="k", agent_description="A SOC assistant.",
+        channel_autoreply=True, thread_autoreply=True,
+    )
+    assert jev_policy.channel_autoreply_active(settings, in_thread=True) is True
+
+
+def test_thread_autoreply_is_a_sub_switch_of_channel_autoreply():
+    from agent import jev_policy
+
+    settings = jev_policy.JevSettings(
+        api_key="k", agent_description="A SOC assistant.",
+        channel_autoreply=False, thread_autoreply=True,
+    )
+    assert jev_policy.channel_autoreply_active(settings) is False
+    assert jev_policy.channel_autoreply_active(settings, in_thread=True) is False
