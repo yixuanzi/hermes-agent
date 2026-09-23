@@ -1965,15 +1965,25 @@ DEFAULT_CONFIG = {
         "base_url": "https://api.typesafe.ai",
         "model": "jev-latest",
         "timeout": 8.0,
+        # Master switch for unaddressed group messages, checked BEFORE the two
+        # sub-switches below. Off (default), there is no admission stage: Jev is
+        # never called, every message takes the pre-Jev path, and the
+        # sub-switches do nothing on their own. On, an unaddressed group message
+        # is answered ONLY with Jev's explicit blessing: a denial, an error, a
+        # category the sub-switches do not cover, or a missing key all mean
+        # silence. The sub-switches narrow this; they never widen it.
+        "autoreply": False,
         # Answer group/channel messages that did not @-mention the bot, when
-        # Jev judges them this agent's business. Requires agent_description.
+        # Jev judges them this agent's business. Requires agent_description,
+        # and does nothing unless autoreply above is on.
         "channel_autoreply": False,
         # Extend that to messages inside an existing group topic/thread. Off by
         # default: a thread is usually a conversation the agent is already part
-        # of, and re-judging every follow-up would cut one off mid-way. Off, a
-        # thread message is left to the normal path (the mention gate decides).
+        # of, and re-judging every follow-up would cut one off mid-way. Under
+        # the master switch, off means a thread message is silenced; with the
+        # master switch off it is simply left to the mention gate, as before.
         # The first message of a topic is not a thread message and is always
-        # judged when channel_autoreply is on.
+        # judged when autoreply + channel_autoreply are on.
         "thread_autoreply": False,
         # Rate the task low/medium/high and route it to models.<band>.
         "complexity_routing": False,

@@ -250,6 +250,7 @@ class JevSettings:
     base_url: str = DEFAULT_JEV_BASE_URL
     model: str = DEFAULT_JEV_MODEL
     timeout: float = DEFAULT_JEV_TIMEOUT
+    autoreply_gate: bool = False
     channel_autoreply: bool = False
     thread_autoreply: bool = False
     complexity_routing: bool = False
@@ -344,6 +345,7 @@ def load_jev_settings() -> JevSettings:
         base_url=str(pick("TYPESAFE_BASE_URL", "base_url") or DEFAULT_JEV_BASE_URL),
         model=str(pick("TYPESAFE_MODEL", "model") or DEFAULT_JEV_MODEL),
         timeout=_as_float(pick("HERMES_JEV_TIMEOUT", "timeout"), DEFAULT_JEV_TIMEOUT),
+        autoreply_gate=_as_bool(pick("HERMES_JEV_AUTOREPLY", "autoreply"), False),
         channel_autoreply=_as_bool(
             pick("HERMES_JEV_CHANNEL_AUTOREPLY", "channel_autoreply"), False
         ),
@@ -388,6 +390,44 @@ def build_client(settings: Optional[JevSettings] = None) -> Optional[JevClient]:
 # ---------------------------------------------------------------------------
 # Feature gates
 # ---------------------------------------------------------------------------
+
+
+#: What to do with an unaddressed group message, from ``channel_admission_mode``.
+JUDGE = "judge"      # hand it to the Jev gate
+SILENCE = "silence"  # do not answer it; the gate could not vouch for it
+NORMAL = "normal"    # pre-Jev behavior — the mention gate decides
+
+
+def channel_admission_mode(
+    settings: Optional[JevSettings] = None, *, in_thread: bool = False,
+) -> str:
+    """Decide how an unaddressed group message should be handled.
+
+    ``HERMES_JEV_AUTOREPLY`` is the master switch for the whole admission
+    layer, and it is checked *first*:
+
+    * **off** (default) — Jev is never asked. Every message takes the pre-Jev
+      path and the mention gate alone decides it. The sub-switches are inert,
+      because a verdict nobody acts on is a second of latency and an API call
+      spent on nothing.
+    * **on** — an unaddressed group message is answered only with Jev's
+      explicit blessing. The sub-switches then select which categories are
+      *eligible* to be judged; everything else is ``SILENCE``: channel
+      answering off, threads not opted in, no API key, no agent description.
+      The verdict stage is already fail-closed, so a denial, a transport error
+      or an exception also end in silence.
+
+    So the sub-switches never widen the master switch, they only narrow it.
+    Returning one decision rather than exposing the flags keeps that ordering
+    in one place — a caller reading them separately would have to re-derive it,
+    and would get it wrong the day a third category appears.
+    """
+    settings = settings if settings is not None else load_jev_settings()
+    if not settings.autoreply_gate:
+        return NORMAL
+    if channel_autoreply_active(settings, in_thread=in_thread):
+        return JUDGE
+    return SILENCE
 
 
 def channel_autoreply_active(

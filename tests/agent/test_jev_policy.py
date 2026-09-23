@@ -18,7 +18,8 @@ _JEV_ENV = [
     "HERMES_JEV_RELEVANCE_THRESHOLD", "HERMES_JEV_MIN_CONFIDENCE",
     "HERMES_JEV_MODEL_LOW", "HERMES_JEV_MODEL_MEDIUM", "HERMES_JEV_MODEL_HIGH",
     "HERMES_JEV_PROVIDER_LOW", "HERMES_JEV_PROVIDER_MEDIUM", "HERMES_JEV_PROVIDER_HIGH",
-    "HERMES_JEV_AGENT_DESCRIPTION", "HERMES_JEV_TOOLS",
+    "HERMES_JEV_AGENT_DESCRIPTION", "HERMES_JEV_TOOLS", "HERMES_JEV_REMOTE_AGENTS",
+    "HERMES_JEV_AUTOREPLY", "HERMES_JEV_THREAD_AUTOREPLY",
 ]
 
 
@@ -1228,3 +1229,85 @@ def test_remote_agents_do_not_reach_the_complexity_request():
     )
     state, _ = jev_policy._complexity_request("scan this subnet", settings)
     assert "remote_agents" not in state
+
+
+# --- the master switch gates the whole layer; sub-switches only narrow it --
+
+
+@pytest.mark.parametrize(
+    "master, channel, thread, in_thread, expected",
+    [
+        # Master off: Jev is never asked, whatever the sub-switches say.
+        (False, False, False, False, jev_policy.NORMAL),
+        (False, True, False, False, jev_policy.NORMAL),
+        (False, True, False, True, jev_policy.NORMAL),
+        (False, True, True, True, jev_policy.NORMAL),
+        (False, False, True, False, jev_policy.NORMAL),
+        # Master on: the sub-switches pick what is eligible; the rest is silence.
+        (True, False, False, False, jev_policy.SILENCE),
+        (True, True, False, False, jev_policy.JUDGE),
+        (True, True, False, True, jev_policy.SILENCE),
+        (True, True, True, True, jev_policy.JUDGE),
+        (True, False, True, False, jev_policy.SILENCE),
+    ],
+)
+def test_channel_admission_mode(master, channel, thread, in_thread, expected):
+    settings = jev_policy.JevSettings(
+        api_key="k", agent_description="A SOC assistant.",
+        autoreply_gate=master, channel_autoreply=channel, thread_autoreply=thread,
+    )
+    assert jev_policy.channel_admission_mode(settings, in_thread=in_thread) == expected
+
+
+@pytest.mark.parametrize(
+    "api_key, agent_description",
+    [("", "A SOC assistant."), ("k", ""), ("", "")],
+)
+def test_a_misconfigured_gate_is_silence_under_the_master_switch(
+    api_key, agent_description
+):
+    # The point of the master switch: a config mistake must not quietly turn
+    # into "answer everything", which is what falling through would mean.
+    settings = jev_policy.JevSettings(
+        api_key=api_key, agent_description=agent_description,
+        autoreply_gate=True, channel_autoreply=True,
+    )
+    assert jev_policy.channel_admission_mode(settings) == jev_policy.SILENCE
+
+
+@pytest.mark.parametrize(
+    "api_key, agent_description",
+    [("", "A SOC assistant."), ("k", ""), ("", "")],
+)
+def test_the_same_misconfiguration_is_normal_without_the_master_switch(
+    api_key, agent_description
+):
+    settings = jev_policy.JevSettings(
+        api_key=api_key, agent_description=agent_description,
+        autoreply_gate=False, channel_autoreply=True,
+    )
+    assert jev_policy.channel_admission_mode(settings) == jev_policy.NORMAL
+
+
+def test_the_master_switch_is_checked_before_anything_else(monkeypatch):
+    # Master off must not even consult the sub-switch path: the verdict would
+    # be discarded, so asking for it is latency and an API call spent on
+    # nothing. Guard it by making that path fatal.
+    def _boom(*_a, **_kw):
+        raise AssertionError("channel_autoreply_active must not be reached")
+
+    monkeypatch.setattr(jev_policy, "channel_autoreply_active", _boom)
+    settings = jev_policy.JevSettings(
+        api_key="k", agent_description="A SOC assistant.",
+        autoreply_gate=False, channel_autoreply=True, thread_autoreply=True,
+    )
+    assert jev_policy.channel_admission_mode(settings) == jev_policy.NORMAL
+    assert jev_policy.channel_admission_mode(settings, in_thread=True) == jev_policy.NORMAL
+
+
+def test_the_master_switch_is_read_from_env_and_config(jev_env, monkeypatch):
+    assert jev_policy.load_jev_settings().autoreply_gate is False
+    jev_env["autoreply"] = True
+    assert jev_policy.load_jev_settings().autoreply_gate is True
+    monkeypatch.setenv("HERMES_JEV_AUTOREPLY", "false")
+    assert jev_policy.load_jev_settings().autoreply_gate is False

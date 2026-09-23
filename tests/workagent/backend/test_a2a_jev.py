@@ -53,7 +53,9 @@ def _stub_policy(monkeypatch, *, active=True, verdict=True, raises=False):
     from agent import jev_policy
 
     monkeypatch.setattr(jev_policy, "load_jev_settings", lambda: SimpleNamespace(name="stub"))
-    monkeypatch.setattr(jev_policy, "channel_autoreply_active", lambda _s: active)
+    monkeypatch.setattr(
+        jev_policy, "channel_autoreply_active", lambda _s, **_kw: active,
+    )
 
     async def _judge(_text, **_kwargs):
         if raises:
@@ -202,3 +204,24 @@ def test_the_profile_provider_id_reaches_the_agent(monkeypatch):
     )
     assert kwargs["provider"] == "custom"
     assert kwargs["requested_provider"] == "custom:glm"
+
+
+def test_the_autoreply_master_switch_does_not_reach_this_surface(monkeypatch):
+    """HERMES_JEV_AUTOREPLY governs unaddressed GROUP CHAT messages.
+
+    A2A is request/response: the caller blocks on a reply, and nothing in the
+    delegate envelope even carries the chat_type/mentioned fields this surface's
+    gate keys on. Letting a chat-scoped flag flip an RPC service from "answer"
+    to "refuse" would change a contract it was never described as touching, so
+    the master switch is deliberately not read here.
+    """
+    from agent import jev_policy
+
+    executor = _executor()
+    monkeypatch.setattr(
+        jev_policy, "load_jev_settings",
+        lambda: SimpleNamespace(name="stub", autoreply_gate=True),
+    )
+    monkeypatch.setattr(jev_policy, "channel_autoreply_active", lambda _s, **_kw: False)
+
+    assert asyncio.run(executor._jev_channel_request_in_scope("anything", {})) is True

@@ -712,6 +712,7 @@ RejectReason = Literal[
     "bot_not_mentioned",
     "group_policy_rejected",
     "group_mention_missing",
+    "jev_gate_unavailable",
 ]
 
 
@@ -4186,19 +4187,22 @@ class FeishuAdapter(BasePlatformAdapter):
         # A message already inside a topic carries thread_id (a live omt_*) or
         # root_id (the om_* the topic was keyed on). The FIRST message of a
         # topic has neither — the bot creates the topic from its own reply — so
-        # a top-level group message is judged regardless of this sub-switch.
+        # a top-level group message is judged regardless of the thread
+        # sub-switch.
         in_thread = bool(
             getattr(message, "thread_id", None) or getattr(message, "root_id", None)
         )
-        if (
-            reason in (None, "group_mention_missing")
-            and is_group
-            and not is_bot
-            and self._jev_channel_autoreply_enabled(in_thread=in_thread)
-            and not self._mentions_self(message)
-        ):
-            jev_gate_pending = True
-            reason = None
+        if reason in (None, "group_mention_missing") and is_group and not is_bot:
+            mode = self._jev_admission_mode(in_thread=in_thread)
+            # ``_mentions_self`` can parse a post payload, so it stays behind
+            # the cheap config read: with Jev entirely off it never runs.
+            if mode != "normal" and not self._mentions_self(message):
+                if mode == "judge":
+                    jev_gate_pending = True
+                    reason = None
+                else:
+                    # Master switch on, but nothing can vouch for this message.
+                    reason = "jev_gate_unavailable"
         if reason is not None:
             logger.debug("[Feishu] dropping inbound event: %s", reason)
             return
@@ -6357,22 +6361,29 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.debug("[Feishu] Jev policy unavailable", exc_info=True)
             return None
 
-    def _jev_channel_autoreply_enabled(self, *, in_thread: bool = False) -> bool:
-        """May an unmentioned group message be judged instead of dropped?
+    def _jev_admission_mode(self, *, in_thread: bool = False) -> str:
+        """How to handle an unaddressed group message: judge / silence / normal.
 
-        ``in_thread`` messages need their own opt-in — see
-        ``jev_policy.channel_autoreply_active``.
+        Resolved in one call so the master switch's inversion of the
+        sub-switches lives in the policy layer — see
+        ``jev_policy.channel_admission_mode``.
         """
-        settings = self._jev_settings()
-        if settings is None:
-            return False
         try:
             from agent import jev_policy
-
-            return jev_policy.channel_autoreply_active(settings, in_thread=in_thread)
         except Exception:
-            logger.debug("[Feishu] Jev autoreply gate check failed", exc_info=True)
-            return False
+            logger.debug("[Feishu] Jev policy unavailable", exc_info=True)
+            return "normal"
+
+        settings = self._jev_settings()
+        if settings is None:
+            # The policy module loaded but its settings did not resolve. Under
+            # the master switch that is still a gate we cannot vouch for.
+            return "normal"
+        try:
+            return jev_policy.channel_admission_mode(settings, in_thread=in_thread)
+        except Exception:
+            logger.debug("[Feishu] Jev admission mode check failed", exc_info=True)
+            return jev_policy.SILENCE if settings.autoreply_gate else jev_policy.NORMAL
 
     async def _jev_message_in_scope(
         self, *, text: str, chat_name: str, sender_name: str,

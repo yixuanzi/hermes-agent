@@ -7,7 +7,7 @@ answers propositions and ordinal ratings in a single forward pass and returns
 
 | # | Feature | Flag | Surfaces |
 |---|---------|------|----------|
-| 1 | **Channel admission** — answer a group message that did not `@`-mention the bot, when it is the agent's business | `HERMES_JEV_CHANNEL_AUTOREPLY` (+ `HERMES_JEV_THREAD_AUTOREPLY` for messages inside a topic) | Feishu/Lark gateway, WORKAGENT A2A service |
+| 1 | **Channel admission** — answer a group message that did not `@`-mention the bot, when it is the agent's business | `HERMES_JEV_CHANNEL_AUTOREPLY` (+ `HERMES_JEV_THREAD_AUTOREPLY` inside topics; `HERMES_JEV_AUTOREPLY` is the master switch for the stage — **gateway only**) | Feishu/Lark gateway, WORKAGENT A2A service |
 | 2 | **Complexity routing** — rate each turn low/medium/high and run it on that band's model | `HERMES_JEV_COMPLEXITY_ROUTING` | Gateway (all platforms), WORKAGENT A2A service |
 
 Both are **off by default** and independent — enabling one does not enable the
@@ -30,7 +30,8 @@ TYPESAFE_MODEL=jev-latest
 HERMES_JEV_TIMEOUT=8
 
 # Feature 1
-HERMES_JEV_CHANNEL_AUTOREPLY=true
+HERMES_JEV_AUTOREPLY=true               # false (default) = no admission stage at all
+HERMES_JEV_CHANNEL_AUTOREPLY=true       # inert unless AUTOREPLY is on
 HERMES_JEV_THREAD_AUTOREPLY=false       # also judge inside topics
 HERMES_JEV_BUSINESS_SCOPE="Security operations: alert triage, vulnerability and asset management, incident response, policy and compliance questions."
 HERMES_JEV_RELEVANCE_THRESHOLD=0.7
@@ -53,6 +54,7 @@ jev:
   base_url: https://api.typesafe.ai
   model: jev-latest
   timeout: 8.0
+  autoreply: false               # true = the gate is mandatory
   channel_autoreply: false
   thread_autoreply: false        # also judge inside topics
   complexity_routing: false
@@ -106,6 +108,55 @@ anyway. Everything else is untouched:
 - a **slash command** → still dropped (an unaddressed `/reset` typed at another
   bot must never reach this agent's dispatch)
 
+### The master switch
+
+`HERMES_JEV_AUTOREPLY` / `jev.autoreply`, **default off**, is the on/off switch
+for this whole stage, and it is checked **before** the sub-switches:
+
+| | `HERMES_JEV_AUTOREPLY=false` (default) | `=true` |
+|---|---|---|
+| `CHANNEL_AUTOREPLY` on, top-level message | **normal path — Jev is never called** | judged |
+| in a topic, `THREAD_AUTOREPLY` on | **normal path — Jev is never called** | judged |
+| `CHANNEL_AUTOREPLY` off | **normal path** | stay quiet |
+| in a topic, `THREAD_AUTOREPLY` off | **normal path** | stay quiet |
+| no API key / no `agent_description` | **normal path** | stay quiet |
+| gate says **yes** | — | answer |
+| gate says **no** | — | stay quiet |
+| gate errors / undecided | — | stay quiet |
+
+With the master switch off there is no admission stage at all: every message
+takes the pre-Jev path and the mention gate alone decides it. The sub-switches
+are inert — not "partially honoured". Asking Jev for a verdict nobody acts on
+would cost a second of latency and an API call per group message, so the check
+short-circuits before the request is built.
+
+With it on, an unaddressed group message is answered **only** with Jev's
+explicit blessing. The sub-switches then select which categories are *eligible*
+to be judged; every other outcome is silence, including a sub-switch simply
+being off. So the sub-switches never widen the master switch — they only narrow
+it.
+
+That asymmetry is the point: under `require_mention: false` the "normal path"
+means *answer everything*, so a config mistake — an expired key, an emptied
+`agent_description` — would silently turn the bot into an unfiltered responder.
+With the master switch on, the same mistake makes it quiet instead.
+
+**DMs and `@`-mentioned messages are never affected either way.** Neither are
+bot senders or slash commands, which the gate has always excluded.
+
+The decision is resolved in one place, `jev_policy.channel_admission_mode()`,
+which returns `judge` / `silence` / `normal`. Callers do not read the flags
+separately — the ordering is easy to re-derive wrongly.
+
+**Gateway only.** The master switch does not apply to the WORKAGENT A2A
+service. A2A is request/response — the caller blocks on a reply — and nothing
+in the delegate envelope even carries the `chat_type` / `mentioned` fields that
+surface's gate keys on, so its gate is inert for every real caller today.
+Letting a flag described as governing group chat flip an RPC service from
+"answer" to "refuse" would change a contract it was never described as
+touching. A2A keeps its own rule: anything short of an explicit "no" is
+answered.
+
 ### Messages inside a topic
 
 A message already inside a group topic/thread needs a second opt-in,
@@ -113,25 +164,28 @@ A message already inside a group topic/thread needs a second opt-in,
 thread is usually a conversation the agent is already part of, and re-judging
 every follow-up would cut one off mid-way.
 
+With `HERMES_JEV_AUTOREPLY` and `HERMES_JEV_CHANNEL_AUTOREPLY` both on:
+
 | message | `THREAD_AUTOREPLY` off (default) | on |
 |---|---|---|
 | top-level group message | **judged** | **judged** |
-| inside a topic (`thread_id` or `root_id` set) | not judged — left to the normal path | **judged** |
+| inside a topic (`thread_id` or `root_id` set) | **not answered** | **judged** |
 
-"Not judged" is not "never answered": the gate simply does not apply, so the
-mention gate decides exactly as it did before Jev existed — dropped under
-`require_mention: true`, answered under `require_mention: false`.
+The topic row is the master switch at work: a category the gate cannot vouch
+for is silence, not a free pass. With `HERMES_JEV_AUTOREPLY` off the whole
+stage is skipped and that message is left to the mention gate instead —
+dropped under `require_mention: true`, answered under `require_mention: false`.
 
 The **first** message of a topic carries neither `thread_id` nor `root_id` (the
 bot creates the topic from its own reply), so it is a top-level message and is
-always judged while channel autoreply is on. This sub-switch cannot open the
-gate on its own — `HERMES_JEV_CHANNEL_AUTOREPLY` still has to be on.
+judged whenever the stage is on. This sub-switch cannot open the gate on its
+own — `HERMES_JEV_CHANNEL_AUTOREPLY` has to be on too.
 
 ### When the gate runs
 
 The gate is **not** tied to the mention-drop path. It judges an unaddressed
 message whether the mention gate was about to drop it or the group admits
-unaddressed messages outright:
+unaddressed messages outright. With `HERMES_JEV_AUTOREPLY=true`:
 
 | `require_mention` | `HERMES_JEV_CHANNEL_AUTOREPLY` | @-mentioned | outcome |
 |---|---|---|---|
@@ -139,16 +193,19 @@ unaddressed messages outright:
 | `true` | off | yes | answered |
 | `true` | **on** | no | **judged** |
 | `true` | on | yes | answered |
-| `false` | off | no | answered |
+| `false` | off | no | not answered |
 | `false` | off | yes | answered |
 | `false` | **on** | no | **judged** |
 | `false` | on | yes | answered |
 
+With `HERMES_JEV_AUTOREPLY=false` this table collapses: nothing is judged and
+nothing is silenced, so `require_mention` alone decides every row.
+
 The `require_mention: false` + autoreply `on` row is the one that matters: that
 configuration answers *every* message in the group, so it is where a
-business-scope filter is worth the most. Turning the feature on changes only the
-two unmentioned rows — a mentioned message behaves identically either way, and
-every `off` row keeps its pre-Jev behavior exactly.
+business-scope filter is worth the most. The channel sub-switch changes only
+the two unmentioned rows — a mentioned message behaves identically either way,
+which is the whole carve-out: this stage is about UNADDRESSED messages.
 
 The flag is read *before* `_mentions_self()`, which can parse a post payload, so
 a disabled feature adds nothing to the hot path.

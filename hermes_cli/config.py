@@ -331,6 +331,7 @@ _EXTRA_ENV_KEYS = frozenset({
     # scopes and two sets of band models from one multiplexing gateway.
     "TYPESAFE_MODEL",
     "HERMES_JEV_TIMEOUT",
+    "HERMES_JEV_AUTOREPLY",
     "HERMES_JEV_CHANNEL_AUTOREPLY",
     "HERMES_JEV_THREAD_AUTOREPLY",
     "HERMES_JEV_COMPLEXITY_ROUTING",

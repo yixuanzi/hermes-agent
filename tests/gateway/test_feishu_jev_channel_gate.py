@@ -52,14 +52,18 @@ def test_a_dm_never_reaches_the_mention_gate():
 # --- the adapter's Jev helpers ---------------------------------------------
 
 
-def _adapter_with_jev(monkeypatch, *, active: bool, verdict):
+def _adapter_with_jev(monkeypatch, *, active: bool, verdict, gated: bool = False):
     from plugins.platforms.feishu import adapter as feishu_adapter
     from agent import jev_policy
 
     adapter = make_adapter_skeleton()
-    monkeypatch.setattr(jev_policy, "load_jev_settings", lambda: SimpleNamespace(name="stub"))
     monkeypatch.setattr(
-        jev_policy, "channel_autoreply_active", lambda _s, **_kw: active,
+        jev_policy, "load_jev_settings",
+        lambda: SimpleNamespace(name="stub", autoreply_gate=gated),
+    )
+    monkeypatch.setattr(
+        jev_policy, "channel_admission_mode",
+        lambda _s, **_kw: "judge" if active else ("silence" if gated else "normal"),
     )
 
     async def _judge(text, **_kwargs):
@@ -69,14 +73,42 @@ def _adapter_with_jev(monkeypatch, *, active: bool, verdict):
     return adapter, feishu_adapter
 
 
-def test_the_gate_is_reported_off_when_autoreply_is_not_active(monkeypatch):
+def test_the_mode_is_normal_when_autoreply_is_not_active(monkeypatch):
     adapter, _ = _adapter_with_jev(monkeypatch, active=False, verdict=True)
-    assert adapter._jev_channel_autoreply_enabled() is False
+    assert adapter._jev_admission_mode() == "normal"
 
 
-def test_the_gate_is_reported_on_when_autoreply_is_active(monkeypatch):
+def test_the_mode_is_judge_when_autoreply_is_active(monkeypatch):
     adapter, _ = _adapter_with_jev(monkeypatch, active=True, verdict=True)
-    assert adapter._jev_channel_autoreply_enabled() is True
+    assert adapter._jev_admission_mode() == "judge"
+
+
+def test_the_mode_is_silence_when_the_gate_is_required_but_inactive(monkeypatch):
+    adapter, _ = _adapter_with_jev(monkeypatch, active=False, verdict=True, gated=True)
+    assert adapter._jev_admission_mode() == "silence"
+
+
+def test_a_raising_mode_check_falls_back_on_the_master_switch(monkeypatch):
+    from agent import jev_policy
+
+    adapter = make_adapter_skeleton()
+
+    def _boom(_s, **_kw):
+        raise RuntimeError("policy exploded")
+
+    monkeypatch.setattr(jev_policy, "channel_admission_mode", _boom)
+
+    monkeypatch.setattr(
+        jev_policy, "load_jev_settings",
+        lambda: SimpleNamespace(name="stub", autoreply_gate=False),
+    )
+    assert adapter._jev_admission_mode() == "normal"
+
+    monkeypatch.setattr(
+        jev_policy, "load_jev_settings",
+        lambda: SimpleNamespace(name="stub", autoreply_gate=True),
+    )
+    assert adapter._jev_admission_mode() == "silence"
 
 
 @pytest.mark.parametrize(
@@ -106,10 +138,11 @@ def test_a_raising_classifier_keeps_the_bot_quiet(monkeypatch):
     assert result is False
 
 
-def test_an_unimportable_policy_module_keeps_the_bot_quiet(monkeypatch):
+def test_unresolvable_settings_fall_back_to_the_normal_path(monkeypatch):
     adapter = make_adapter_skeleton()
     monkeypatch.setattr(type(adapter), "_jev_settings", lambda self: None)
-    assert adapter._jev_channel_autoreply_enabled() is False
+    assert adapter._jev_admission_mode() == "normal"
+    # The verdict stage stays fail-closed regardless.
     assert (
         asyncio.run(adapter._jev_message_in_scope(text="…", chat_name="", sender_name=""))
         is False
@@ -121,13 +154,17 @@ def test_an_unimportable_policy_module_keeps_the_bot_quiet(monkeypatch):
 
 def _handoff_adapter(
     monkeypatch, *, autoreply_on: bool, require_mention: bool = True,
-    mentioned: bool = False, thread_on: bool = False,
+    mentioned: bool = False, thread_on: bool = False, master_on: bool = True,
 ):
     """An adapter whose _process_inbound_message only records its kwargs.
 
     The autoreply gate is stubbed at the adapter boundary but keeps the real
     in_thread contract, so the matrix exercises how the adapter classifies a
     message rather than re-testing the policy's own flag handling.
+
+    ``master_on`` defaults to True because the sub-switches only exist inside
+    the master switch: with HERMES_JEV_AUTOREPLY off every mode is "normal",
+    and a matrix over the sub-switches would be measuring nothing.
     """
     from tests.gateway.feishu_helpers import install_dedup_state
 
@@ -138,8 +175,15 @@ def _handoff_adapter(
     stub_mention(adapter, mentioned)
     monkeypatch.setattr(
         type(adapter),
-        "_jev_channel_autoreply_enabled",
-        lambda self, *, in_thread=False: autoreply_on and (thread_on or not in_thread),
+        "_jev_admission_mode",
+        lambda self, *, in_thread=False: (
+            "normal" if not master_on
+            else (
+                "judge"
+                if autoreply_on and (thread_on or not in_thread)
+                else "silence"
+            )
+        ),
     )
     seen: list[dict] = []
 
@@ -162,22 +206,23 @@ def _event(*, sender_type="user", chat_type="group", message_id="om_1",
     )
 
 
-# The full admission matrix for a human group message: require_mention x
-# HERMES_JEV_CHANNEL_AUTOREPLY x whether the bot was @-mentioned.
+# The full admission matrix for a human group message, WITH the master switch
+# on: require_mention x HERMES_JEV_CHANNEL_AUTOREPLY x whether the bot was
+# @-mentioned. (Master off is _MASTER_MATRIX's job — it is "normal" throughout.)
 #
 # The row that matters is require_mention=False + autoreply=True + no mention.
 # Tying the gate to the drop path alone left that combination unguarded — and
 # require_mention=False is precisely the configuration where the bot would
 # otherwise answer EVERY message in the group, so it is the one that most needs
-# a business-scope filter. Every autoreply=False row must keep the exact
-# behavior it had before the gate existed.
+# a business-scope filter. Every mentioned row must keep the exact behavior it
+# had before the gate existed: the master switch is about UNADDRESSED messages.
 _ADMISSION_MATRIX = [
     # require_mention, autoreply, mentioned, expected outcome
     pytest.param(True,  False, False, "dropped",  id="mention_required:off:no_mention_dropped"),
     pytest.param(True,  False, True,  "normal",   id="mention_required:off:mentioned_normal"),
     pytest.param(True,  True,  False, "judged",   id="mention_required:on:no_mention_judged"),
     pytest.param(True,  True,  True,  "normal",   id="mention_required:on:mentioned_normal"),
-    pytest.param(False, False, False, "normal",   id="mention_optional:off:no_mention_normal"),
+    pytest.param(False, False, False, "dropped",  id="mention_optional:off:no_mention_silenced"),
     pytest.param(False, False, True,  "normal",   id="mention_optional:off:mentioned_normal"),
     pytest.param(False, True,  False, "judged",   id="mention_optional:on:no_mention_judged"),
     pytest.param(False, True,  True,  "normal",   id="mention_optional:on:mentioned_normal"),
@@ -200,8 +245,8 @@ def test_the_admission_matrix(monkeypatch, require_mention, autoreply, mentioned
 
 
 def test_turning_autoreply_on_changes_only_the_unmentioned_rows(monkeypatch):
-    # Guards the backward-compatibility claim above as one assertion rather
-    # than eight: enabling the feature must not alter a mentioned message.
+    # Guards the claim above as one assertion rather than eight: the channel
+    # sub-switch must never alter a mentioned message.
     changed = []
     for require_mention in (True, False):
         for mentioned in (True, False):
@@ -367,11 +412,25 @@ def test_the_thread_sub_switch(monkeypatch, markers, thread_on, expected):
     assert seen[0]["jev_gate_pending"] is True
 
 
-def test_an_unjudged_thread_message_follows_the_normal_path(monkeypatch):
-    # thread_autoreply off does not mean "never answer in a thread" — it means
-    # the gate does not apply, so the mention gate decides as it always did.
+def test_an_unopted_thread_message_is_silenced_under_the_master_switch(monkeypatch):
+    # require_mention=False is where the bot would otherwise answer every
+    # follow-up in the topic. Under the master switch, "not opted in" means
+    # silence rather than an unjudged answer.
     adapter, seen = _handoff_adapter(
         monkeypatch, autoreply_on=True, require_mention=False, thread_on=False,
+    )
+    asyncio.run(adapter._handle_message_event_data(_event(thread_id="omt_1")))
+    assert seen == []
+
+
+def test_the_same_thread_message_is_answered_unjudged_without_the_master_switch(
+    monkeypatch,
+):
+    # With HERMES_JEV_AUTOREPLY off nothing is judged and nothing is silenced;
+    # the mention gate decides, exactly as it did before Jev existed.
+    adapter, seen = _handoff_adapter(
+        monkeypatch, autoreply_on=True, require_mention=False, thread_on=False,
+        master_on=False,
     )
     asyncio.run(adapter._handle_message_event_data(_event(thread_id="omt_1")))
     assert len(seen) == 1
@@ -419,3 +478,72 @@ def test_thread_autoreply_is_a_sub_switch_of_channel_autoreply():
     )
     assert jev_policy.channel_autoreply_active(settings) is False
     assert jev_policy.channel_autoreply_active(settings, in_thread=True) is False
+
+
+# --- the master switch -----------------------------------------------------
+#
+# HERMES_JEV_AUTOREPLY is checked before anything else. Off, Jev is never
+# consulted and the sub-switches are inert — every message takes the pre-Jev
+# path. On, an unaddressed group message is answered ONLY with Jev's blessing;
+# every other outcome, including the sub-switch simply being off, is silence.
+
+
+_MASTER_MATRIX = [
+    # master, channel_on, in_thread, thread_on, require_mention, expected
+    pytest.param(False, False, False, False, False, "normal",
+                 id="master_off:gate_off:answered_unjudged"),
+    pytest.param(False, True, False, False, False, "normal",
+                 id="master_off:gate_on:still_unjudged"),
+    pytest.param(False, True, True, True, False, "normal",
+                 id="master_off:thread_on:still_unjudged"),
+    pytest.param(True, False, False, False, False, "dropped",
+                 id="master_on:gate_off:silenced"),
+    pytest.param(True, True, False, False, False, "judged",
+                 id="master_on:gate_on:judged"),
+    pytest.param(True, True, True, False, False, "dropped",
+                 id="master_on:thread_not_covered:silenced"),
+    pytest.param(True, True, True, True, False, "judged",
+                 id="master_on:thread_covered:judged"),
+    pytest.param(True, False, False, False, True, "dropped",
+                 id="master_on:gate_off:mention_required_still_dropped"),
+]
+
+
+@pytest.mark.parametrize(
+    "master, channel_on, in_thread, thread_on, require_mention, expected",
+    _MASTER_MATRIX,
+)
+def test_the_master_switch_matrix(
+    monkeypatch, master, channel_on, in_thread, thread_on, require_mention, expected
+):
+    adapter, seen = _handoff_adapter(
+        monkeypatch, autoreply_on=channel_on, require_mention=require_mention,
+        thread_on=thread_on, master_on=master,
+    )
+    markers = {"thread_id": "omt_1"} if in_thread else {}
+    asyncio.run(adapter._handle_message_event_data(_event(**markers)))
+
+    if expected == "dropped":
+        assert seen == [], "the master switch should have silenced this"
+        return
+    assert len(seen) == 1
+    assert seen[0]["jev_gate_pending"] is (expected == "judged")
+
+
+def test_the_master_switch_never_silences_a_mentioned_message(monkeypatch):
+    adapter, seen = _handoff_adapter(
+        monkeypatch, autoreply_on=False, require_mention=False,
+        mentioned=True, master_on=True,
+    )
+    asyncio.run(adapter._handle_message_event_data(_event()))
+    assert len(seen) == 1
+    assert seen[0]["jev_gate_pending"] is False
+
+
+def test_the_master_switch_never_silences_a_dm(monkeypatch):
+    adapter, seen = _handoff_adapter(
+        monkeypatch, autoreply_on=False, require_mention=False, master_on=True,
+    )
+    asyncio.run(adapter._handle_message_event_data(_event(chat_type="p2p")))
+    assert len(seen) == 1
+    assert seen[0]["jev_gate_pending"] is False
