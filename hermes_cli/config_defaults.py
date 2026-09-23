@@ -1982,6 +1982,15 @@ DEFAULT_CONFIG = {
         # Channel autoreply stays off while this is empty — there is nothing to
         # judge relevance against.
         "business_scope": "",
+        # Context for the COMPLEXITY question only: what this agent is and what
+        # it can do. A request one of its tools answers directly is cheaper than
+        # one it must reason out, so these change the band, not just the wording.
+        # Both optional; each is omitted from the request when empty.
+        "agent_description": "",
+        # A tool inventory. Either a plain string, a {name: description} map, or
+        # a list of names / {name, description} entries — all render to one
+        # readable block. HERMES_JEV_TOOLS overrides this with a plain string.
+        "tools": {},
         # A channel message is answered when Jev's in-scope probability reaches
         # this value; raise it to make the bot more reticent.
         "relevance_threshold": 0.7,

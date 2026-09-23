@@ -18,6 +18,7 @@ _JEV_ENV = [
     "HERMES_JEV_RELEVANCE_THRESHOLD", "HERMES_JEV_MIN_CONFIDENCE",
     "HERMES_JEV_MODEL_LOW", "HERMES_JEV_MODEL_MEDIUM", "HERMES_JEV_MODEL_HIGH",
     "HERMES_JEV_PROVIDER_LOW", "HERMES_JEV_PROVIDER_MEDIUM", "HERMES_JEV_PROVIDER_HIGH",
+    "HERMES_JEV_AGENT_DESCRIPTION", "HERMES_JEV_TOOLS",
 ]
 
 
@@ -956,3 +957,121 @@ def test_an_empty_provider_env_var_is_not_a_provider(jev_env, monkeypatch):
 )
 def test_a_yaml_band_entry_is_read_in_both_forms(raw, expected):
     assert jev_policy._configured_tier(raw) == expected
+
+
+# --- complexity context: what the agent is and what it can do --------------
+#
+# Complexity is a property of the task AS THIS AGENT WOULD DO IT: a request one
+# of its tools answers directly is cheaper than one it has to reason out. These
+# are stable per agent (unlike channel/sender), so they do not make the same
+# request band differently from one room to the next.
+
+
+def test_the_complexity_state_is_just_the_request_when_nothing_is_configured():
+    state, question = jev_policy._complexity_request("x", jev_policy.JevSettings())
+    assert state == {"request": "x"}
+    assert question == jev_policy._COMPLEXITY_QUESTION
+
+
+def test_agent_and_tools_join_the_complexity_state():
+    settings = jev_policy.JevSettings(
+        agent_description="A SOC assistant.", tools="threat_intel: reputation lookup",
+    )
+    state, question = jev_policy._complexity_request("x", settings)
+    assert state == {
+        "request": "x",
+        "agent": "A SOC assistant.",
+        "tools": "threat_intel: reputation lookup",
+    }
+    assert "`agent`" in question and "`tools`" in question
+
+
+@pytest.mark.parametrize(
+    "agent_description, tools, expect_agent, expect_tools",
+    [
+        ("A SOC assistant.", "", True, False),
+        ("", "threat_intel: x", False, True),
+        ("A SOC assistant.", "threat_intel: x", True, True),
+        ("", "", False, False),
+        ("   ", "   ", False, False),
+    ],
+)
+def test_the_question_names_only_the_fields_actually_sent(
+    agent_description, tools, expect_agent, expect_tools
+):
+    # A question referencing a state key the request does not carry is worse
+    # than no context at all.
+    settings = jev_policy.JevSettings(agent_description=agent_description, tools=tools)
+    state, question = jev_policy._complexity_request("x", settings)
+    assert ("agent" in state) is expect_agent
+    assert ("tools" in state) is expect_tools
+    assert ("`agent`" in question) is expect_agent
+    assert ("`tools`" in question) is expect_tools
+
+
+def test_a_structured_tool_inventory_is_rendered_for_the_wire():
+    # JevSettings is constructed directly in places, so the state must carry a
+    # readable block rather than a nested object.
+    settings = jev_policy.JevSettings(
+        tools={"threat_intel": "reputation lookup", "terminal": "run shell"},
+    )
+    state, _ = jev_policy._complexity_request("x", settings)
+    assert state["tools"] == "threat_intel: reputation lookup\nterminal: run shell"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("a: x; b: y", "a: x; b: y"),
+        ({"a": "x", "b": "y"}, "a: x\nb: y"),
+        ({"a": "", "b": None}, "a\nb"),
+        (["a", "b"], "a\nb"),
+        ([{"name": "a", "description": "x"}, {"name": "b"}], "a: x\nb"),
+        ([{"name": "a", "desc": "x"}], "a: x"),
+        ([{"description": "no name"}], ""),
+        ({}, ""),
+        ([], ""),
+        (None, ""),
+        ("  spaced  ", "spaced"),
+    ],
+)
+def test_tool_inventory_forms(raw, expected):
+    assert jev_policy._normalize_tools(raw) == expected
+
+
+def test_the_context_comes_from_env_and_config(jev_env, monkeypatch):
+    jev_env["agent_description"] = "from config"
+    jev_env["tools"] = {"a": "x"}
+    settings = jev_policy.load_jev_settings()
+    assert settings.agent_description == "from config"
+    assert settings.tools == "a: x"
+
+    monkeypatch.setenv("HERMES_JEV_AGENT_DESCRIPTION", "from env")
+    monkeypatch.setenv("HERMES_JEV_TOOLS", "b: y")
+    settings = jev_policy.load_jev_settings()
+    assert settings.agent_description == "from env"
+    assert settings.tools == "b: y"
+
+
+def test_the_context_reaches_the_request_judge_complexity_sends():
+    client = _StubClient({"complexity": _score("low", 0.9)})
+    settings = jev_policy.JevSettings(
+        api_key="k", agent_description="A SOC assistant.", tools="threat_intel: x",
+    )
+    jev_policy.judge_complexity("look up an IP", settings=settings, client=client)
+
+    state, questions = client.asked[0]
+    assert state["agent"] == "A SOC assistant."
+    assert state["tools"] == "threat_intel: x"
+    assert "`tools`" in questions["complexity"]["instructions"]
+
+
+def test_the_relevance_request_is_unaffected_by_the_complexity_context():
+    # agent/tools describe the executor and belong to the complexity question;
+    # admission is judged against business_scope alone.
+    client = _StubClient({"in_scope": _noul(0.9), "wants_answer": _noul(0.9)})
+    settings = _settings(agent_description="A SOC assistant.", tools="threat_intel: x")
+    jev_policy.judge_channel_relevance("hello", settings=settings, client=client)
+
+    state, _ = client.asked[0]
+    assert "agent" not in state and "tools" not in state

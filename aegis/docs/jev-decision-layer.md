@@ -42,6 +42,8 @@ HERMES_JEV_MODEL_MEDIUM=gpt-5
 HERMES_JEV_MODEL_HIGH=claude-opus-5
 HERMES_JEV_PROVIDER_HIGH=anthropic        # optional, per band
 HERMES_JEV_MIN_CONFIDENCE=0.5
+HERMES_JEV_AGENT_DESCRIPTION="Hermes security-operations assistant for a SOC team."
+HERMES_JEV_TOOLS="threat_intel: reputation lookup; siem_query: run a SIEM query"
 ```
 
 ```yaml
@@ -54,6 +56,8 @@ jev:
   complexity_routing: false
   complexity_scope: session      # session | turn
   business_scope: ""
+  agent_description: ""          # complexity context only
+  tools: {}                      # complexity context only
   relevance_threshold: 0.7
   min_confidence: 0.5
   models:
@@ -366,12 +370,14 @@ is expressible. A `choice` would flatten that into unrelated categories.
 {
   "model": "jev-latest",
   "state": {
-    "request": "重新设计整个零信任接入架构，并给出分阶段迁移方案"
+    "request": "查一下 8.8.8.8 的威胁情报",
+    "agent": "Hermes security-operations assistant for a SOC team.",
+    "tools": "threat_intel: look up reputation for an IP, domain or file hash\nsiem_query: run a saved query against the SIEM\nasset_lookup: resolve a host to owner, environment and criticality"
   },
   "questions": {
     "complexity": {
       "type": "score",
-      "instructions": "How much reasoning depth and how many steps does it take to fully answer `request`? low = a greeting, lookup, or single short factual answer. medium = a focused task needing a few steps, a tool call, or a short piece of code. high = multi-step work needing planning, deep analysis, cross-referencing, or a substantial code change.",
+      "instructions": "How much reasoning depth and how many steps does it take to fully answer `request`? low = a greeting, lookup, or single short factual answer. medium = a focused task needing a few steps, a tool call, or a short piece of code. high = multi-step work needing planning, deep analysis, cross-referencing, or a substantial code change. Judge the work as it would be done by the assistant described in `agent`, using the tools listed in `tools`: a request that one of those capabilities answers directly is cheaper than one that has to be reasoned out or composed from several steps.",
       "criteria": ["low", "medium", "high"]
     }
   }
@@ -380,13 +386,58 @@ is expressible. A `choice` would flatten that into unrelated categories.
 
 #### `state` fields
 
-| key | source | why it is there |
-|---|---|---|
-| `request` | the turn's user message | The **only** field. No business scope, no channel, no sender. |
+| key | required | source | why it is there |
+|---|---|---|---|
+| `request` | **yes** | the turn's user message | What is being rated. |
+| `agent` | no — omitted when empty | `HERMES_JEV_AGENT_DESCRIPTION` / `jev.agent_description` | Complexity is the cost of the task *as this agent would do it*. |
+| `tools` | no — omitted when empty | `HERMES_JEV_TOOLS` / `jev.tools` | A request one of these answers directly is a `low`; the same request without the tool may be a `medium`. |
 
-That minimalism is deliberate. Complexity is a property of the *task*, not of
-who asked or where — feeding it scope or channel would make identical requests
-band differently across rooms, and the band decides which model runs.
+Still **no** business scope, no channel, no sender. `agent` and `tools` describe
+the *executor* and are stable per agent, so they cannot make the same request
+band differently from one room to the next — which is exactly why the channel
+and the sender stay out.
+
+The question is built to name **only the fields actually sent**: referencing a
+state key the request does not carry is worse than sending no context at all.
+
+##### What the context buys
+
+Measured on the same endpoint, same requests, with and without a SOC agent
+description and a four-tool inventory:
+
+| request | `request` only | `+agent +tools` |
+|---|---|---|
+| 查一下 8.8.8.8 的威胁情报 | `medium` (0.54) | **`low` (0.77)** |
+| 这台主机 web-prod-07 是谁负责的？ | `low` (0.74) | `low` (0.64) |
+| 帮我把过去24小时的登录失败告警拉出来看看有没有异常 | `medium` (0.84) | `medium` (0.69) |
+| 重新设计整个零信任接入架构，并给出分阶段迁移方案 | `high` (1.00) | `high` (0.96) |
+| 写个正则匹配一下邮箱 | `medium` (0.51) | `low` (0.29) |
+
+Row 1 is the point: with a `threat_intel` tool that request really is one
+lookup, and the band moves to `low` with *higher* confidence than the
+context-free `medium` it displaced. The clear cases are unchanged. Note row 5 —
+the direction is right but 0.29 falls under the default `min_confidence`, so
+that turn keeps the session model; context sharpens the common cases, it does
+not make every case confident.
+
+#### Configuring the inventory
+
+`HERMES_JEV_TOOLS` is a plain string (env vars have no structure). `jev.tools`
+in `config.yaml` also accepts a map or a list, all rendering to the same
+readable block:
+
+```yaml
+jev:
+  agent_description: "Hermes security-operations assistant for a SOC team."
+  tools:
+    threat_intel: look up reputation for an IP, domain or file hash
+    siem_query:   run a saved query against the SIEM and return rows
+```
+
+Keep it to what changes the *cost* of a request. This is hand-maintained
+configuration, not the agent's live toolset — it does not track
+`platform_toolsets` or enabled plugins, so an inventory that drifts from reality
+will mis-band in whichever direction it is wrong.
 
 `criteria` is `COMPLEXITY_TIERS`, and the band names are **also the rung labels
 the question defines**. Renaming a tier silently rewrites the question, which is

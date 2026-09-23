@@ -88,6 +88,27 @@ _COMPLEXITY_QUESTION = (
 )
 
 
+def _complexity_question(*, has_agent: bool, has_tools: bool) -> str:
+    """The complexity question, naming only the context fields actually sent.
+
+    A question that references a state key the request does not carry is worse
+    than no context at all, so the clause is built from what is present.
+    """
+    if not has_agent and not has_tools:
+        return _COMPLEXITY_QUESTION
+    if has_agent and has_tools:
+        subject = "the assistant described in `agent`, using the tools listed in `tools`"
+    elif has_agent:
+        subject = "the assistant described in `agent`"
+    else:
+        subject = "an assistant with the tools listed in `tools`"
+    return _COMPLEXITY_QUESTION + (
+        f" Judge the work as it would be done by {subject}: a request that one of "
+        "those capabilities answers directly is cheaper than one that has to be "
+        "reasoned out or composed from several steps."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Env / config resolution
 # ---------------------------------------------------------------------------
@@ -151,6 +172,40 @@ def _as_float(raw: Any, default: float) -> float:
         return default
 
 
+def _normalize_tools(raw: Any) -> str:
+    """Render a configured tool inventory as one readable block.
+
+    Accepts the env-var form (a plain string, passed through), a mapping of
+    ``name -> description``, or a list of names / ``{name, description}``
+    entries.  The result is what Jev sees, so it stays human-readable rather
+    than becoming JSON.
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw.strip()
+    if isinstance(raw, Mapping):
+        lines = [
+            f"{str(name).strip()}: {str(desc).strip()}" if str(desc or "").strip()
+            else str(name).strip()
+            for name, desc in raw.items()
+            if str(name).strip()
+        ]
+        return "\n".join(lines)
+    if isinstance(raw, (list, tuple)):
+        lines = []
+        for item in raw:
+            if isinstance(item, Mapping):
+                name = str(item.get("name") or "").strip()
+                desc = str(item.get("description") or item.get("desc") or "").strip()
+                if name:
+                    lines.append(f"{name}: {desc}" if desc else name)
+            elif str(item or "").strip():
+                lines.append(str(item).strip())
+        return "\n".join(lines)
+    return str(raw).strip()
+
+
 def _as_scope(raw: Any) -> str:
     """Parse the complexity scope, falling back loudly on an unknown value."""
     if raw is None:
@@ -187,6 +242,8 @@ class JevSettings:
     complexity_routing: bool = False
     complexity_scope: str = DEFAULT_COMPLEXITY_SCOPE
     business_scope: str = ""
+    agent_description: str = ""
+    tools: str = ""
     relevance_threshold: float = 0.7
     min_confidence: float = 0.5
     tier_models: Dict[str, TierModel] = field(default_factory=dict)
@@ -273,6 +330,10 @@ def load_jev_settings() -> JevSettings:
             pick("HERMES_JEV_COMPLEXITY_SCOPE", "complexity_scope")
         ),
         business_scope=str(pick("HERMES_JEV_BUSINESS_SCOPE", "business_scope") or "").strip(),
+        agent_description=str(
+            pick("HERMES_JEV_AGENT_DESCRIPTION", "agent_description") or ""
+        ).strip(),
+        tools=_normalize_tools(pick("HERMES_JEV_TOOLS", "tools")),
         relevance_threshold=_as_float(
             pick("HERMES_JEV_RELEVANCE_THRESHOLD", "relevance_threshold"), 0.7
         ),
@@ -466,6 +527,34 @@ async def judge_channel_relevance_async(
     )
 
 
+def _complexity_request(
+    text: str, settings: JevSettings
+) -> Tuple[Dict[str, str], str]:
+    """Build the complexity state and the question that matches it.
+
+    ``request`` is always present.  ``agent`` and ``tools`` describe the
+    *executor*, which genuinely changes how much work a request is — a request
+    one of the agent's tools answers directly is cheaper than one it has to
+    reason out.  Unlike the channel or the sender, these are stable per agent,
+    so adding them does not make the same request band differently from one
+    room to the next.  Either is omitted when unconfigured.
+    """
+    state: Dict[str, str] = {"request": text}
+    agent_description = str(settings.agent_description or "").strip()
+    # ``load_jev_settings`` already renders this, but ``JevSettings`` is
+    # constructed directly too — normalize here so the wire payload is always
+    # the readable block Jev is asked about, never a nested object.
+    tools = _normalize_tools(settings.tools)
+    if agent_description:
+        state["agent"] = agent_description
+    if tools:
+        state["tools"] = tools
+    question = _complexity_question(
+        has_agent=bool(agent_description), has_tools=bool(tools)
+    )
+    return state, question
+
+
 def judge_complexity(
     text: str,
     *,
@@ -486,10 +575,9 @@ def judge_complexity(
         logger.debug("[Jev] complexity skipped: no client (TYPESAFE_API_KEY unset)")
         return None
 
+    state, question = _complexity_request(text, settings)
     answers, stats = _ask(
-        client,
-        {"request": text},
-        {"complexity": score(_COMPLEXITY_QUESTION, COMPLEXITY_TIERS)},
+        client, state, {"complexity": score(question, COMPLEXITY_TIERS)},
     )
     decision = (answers or {}).get("complexity")
     if decision is None or decision.label not in COMPLEXITY_TIERS:
