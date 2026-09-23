@@ -646,51 +646,188 @@ def route_model_for_request(
     return resolve_tier_model(tier, settings)
 
 
+def _provider_key(value: Optional[str]) -> str:
+    """Reduce a provider identifier to a comparable key, or "" if it names none.
+
+    Provider ids appear at two granularities: the full id a profile requests
+    (``custom:glm``) and the namespace a runtime canonicalizes it to
+    (``custom``).  A bare name is a third spelling of the same thing — ``glm``
+    and ``custom:glm`` are one provider.  A lone ``custom`` identifies no
+    particular provider, so it reduces to "" and never matches anything.
+    """
+    text = (value or "").strip().lower()
+    if not text or text == "custom":
+        return ""
+    return text.split(":", 1)[1] if text.startswith("custom:") else text
+
+
+def _provider_ids_match(configured: Optional[str], pinned: Optional[str]) -> bool:
+    """Do these two identifiers name the same provider?"""
+    key = _provider_key(configured)
+    return bool(key) and key == _provider_key(pinned)
+
+
+def _agent_runtime_snapshot(agent: Any) -> Dict[str, Any]:
+    """The fields a band swap can change, as they stand right now."""
+    return {
+        "model": getattr(agent, "model", None),
+        "provider": getattr(agent, "provider", None),
+        "requested_provider": getattr(agent, "requested_provider", None),
+        "api_key": getattr(agent, "api_key", None),
+        "base_url": getattr(agent, "base_url", None),
+        "api_mode": getattr(agent, "api_mode", None),
+    }
+
+
+def _resolve_band_runtime(tier_model: TierModel) -> Optional[Dict[str, Any]]:
+    """Credentials for a band pinned to its own provider, or ``None``.
+
+    ``target_model`` is passed so ``api_mode`` is derived for the model being
+    switched TO — dual-wire providers route different models through different
+    API surfaces.
+    """
+    try:
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        runtime = resolve_runtime_provider(
+            requested=tier_model.provider, target_model=tier_model.model,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[Jev] band model %s is pinned to provider %s but its credentials did "
+            "not resolve (%s); keeping the current model",
+            tier_model.model,
+            tier_model.provider,
+            exc,
+        )
+        return None
+    return {
+        "model": tier_model.model,
+        # Keep ``provider`` canonical the way agent construction does, and carry
+        # the full id separately so the next turn can recognise this provider.
+        "provider": runtime.get("provider") or tier_model.provider,
+        "requested_provider": tier_model.provider,
+        "api_key": runtime.get("api_key"),
+        "base_url": runtime.get("base_url"),
+        "api_mode": runtime.get("api_mode"),
+    }
+
+
+def _switch_agent_runtime(agent: Any, target: Dict[str, Any]) -> bool:
+    """Move a live agent onto ``target``. Returns False if it could not.
+
+    ``AIAgent.switch_model`` is the supported in-place swap — it rebuilds the
+    provider clients, refreshes the credential pool and caching flags, and
+    restores the previous runtime atomically if the rebuild raises. On failure
+    the agent keeps the runtime it already had.
+    """
+    switch = getattr(agent, "switch_model", None)
+    if not callable(switch):
+        logger.debug("[Jev] agent has no switch_model; cannot change provider")
+        return False
+    try:
+        switch(
+            new_model=target["model"],
+            new_provider=target["provider"],
+            api_key=target.get("api_key") or "",
+            base_url=target.get("base_url") or "",
+            api_mode=target.get("api_mode") or "",
+        )
+    except Exception as exc:
+        logger.warning(
+            "[Jev] could not switch to %s on %s (%s); the agent keeps its current runtime",
+            target.get("model"),
+            target.get("requested_provider") or target.get("provider"),
+            exc,
+        )
+        return False
+    # switch_model sets requested_provider to whatever it was handed; restore
+    # the full id so a later band comparison still recognises this provider.
+    try:
+        agent.requested_provider = target.get("requested_provider") or target["provider"]
+    except Exception:
+        pass
+    return True
+
+
 def apply_tier_to_agent(agent: Any, tier_model: Optional[TierModel]) -> Optional[str]:
     """Point a long-lived agent at ``tier_model`` for the coming turn.
 
     Used by surfaces that reuse one cached ``AIAgent`` across turns (the
-    WORKAGENT A2A executor).  The agent's own model is captured the first time
+    WORKAGENT A2A executor). The agent's own runtime is captured the first time
     this runs and restored whenever a turn resolves to no band, so turning the
     feature off — or a single low-confidence turn — never leaves the agent
-    stranded on the previous band's model.
+    stranded on the previous band.
 
-    Only the model is swapped: credentials, ``base_url`` and ``api_mode`` stay
-    as the profile resolved them.  A band pinned to a *different provider* is
-    therefore skipped here (the gateway, which builds a fresh agent per route,
-    is the surface that can honor one).  Returns the model now in effect, or
-    ``None`` when the agent was left untouched.
+    A band pinned to a *different provider* is honored: its credentials are
+    resolved and the agent is swapped onto them in place. A band with no
+    provider swaps only the model and keeps the session's own credentials.
+    Returns the model now in effect, or ``None`` when the agent was untouched.
     """
     if agent is None:
         return None
-    baseline = getattr(agent, "_jev_baseline_model", None)
+
+    baseline = getattr(agent, "_jev_baseline_runtime", None)
     if baseline is None:
-        baseline = getattr(agent, "model", None)
+        baseline = _agent_runtime_snapshot(agent)
         try:
-            agent._jev_baseline_model = baseline
+            agent._jev_baseline_runtime = baseline
         except Exception:
             return None
 
-    target = baseline
+    # ── Decide the runtime this turn should run on ──
+    target: Optional[Dict[str, Any]] = None
     if tier_model is not None and tier_model.model:
-        agent_provider = str(getattr(agent, "provider", "") or "").strip().lower()
-        pinned = (tier_model.provider or "").strip().lower()
-        if pinned and pinned != agent_provider:
-            logger.warning(
-                "[Jev] band model %s is pinned to provider %s but this surface cannot "
-                "switch providers mid-session; keeping %s",
-                tier_model.model,
-                tier_model.provider,
-                baseline,
-            )
-        else:
-            target = tier_model.model
+        if not tier_model.provider or _provider_ids_match(
+            getattr(agent, "requested_provider", None) or getattr(agent, "provider", None),
+            tier_model.provider,
+        ):
+            # Same provider: only the model moves.
+            if getattr(agent, "model", None) != tier_model.model:
+                try:
+                    agent.model = tier_model.model
+                except Exception:
+                    logger.debug("[Jev] could not set agent.model", exc_info=True)
+                    return None
+                logger.info("[Jev] routing this turn to %s", tier_model.model)
+            return tier_model.model
+        target = _resolve_band_runtime(tier_model)
+        if target is None:
+            return getattr(agent, "model", None)
+    else:
+        # No band: go back to the runtime the profile gave this agent.
+        snapshot = _agent_runtime_snapshot(agent)
+        if snapshot == baseline:
+            return baseline.get("model")
+        if (
+            snapshot.get("requested_provider") == baseline.get("requested_provider")
+            and snapshot.get("base_url") == baseline.get("base_url")
+        ):
+            # Only the model drifted, so undo it the same cheap way it was
+            # applied — a client rebuild here would be pure cost, and would
+            # require switch_model on surfaces that never needed it.
+            try:
+                agent.model = baseline["model"]
+            except Exception:
+                logger.debug("[Jev] could not restore agent.model", exc_info=True)
+                return None
+            logger.info("[Jev] restoring the profile model %s", baseline["model"])
+            return baseline["model"]
+        target = dict(baseline)
 
-    if target and getattr(agent, "model", None) != target:
-        logger.info("[Jev] routing this turn to %s (was %s)", target, getattr(agent, "model", None))
-        try:
-            agent.model = target
-        except Exception:
-            logger.debug("[Jev] could not set agent.model", exc_info=True)
-            return None
-    return target
+    if target["model"] == getattr(agent, "model", None) and _provider_ids_match(
+        getattr(agent, "requested_provider", None),
+        target.get("requested_provider"),
+    ):
+        return target["model"]
+
+    logger.info(
+        "[Jev] switching this turn to %s on %s (was %s on %s)",
+        target["model"],
+        target.get("requested_provider") or target.get("provider"),
+        getattr(agent, "model", None),
+        getattr(agent, "requested_provider", None) or getattr(agent, "provider", None),
+    )
+    if not _switch_agent_runtime(agent, target):
+        return getattr(agent, "model", None)
+    return target["model"]

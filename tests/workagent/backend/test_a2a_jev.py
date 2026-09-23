@@ -178,3 +178,27 @@ def test_the_a2a_context_id_is_the_session_identity_for_banding(monkeypatch):
     agent = SimpleNamespace(model="profile-model", provider="openai")
     asyncio.run(_executor()._apply_jev_complexity_route(agent, "task", "ctx-42"))
     assert seen["session_key"] == "ctx-42"
+
+
+def test_the_profile_provider_id_reaches_the_agent(monkeypatch):
+    # apply_tier_to_agent compares a band's provider against the agent's
+    # requested_provider; without it, every custom-provider band is skipped.
+    from hermes_cli import config as hermes_config
+    from workagent.backend.agent_runtime import build_profile_agent_kwargs
+
+    monkeypatch.setattr(
+        hermes_config, "load_config_readonly",
+        lambda: {"model": {"provider": "custom:glm", "default": "glm-5.3-flash"}},
+    )
+
+    class _RuntimeProvider:
+        @staticmethod
+        def resolve_runtime_provider(*, requested=None, target_model=None):
+            return {"provider": "custom", "base_url": "https://glm.test", "api_key": "k"}
+
+    kwargs = build_profile_agent_kwargs(
+        "sess", platform="workagent-a2a",
+        config_module=hermes_config, runtime_provider_module=_RuntimeProvider,
+    )
+    assert kwargs["provider"] == "custom"
+    assert kwargs["requested_provider"] == "custom:glm"

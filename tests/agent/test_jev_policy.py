@@ -373,6 +373,42 @@ def test_a_band_with_no_configured_model_keeps_the_default():
 # --- applying a band to a long-lived agent ---------------------------------
 
 
+def _switchable(*, model, requested_provider, base_url="https://base.test"):
+    """A stand-in agent implementing the AIAgent.switch_model contract."""
+
+    class _Agent(SimpleNamespace):
+        def switch_model(self, *, new_model, new_provider, api_key="", base_url="",
+                         api_mode=""):
+            self.model = new_model
+            self.provider = new_provider
+            self.requested_provider = new_provider
+            self.api_key = api_key
+            self.base_url = base_url
+            self.api_mode = api_mode
+
+    return _Agent(model=model, provider=requested_provider.split(":")[0],
+                  requested_provider=requested_provider, api_key="k",
+                  base_url=base_url, api_mode="openai_chat")
+
+
+def _stub_credentials(monkeypatch, by_provider):
+    """Make resolve_runtime_provider return a base_url per provider id."""
+    import hermes_cli.runtime_provider as rp
+
+    def _resolve(*, requested=None, target_model=None, **_kwargs):
+        if requested not in by_provider:
+            raise RuntimeError(f"no credentials for {requested}")
+        return {
+            "provider": requested.split(":")[0],
+            "api_key": f"k-{requested}",
+            "base_url": by_provider[requested],
+            "api_mode": "openai_chat",
+        }
+
+    monkeypatch.setattr(rp, "resolve_runtime_provider", _resolve)
+
+
+
 def test_the_agent_model_is_swapped_for_the_band():
     agent = SimpleNamespace(model="default-model", provider="openai")
     assert jev_policy.apply_tier_to_agent(agent, TierModel(model="big")) == "big"
@@ -395,16 +431,149 @@ def test_the_baseline_is_captured_once_and_survives_repeated_banding():
     assert agent.model == "default-model"
 
 
-def test_a_band_pinned_to_another_provider_is_skipped_here():
-    agent = SimpleNamespace(model="default-model", provider="openai")
+def test_a_band_pinned_to_another_provider_switches_the_agent(monkeypatch):
+    agent = _switchable(model="default-model", requested_provider="openai")
+    _stub_credentials(monkeypatch, {"anthropic": "https://anthropic.test"})
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", provider="anthropic"))
+    assert agent.model == "big"
+    assert agent.requested_provider == "anthropic"
+    assert agent.base_url == "https://anthropic.test"
+
+
+def test_a_cross_provider_band_whose_credentials_fail_leaves_the_agent_alone(monkeypatch):
+    import hermes_cli.runtime_provider as rp
+
+    def _boom(**_kwargs):
+        raise RuntimeError("no credentials for anthropic")
+
+    monkeypatch.setattr(rp, "resolve_runtime_provider", _boom)
+    agent = _switchable(model="default-model", requested_provider="openai")
     jev_policy.apply_tier_to_agent(agent, TierModel(model="big", provider="anthropic"))
     assert agent.model == "default-model"
+    assert agent.requested_provider == "openai"
+
+
+def test_a_failing_switch_leaves_the_agent_on_its_current_runtime(monkeypatch):
+    agent = _switchable(model="default-model", requested_provider="openai")
+    _stub_credentials(monkeypatch, {"anthropic": "https://anthropic.test"})
+
+    def _boom(**_kwargs):
+        raise RuntimeError("client rebuild failed")
+
+    agent.switch_model = _boom
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", provider="anthropic"))
+    assert agent.model == "default-model"
+    assert agent.requested_provider == "openai"
+
+
+def test_an_agent_without_switch_model_is_left_alone(monkeypatch):
+    _stub_credentials(monkeypatch, {"anthropic": "https://anthropic.test"})
+    agent = SimpleNamespace(model="default-model", provider="openai",
+                            requested_provider="openai")
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", provider="anthropic"))
+    assert agent.model == "default-model"
+
+
+def test_no_band_restores_the_profile_provider_too(monkeypatch):
+    agent = _switchable(model="default-model", requested_provider="openai",
+                        base_url="https://openai.test")
+    _stub_credentials(monkeypatch, {"anthropic": "https://anthropic.test"})
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", provider="anthropic"))
+    assert agent.requested_provider == "anthropic"
+
+    jev_policy.apply_tier_to_agent(agent, None)
+    assert agent.model == "default-model"
+    assert agent.requested_provider == "openai"
+    assert agent.base_url == "https://openai.test"
+
+
+def test_switching_back_and_forth_keeps_the_original_baseline(monkeypatch):
+    agent = _switchable(model="default-model", requested_provider="openai",
+                        base_url="https://openai.test")
+    _stub_credentials(monkeypatch, {"anthropic": "https://anthropic.test",
+                                    "xai": "https://xai.test"})
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="a", provider="anthropic"))
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="b", provider="xai"))
+    jev_policy.apply_tier_to_agent(agent, None)
+    assert (agent.model, agent.requested_provider, agent.base_url) == (
+        "default-model", "openai", "https://openai.test",
+    )
 
 
 def test_a_band_pinned_to_the_agents_own_provider_still_applies():
     agent = SimpleNamespace(model="default-model", provider="OpenAI")
     jev_policy.apply_tier_to_agent(agent, TierModel(model="big", provider="openai"))
     assert agent.model == "big"
+
+
+# --- provider identity: full id vs canonicalized namespace ------------------
+#
+# A profile requests `custom:glm`; the runtime canonicalizes that to the bare
+# `custom` namespace on `agent.provider`. Comparing a band's full id against
+# the namespace rejects a band pinned to the provider the agent is ALREADY on,
+# which silently disabled every custom-provider band on this surface.
+
+
+@pytest.mark.parametrize(
+    "configured, pinned, expected",
+    [
+        ("custom:glm", "custom:glm", True),
+        ("glm", "custom:glm", True),           # bare name is the same provider
+        ("custom:glm", "glm", True),
+        ("CUSTOM:GLM", "custom:glm", True),    # case-insensitive
+        ("custom:glm", "custom:chatai", False),
+        ("custom", "custom:glm", False),       # namespace alone names no provider
+        ("custom:glm", "custom", False),
+        ("openai", "openai", True),
+        ("openai", "anthropic", False),
+        (None, "custom:glm", False),
+        ("custom:glm", None, False),
+        ("", "", False),
+    ],
+)
+def test_provider_ids_match(configured, pinned, expected):
+    assert jev_policy._provider_ids_match(configured, pinned) is expected
+
+
+def test_a_custom_provider_band_applies_when_the_agent_is_on_that_provider():
+    # The regression: agent.provider is the canonicalized namespace, so the
+    # band must be matched against requested_provider instead.
+    agent = SimpleNamespace(
+        model="glm-5.3-flash", provider="custom", requested_provider="custom:glm",
+    )
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="glm-5.3", provider="custom:glm"))
+    assert agent.model == "glm-5.3"
+
+
+def test_a_custom_provider_band_for_a_different_custom_entry_is_still_skipped():
+    agent = SimpleNamespace(
+        model="glm-5.3-flash", provider="custom", requested_provider="custom:glm",
+    )
+    jev_policy.apply_tier_to_agent(
+        agent, TierModel(model="gpt-5.6-sol", provider="custom:chatai")
+    )
+    assert agent.model == "glm-5.3-flash"
+
+
+def test_without_requested_provider_a_bare_custom_namespace_cannot_be_verified():
+    # Nothing identifies WHICH custom provider the agent uses, so the safe
+    # answer is to keep the profile's model rather than guess an endpoint.
+    agent = SimpleNamespace(model="glm-5.3-flash", provider="custom")
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="glm-5.3", provider="custom:glm"))
+    assert agent.model == "glm-5.3-flash"
+
+
+def test_a_cross_provider_switch_is_logged_with_both_sides(monkeypatch, caplog):
+    caplog.set_level("INFO")
+    _stub_credentials(monkeypatch, {"custom:chatai": "https://chatai.test"})
+    agent = _switchable(model="glm-5.3-flash", requested_provider="custom:glm")
+    jev_policy.apply_tier_to_agent(
+        agent, TierModel(model="gpt-5.6-sol", provider="custom:chatai")
+    )
+    line = [r.getMessage() for r in caplog.records if "[Jev]" in r.getMessage()][-1]
+    assert "gpt-5.6-sol" in line and "custom:chatai" in line
+    assert "glm-5.3-flash" in line and "custom:glm" in line
+    assert agent.model == "gpt-5.6-sol"
 
 
 def test_applying_a_band_to_nothing_is_harmless():

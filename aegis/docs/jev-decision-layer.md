@@ -501,13 +501,37 @@ Under `complexity_scope: turn` every message can re-route and therefore rebuild.
 turn at all. Raise it if you see churn; the fallback is always the session's own
 model.
 
-On the WORKAGENT A2A service the cached agent's model is swapped in place and its
-original model is captured on first use, so a later unbanded turn — or turning
-the feature off — restores the profile model instead of leaving the agent
-stranded on the last band. Only the model is swapped there; a band pinned to a
-*different provider* is skipped with a warning, because credentials, `base_url`
-and `api_mode` belong to the profile. The gateway, which builds a fresh agent per
-route, does honor a provider-pinned band.
+On the WORKAGENT A2A service the agent is long-lived, so the band is applied to
+it in place. Its whole runtime — model, provider, credentials, `base_url`,
+`api_mode` — is captured on first use, so a later unbanded turn (or turning the
+feature off) restores the profile's runtime instead of leaving the agent
+stranded on the last band.
+
+Both kinds of band work there:
+
+| band | what happens |
+|---|---|
+| no provider pinned | only `agent.model` moves; the session's credentials stay |
+| pinned to the provider the agent is already on | same — only the model moves |
+| pinned to a **different** provider | credentials are resolved for that provider and the agent is swapped onto them with `AIAgent.switch_model`, the supported in-place swap: it rebuilds the provider clients, refreshes the credential pool and caching flags, and **restores the previous runtime atomically if the rebuild raises** |
+
+Undoing a same-provider band is a plain model assignment, not a client rebuild —
+symmetric with how it was applied.
+
+"Different provider" is decided against the agent's **`requested_provider`** (the
+full id the profile asked for, e.g. `custom:glm`), not its `provider` (which a
+runtime canonicalizes to the bare `custom` namespace and therefore cannot tell
+two custom entries apart). A bare name and its `custom:` form are the same
+provider; a lone `custom` identifies none.
+
+Every failure keeps the agent exactly where it is: credentials that will not
+resolve, a `switch_model` that raises, or an agent that has no `switch_model` at
+all all leave the current runtime untouched and log a warning. A switch logs
+both sides:
+
+```
+[Jev] switching this turn to gpt-5.6-sol on custom:chatai (was glm-5.3-flash on custom:glm)
+```
 
 ## Logging
 
