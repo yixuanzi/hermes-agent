@@ -38,6 +38,23 @@ def _noul(probability: float):
     return _parse_answer("noul", {"type": "noul", "noul": probability})
 
 
+def _admission(in_scope=0.0, wants_answer=0.0, *, delegatable=None, addressed=0.0):
+    """A COMPLETE admission response; unnamed propositions answer "no".
+
+    Admission asks three or four nouls in one pass, and a missing answer is
+    UNDECIDED rather than a default — so a test that names only the dimension
+    it cares about still has to send the rest.
+    """
+    answers = {
+        "in_scope": _noul(in_scope),
+        "addressed": _noul(addressed),
+        "wants_answer": _noul(wants_answer),
+    }
+    if delegatable is not None:
+        answers["delegatable"] = _noul(delegatable)
+    return answers
+
+
 def _band(label: str, confidence: float):
     """A complexity answer as Jev returns it: a choice over the four options."""
     return _parse_answer(
@@ -235,36 +252,36 @@ def _settings(**overrides):
 
 
 def test_a_message_is_admitted_only_when_both_propositions_clear_the_threshold():
-    client = _StubClient({"in_scope": _noul(0.98), "wants_answer": _noul(0.97)})
+    client = _StubClient(_admission(0.98, 0.97))
     assert jev_policy.judge_channel_relevance("…", settings=_settings(), client=client) is True
 
 
 def test_an_in_scope_statement_that_asks_nothing_is_not_answered():
-    client = _StubClient({"in_scope": _noul(0.97), "wants_answer": _noul(0.04)})
+    client = _StubClient(_admission(0.97, 0.04))
     assert jev_policy.judge_channel_relevance("…", settings=_settings(), client=client) is False
 
 
 def test_an_off_topic_question_is_not_answered():
-    client = _StubClient({"in_scope": _noul(0.17), "wants_answer": _noul(0.96)})
+    client = _StubClient(_admission(0.17, 0.96))
     assert jev_policy.judge_channel_relevance("…", settings=_settings(), client=client) is False
 
 
 def test_the_threshold_moves_the_admission_bar():
-    client = _StubClient({"in_scope": _noul(0.8), "wants_answer": _noul(0.8)})
+    client = _StubClient(_admission(0.8, 0.8))
     assert jev_policy.judge_channel_relevance("…", settings=_settings(), client=client) is True
-    client = _StubClient({"in_scope": _noul(0.8), "wants_answer": _noul(0.8)})
+    client = _StubClient(_admission(0.8, 0.8))
     strict = _settings(relevance_threshold=0.95)
     assert jev_policy.judge_channel_relevance("…", settings=strict, client=client) is False
 
 
-def test_both_propositions_ride_in_one_request():
-    client = _StubClient({"in_scope": _noul(0.9), "wants_answer": _noul(0.9)})
+def test_every_proposition_rides_in_one_request():
+    client = _StubClient(_admission(0.9, 0.9))
     jev_policy.judge_channel_relevance(
         "hello", settings=_settings(), client=client, channel_name="ops", sender_name="zhang",
     )
     assert len(client.asked) == 1
     state, questions = client.asked[0]
-    assert set(questions) == {"in_scope", "wants_answer"}
+    assert set(questions) == {"in_scope", "addressed", "wants_answer"}
     assert state["agent"] == "A security operations assistant."
     assert state["message"] == "hello"
     assert state["channel"] == "ops"
@@ -272,8 +289,14 @@ def test_both_propositions_ride_in_one_request():
     assert "remote_agents" not in state
 
 
-def test_a_partial_answer_is_undecided_not_a_yes():
-    client = _StubClient({"in_scope": _noul(0.99)})
+@pytest.mark.parametrize("missing", ["in_scope", "addressed", "wants_answer"])
+def test_a_partial_answer_is_undecided_not_a_yes(missing):
+    # Every proposition is load-bearing: a response short one of them is
+    # UNDECIDED, never "assume no" — the disjuncts would each read as a
+    # silent false and the AND term as a silent true.
+    answers = _admission(0.99, 0.99)
+    answers.pop(missing)
+    client = _StubClient(answers)
     assert jev_policy.judge_channel_relevance("…", settings=_settings(), client=client) is None
 
 
@@ -285,14 +308,14 @@ def test_an_unreachable_service_is_undecided():
 
 
 def test_empty_text_is_never_sent_for_judgement():
-    client = _StubClient({"in_scope": _noul(0.9), "wants_answer": _noul(0.9)})
+    client = _StubClient(_admission(0.9, 0.9))
     assert jev_policy.judge_channel_relevance("   ", settings=_settings(), client=client) is None
     assert client.asked == []
 
 
 @pytest.mark.asyncio
 async def test_judge_channel_relevance_async_mirrors_the_sync_call():
-    client = _StubClient({"in_scope": _noul(0.98), "wants_answer": _noul(0.97)})
+    client = _StubClient(_admission(0.98, 0.97))
     verdict = await jev_policy.judge_channel_relevance_async(
         "…", settings=_settings(), client=client
     )
@@ -758,7 +781,7 @@ def _jev_records(caplog):
 
 def test_an_admission_logs_its_verdict_and_latency(caplog):
     caplog.set_level("INFO")
-    client = _StubClient({"in_scope": _noul(0.98), "wants_answer": _noul(0.97)})
+    client = _StubClient(_admission(0.98, 0.97))
     jev_policy.judge_channel_relevance(
         "…", settings=_settings(), client=client, channel_name="ops",
     )
@@ -772,7 +795,7 @@ def test_an_admission_logs_its_verdict_and_latency(caplog):
 
 def test_staying_quiet_is_logged_just_as_loudly(caplog):
     caplog.set_level("INFO")
-    client = _StubClient({"in_scope": _noul(0.02), "wants_answer": _noul(0.40)})
+    client = _StubClient(_admission(0.02, 0.40))
     jev_policy.judge_channel_relevance("…", settings=_settings(), client=client)
 
     line = _jev_records(caplog)[-1].getMessage()
@@ -1313,7 +1336,7 @@ def test_the_gate_opens_on_either_key(jev_env, monkeypatch):
     assert jev_policy.channel_autoreply_active() is True
 
 
-def test_remote_agents_add_a_third_proposition():
+def test_remote_agents_add_a_fourth_proposition():
     # Asked separately, NOT folded into the scope question with an "or":
     # the compound form collapsed the separation from ~0.85 to ~0.2.
     settings = jev_policy.JevSettings(
@@ -1322,15 +1345,15 @@ def test_remote_agents_add_a_third_proposition():
     )
     state, questions = jev_policy._relevance_request("scan this subnet", settings)
     assert state["remote_agents"] == "avgc: vulnerability scanning"
-    assert set(questions) == {"in_scope", "wants_answer", "delegatable"}
+    assert set(questions) == {"in_scope", "addressed", "wants_answer", "delegatable"}
     assert "`remote_agents`" in questions["delegatable"]["instructions"]
     assert "`remote_agents`" not in questions["in_scope"]["instructions"]
 
 
-def test_without_remote_agents_only_two_propositions_are_asked():
+def test_without_remote_agents_delegation_is_not_asked():
     settings = jev_policy.JevSettings(agent_description="A SOC assistant.")
     _state, questions = jev_policy._relevance_request("hi", settings)
-    assert set(questions) == {"in_scope", "wants_answer"}
+    assert set(questions) == {"in_scope", "addressed", "wants_answer"}
 
 
 def _remote_settings(**overrides):
@@ -1344,37 +1367,115 @@ def _remote_settings(**overrides):
     return jev_policy.JevSettings(**base)
 
 
+# --- being asked for by name --------------------------------------------
+#
+# The verdict is (in_scope OR delegatable OR addressed) AND wants_answer.
+# Someone who types the assistant's name has addressed it as deliberately as an
+# @-mention, so refusing on topic grounds reads as the bot ignoring them.
+# Measured in one forward pass against the live endpoint: an off-topic request
+# naming the assistant scored in_scope 0.13 / addressed 0.89, an on-topic
+# request naming nobody scored 0.87 / 0.10, and a request naming a DIFFERENT
+# assistant scored addressed 0.22 — close to orthogonal, which is why it is a
+# fourth noul rather than a clause on the scope question.
+
+
+def test_a_message_that_asks_for_us_by_name_is_admitted_off_topic():
+    client = _StubClient(_admission(0.13, 0.87, addressed=0.89))
+    assert jev_policy.judge_channel_relevance(
+        "…", settings=_settings(), client=client) is True
+
+
+def test_being_named_does_not_excuse_a_message_that_asks_nothing():
+    # "我觉得 aegis 这个项目做得不错" — measured addressed 0.31, wants_answer
+    # 0.06. Being mentioned in passing must not start a conversation, which is
+    # why wants_answer is ANDed rather than being a fourth disjunct.
+    client = _StubClient(_admission(0.67, 0.06, addressed=0.95))
+    assert jev_policy.judge_channel_relevance(
+        "…", settings=_settings(), client=client) is False
+
+
+def test_an_on_topic_message_still_needs_no_name():
+    client = _StubClient(_admission(0.87, 0.96, addressed=0.10))
+    assert jev_policy.judge_channel_relevance(
+        "…", settings=_settings(), client=client) is True
+
+
+def test_naming_a_different_assistant_is_not_being_addressed():
+    # "AISOC 帮我跑个应急响应" — addressed 0.22 for THIS agent. It is admitted
+    # here on delegation, not on being named.
+    client = _StubClient(_admission(0.20, 0.90, addressed=0.22, delegatable=0.97))
+    settings = _settings(remote_agents={"aisoc": "incident response"})
+    assert jev_policy.judge_channel_relevance(
+        "…", settings=settings, client=client) is True
+
+    # Same message, nothing to delegate to: no disjunct clears.
+    bare = _StubClient(_admission(0.20, 0.90, addressed=0.22))
+    assert jev_policy.judge_channel_relevance(
+        "…", settings=_settings(), client=bare) is False
+
+
+@pytest.mark.parametrize(
+    "in_scope, delegatable, addressed, expected",
+    [
+        (0.95, 0.02, 0.02, True),   # ours
+        (0.02, 0.95, 0.02, True),   # ours to hand off
+        (0.02, 0.02, 0.95, True),   # asked for by name
+        (0.95, 0.95, 0.95, True),   # all three
+        (0.69, 0.69, 0.69, False),  # each just under the threshold
+        (0.02, 0.02, 0.02, False),  # none of them
+    ],
+)
+def test_any_one_disjunct_is_enough(in_scope, delegatable, addressed, expected):
+    client = _StubClient(
+        _admission(in_scope, 0.95, delegatable=delegatable, addressed=addressed)
+    )
+    settings = _settings(remote_agents={"avgc": "vuln scanning"})
+    assert jev_policy.judge_channel_relevance(
+        "…", settings=settings, client=client) is expected
+
+
+def test_the_addressed_question_reads_the_name_out_of_agent():
+    # There is no separate name setting: the question points at `agent`, so a
+    # description that never names the assistant leaves nothing to match.
+    settings = jev_policy.JevSettings(agent_description="Aegis, a SOC assistant.")
+    state, questions = jev_policy._relevance_request("aegis?", settings)
+    assert "`agent`" in questions["addressed"]["instructions"]
+    assert state["agent"] == "Aegis, a SOC assistant."
+
+
+def test_the_addressed_probability_is_logged(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient(_admission(0.13, 0.87, addressed=0.89))
+    jev_policy.judge_channel_relevance("…", settings=_settings(), client=client)
+
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "addressed=0.89" in line
+    assert "ANSWER" in line
+
+
 def test_a_delegatable_request_is_admitted_even_when_out_of_the_agents_own_scope():
-    client = _StubClient({
-        "in_scope": _noul(0.07), "delegatable": _noul(0.97), "wants_answer": _noul(0.98),
-    })
+    client = _StubClient(_admission(0.07, 0.98, delegatable=0.97))
     assert jev_policy.judge_channel_relevance(
         "scan this subnet", settings=_remote_settings(), client=client,
     ) is True
 
 
 def test_a_request_in_the_agents_own_scope_is_admitted_without_delegation():
-    client = _StubClient({
-        "in_scope": _noul(0.95), "delegatable": _noul(0.41), "wants_answer": _noul(0.97),
-    })
+    client = _StubClient(_admission(0.95, 0.97, delegatable=0.41))
     assert jev_policy.judge_channel_relevance(
         "is this alert a false positive?", settings=_remote_settings(), client=client,
     ) is True
 
 
 def test_neither_ours_nor_delegatable_stays_quiet():
-    client = _StubClient({
-        "in_scope": _noul(0.02), "delegatable": _noul(0.02), "wants_answer": _noul(0.90),
-    })
+    client = _StubClient(_admission(0.02, 0.90, delegatable=0.02))
     assert jev_policy.judge_channel_relevance(
         "what's for dinner?", settings=_remote_settings(), client=client,
     ) is False
 
 
 def test_delegatable_alone_is_not_enough_without_a_request_for_action():
-    client = _StubClient({
-        "in_scope": _noul(0.10), "delegatable": _noul(0.95), "wants_answer": _noul(0.04),
-    })
+    client = _StubClient(_admission(0.10, 0.04, delegatable=0.95))
     assert jev_policy.judge_channel_relevance(
         "we already scanned that subnet", settings=_remote_settings(), client=client,
     ) is False
@@ -1383,7 +1484,7 @@ def test_delegatable_alone_is_not_enough_without_a_request_for_action():
 def test_a_missing_delegatable_answer_is_undecided_not_a_fallback():
     # The question was asked, so an absent answer means the response was
     # incomplete — that is undecided, not "no delegation".
-    client = _StubClient({"in_scope": _noul(0.95), "wants_answer": _noul(0.97)})
+    client = _StubClient(_admission(0.95, 0.97))
     assert jev_policy.judge_channel_relevance(
         "hi", settings=_remote_settings(), client=client,
     ) is None
@@ -1391,9 +1492,7 @@ def test_a_missing_delegatable_answer_is_undecided_not_a_fallback():
 
 def test_the_admission_log_reports_the_delegation_probability(caplog):
     caplog.set_level("INFO")
-    client = _StubClient({
-        "in_scope": _noul(0.07), "delegatable": _noul(0.97), "wants_answer": _noul(0.98),
-    })
+    client = _StubClient(_admission(0.07, 0.98, delegatable=0.97))
     jev_policy.judge_channel_relevance("scan", settings=_remote_settings(), client=client)
     line = _jev_records(caplog)[-1].getMessage()
     assert "delegatable=0.97" in line and "ANSWER" in line
@@ -1401,7 +1500,7 @@ def test_the_admission_log_reports_the_delegation_probability(caplog):
 
 def test_the_log_omits_delegation_when_it_was_not_asked(caplog):
     caplog.set_level("INFO")
-    client = _StubClient({"in_scope": _noul(0.9), "wants_answer": _noul(0.9)})
+    client = _StubClient(_admission(0.9, 0.9))
     jev_policy.judge_channel_relevance("hi", settings=_settings(), client=client)
     assert "delegatable" not in _jev_records(caplog)[-1].getMessage()
 

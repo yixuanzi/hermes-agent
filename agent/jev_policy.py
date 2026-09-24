@@ -110,10 +110,16 @@ DEFAULT_COMPLEXITY_SCOPE = "session"
 _SESSION_BAND_MAX_ENTRIES = 512
 _SESSION_BAND_TTL_SECONDS = 24 * 60 * 60.0
 
-# Admission is two separate propositions, not one.  Folding "is it our topic"
-# and "does it want an answer" into a single question squashes both signals
-# toward the middle and makes the threshold meaningless; asked apart they
-# separate cleanly, and Jev answers both in one forward pass anyway.
+# Admission is up to FOUR separate propositions, never one compound question.
+#
+#     (in_scope OR delegatable OR addressed) AND wants_answer
+#
+# Each disjunct is its own noul. Every time two of them have been folded into
+# one question with an "or", the calibration collapsed — measured twice, on
+# scope+wants_answer and again on scope+delegatable: the model hedges, both
+# signals slide toward the middle, and the threshold stops discriminating.
+# Asked apart they separate cleanly, and Jev answers all of them in a single
+# forward pass, so the extra propositions cost no extra round trip.
 _SCOPE_QUESTION = (
     "`agent` describes an assistant that is a member of this group chat. "
     "`message` was posted in that chat. Is `message` about something that "
@@ -130,6 +136,27 @@ _DELEGATABLE_QUESTION = (
     "`remote_agents` lists specialist agents that the assistant can hand work to. "
     "`message` was posted in a group chat. Is `message` about something one of "
     "`remote_agents` handles?"
+)
+
+# Being asked for BY NAME is its own reason to answer, independent of topic.
+# Someone who types "aegis, ..." in a room has addressed this assistant as
+# deliberately as an @-mention; refusing because the subject is off-topic reads
+# as the bot ignoring them.  Measured with the other three propositions in the
+# same forward pass: an off-topic request that names the assistant scores
+# in_scope 0.13 / addressed 0.89, while an on-topic request that names nobody
+# scores in_scope 0.87 / addressed 0.10 — the two signals are close to
+# orthogonal, which is exactly why this is a fourth noul and not a clause bolted
+# onto the scope question.
+#
+# It reads the assistant's name out of `agent`. A deployment whose
+# `agent_description` never names the thing has no name to match, and this
+# proposition simply stays near zero — the other three still decide.
+_ADDRESSED_QUESTION = (
+    "`agent` describes an assistant that is a member of this group chat. "
+    "`message` was posted in that chat. Does `message` ask that specific "
+    "assistant for something — naming it, or referring to it directly? Answer "
+    "false when the message is addressed to the room at large, to a human, or "
+    "to a different named assistant."
 )
 
 _WANTS_ANSWER_QUESTION = (
@@ -611,9 +638,15 @@ def _relevance_request(
 ) -> Tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
     """Build the admission state and the scope question that matches it.
 
-    Admission is judged against what the assistant IS (``agent``) and what it
-    can hand off to (``remote_agents``) — a question this agent would delegate
-    is just as much its business as one it answers itself.
+    Admission is judged against what the assistant IS (``agent``), what it can
+    hand off to (``remote_agents``) — a question this agent would delegate is
+    just as much its business as one it answers itself — and whether the
+    message asks for it by name, which is its own reason to answer whatever the
+    subject.
+
+    ``in_scope``, ``addressed`` and ``wants_answer`` are always asked;
+    ``delegatable`` only when ``remote_agents`` is configured, since without it
+    there is nothing to delegate to.
     """
     state: Dict[str, str] = {
         "agent": settings.admission_scope,
@@ -621,6 +654,7 @@ def _relevance_request(
     }
     questions = {
         "in_scope": noul(_SCOPE_QUESTION),
+        "addressed": noul(_ADDRESSED_QUESTION),
         "wants_answer": noul(_WANTS_ANSWER_QUESTION),
     }
     remote_agents = _normalize_inventory(settings.remote_agents)
@@ -660,9 +694,10 @@ def judge_channel_relevance(
     )
     answers, stats = _ask(client, state, questions)
     in_scope = (answers or {}).get("in_scope")
+    addressed = (answers or {}).get("addressed")
     wants_answer = (answers or {}).get("wants_answer")
     delegatable = (answers or {}).get("delegatable")
-    if in_scope is None or wants_answer is None or (
+    if in_scope is None or addressed is None or wants_answer is None or (
         "delegatable" in questions and delegatable is None
     ):
         logger.warning(
@@ -672,22 +707,28 @@ def judge_channel_relevance(
             stats.error or "answer missing from response",
         )
         return None
-    # Ours to answer, or ours to hand off — both are the agent's business.
-    ours = in_scope.probability >= settings.relevance_threshold or (
-        delegatable is not None
-        and delegatable.probability >= settings.relevance_threshold
+    # Three ways a message can be for us: ours to answer, ours to hand off, or
+    # addressed to us by name. Any one of them is enough — but all of them are
+    # still ANDed with "is this even a question", so being named in a passing
+    # compliment does not start a conversation.
+    threshold = settings.relevance_threshold
+    ours = (
+        in_scope.probability >= threshold
+        or (delegatable is not None and delegatable.probability >= threshold)
+        or addressed.probability >= threshold
     )
-    admit = ours and wants_answer.probability >= settings.relevance_threshold
+    admit = ours and wants_answer.probability >= threshold
     logger.info(
         "[Jev] channel admission: %s in %.0fms (%s) — in_scope=%.2f%s "
-        "wants_answer=%.2f threshold=%.2f chat=%s",
+        "addressed=%.2f wants_answer=%.2f threshold=%.2f chat=%s",
         "ANSWER" if admit else "STAY QUIET",
         stats.elapsed_ms,
         stats.source,
         in_scope.probability,
         f" delegatable={delegatable.probability:.2f}" if delegatable is not None else "",
+        addressed.probability,
         wants_answer.probability,
-        settings.relevance_threshold,
+        threshold,
         channel_name or "-",
     )
     return admit

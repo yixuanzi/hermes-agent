@@ -7,7 +7,7 @@ forward pass and returns *calibrated* probabilities instead of prose.
 
 | # | Feature | Flag | Surfaces |
 |---|---------|------|----------|
-| 1 | **Channel admission** — answer a group message that did not `@`-mention the bot, when it is the agent's business | `HERMES_JEV_CHANNEL_AUTOREPLY` (+ `HERMES_JEV_THREAD_AUTOREPLY` inside topics; `HERMES_JEV_AUTOREPLY` is the master switch for the stage — **gateway only**) | Feishu/Lark gateway, WORKAGENT A2A service |
+| 1 | **Channel admission** — answer a group message that did not `@`-mention the bot, when it is the agent's business, delegatable, or asks for the agent by name | `HERMES_JEV_CHANNEL_AUTOREPLY` (+ `HERMES_JEV_THREAD_AUTOREPLY` inside topics; `HERMES_JEV_AUTOREPLY` is the master switch for the stage — **gateway only**) | Feishu/Lark gateway, WORKAGENT A2A service |
 | 2 | **Complexity routing** — classify each turn low/medium/high/`other` against configurable criteria and run it on that band's model (`other` → the default model) | `HERMES_JEV_COMPLEXITY_ROUTING` (+ `HERMES_JEV_CRITERIA_{LOW,MEDIUM,HIGH}` to define the bands) | Gateway (all platforms), WORKAGENT A2A service |
 
 Both are **off by default** and independent — enabling one does not enable the
@@ -217,9 +217,9 @@ a disabled feature adds nothing to the hot path.
 
 ### The exact request
 
-Built by `_relevance_state()` + `_SCOPE_QUESTION` / `_WANTS_ANSWER_QUESTION` in
-`agent/jev_policy.py`. Both propositions ride in **one** call — Jev answers all
-questions in a single forward pass, so the second costs no extra round trip.
+Built by `_relevance_request()` in `agent/jev_policy.py`. Three or four
+propositions, all riding in **one** call — Jev answers every question in a
+single forward pass, so the extra ones cost no extra round trip.
 
 ```json
 {
@@ -240,6 +240,10 @@ questions in a single forward pass, so the second costs no extra round trip.
       "type": "noul",
       "instructions": "`remote_agents` lists specialist agents that the assistant can hand work to. `message` was posted in a group chat. Is `message` about something one of `remote_agents` handles?"
     },
+    "addressed": {
+      "type": "noul",
+      "instructions": "`agent` describes an assistant that is a member of this group chat. `message` was posted in that chat. Does `message` ask that specific assistant for something — naming it, or referring to it directly? Answer false when the message is addressed to the room at large, to a human, or to a different named assistant."
+    },
     "wants_answer": {
       "type": "noul",
       "instructions": "`message` was posted in a group chat. Is it asking for help, information, or action from whoever can provide it? Answer false for statements, acknowledgements, status updates, small talk, and messages clearly directed at a specific named person."
@@ -255,6 +259,9 @@ questions in a single forward pass, so the second costs no extra round trip.
 | `agent` | **yes** | `HERMES_JEV_AGENT_DESCRIPTION` / `jev.agent_description`, verbatim | What this assistant is. Relevance is judged against it, so its wording is the real tuning surface. The same key feeds the complexity question. |
 | `message` | **yes** | the inbound text | What is being judged. |
 | `remote_agents` | no — omitted when empty | `HERMES_JEV_REMOTE_AGENTS` / `jev.remote_agents` | Specialists this agent can delegate to. A request one of them handles is this agent's business too — it can hand the work off. Adds the `delegatable` question. |
+
+`agent` does double duty: it is what `in_scope` is judged against **and** where
+`addressed` reads the assistant's name from.
 | `channel` | no — omitted when empty | Feishu: chat display name, falling back to `chat_id`. A2A: `<source>.channel` | Lets the model read the room. "有人看一下吗" in `安全运营大群` reads differently than in a random group. |
 | `sender` | no — omitted when empty | Feishu: resolved display name. A2A: `<source>.uname` | Supports the "directed at a specific named person" clause. |
 
@@ -289,21 +296,76 @@ A2A probability may differ slightly from the same text sent through Feishu.
 ### The decision
 
 ```python
-ours  = in_scope.probability >= relevance_threshold \
-    or (delegatable is not None and delegatable.probability >= relevance_threshold)
+ours  = in_scope.probability   >= relevance_threshold \
+    or (delegatable is not None and delegatable.probability >= relevance_threshold) \
+    or addressed.probability   >= relevance_threshold
 admit = ours and wants_answer.probability >= relevance_threshold
 ```
 
-A `noul` answer is a bare probability — Jev returns no separate `confidence`
-field for it, because for a proposition the probability *is* the confidence:
+Three ways a message can be *for us* — **any one** is enough:
+
+| disjunct | meaning | asked when |
+|---|---|---|
+| `in_scope` | it is about what this agent does | always |
+| `delegatable` | it is about what one of `remote_agents` does — the agent can hand it off | `remote_agents` configured |
+| `addressed` | it asks for this agent **by name** | always |
+
+…and one thing that is ANDed, not ORed:
+
+| `wants_answer` | it is actually asking for something, not a statement or small talk | always |
+
+`wants_answer` is the AND term on purpose. Being named in a passing remark —
+"我觉得 aegis 这个项目做得不错", measured `addressed` 0.24 / `wants_answer` 0.05
+— must not start a conversation. Every disjunct answers *whether this is ours*;
+only `wants_answer` answers *whether anything was asked*.
+
+One threshold governs all four. A `noul` answer is a bare probability — Jev
+returns no separate `confidence` field, because for a proposition the
+probability *is* the confidence:
 
 ```json
 {"answers": {"in_scope":     {"type": "noul", "noul": 0.98},
+             "addressed":    {"type": "noul", "noul": 0.07},
              "wants_answer": {"type": "noul", "noul": 0.97}}}
 ```
 
-**Both** must clear the bar, and one threshold governs both. If either answer is
-missing from the response the verdict is `None` (undecided) — not a yes.
+If **any** asked proposition is missing from the response the verdict is `None`
+(undecided), not a yes: a missing disjunct would read as a silent false and a
+missing `wants_answer` as a silent true.
+
+### Being asked for by name is its own question
+
+Someone who types `aegis, ...` into a room has addressed the assistant as
+deliberately as an `@`-mention. Refusing because the subject is off-topic reads
+as the bot ignoring them, so `addressed` is a disjunct: it admits a message the
+scope question rejects.
+
+Measured live, all four propositions in one pass, threshold 0.80:
+
+| message | `in_scope` | `delegatable` | `addressed` | `wants_answer` | verdict |
+|---|---|---|---|---|---|
+| aegis 帮我查一下 8.8.8.8 的威胁情报 | 0.92 | 0.77 | 0.89 | 0.97 | **ANSWER** |
+| aegis 帮我写一首关于大海的诗 | **0.21** | 0.02 | **0.90** | 0.95 | **ANSWER** — on the name alone |
+| Aegis，明天的会议纪要能整理一下吗 | 0.45 | 0.07 | **0.91** | 0.94 | **ANSWER** — on the name alone |
+| 这个 WAF 告警谁看一下 | 0.87 | 0.92 | **0.07** | 0.96 | **ANSWER** — on topic, names nobody |
+| 老王你帮我看下这个 PPT | 0.22 | 0.12 | 0.05 | 0.22 | STAY QUIET |
+| 今晚吃什么？ | 0.04 | 0.02 | 0.06 | 0.43 | STAY QUIET |
+| 我觉得 aegis 这个项目做得不错 | 0.72 | 0.27 | 0.24 | **0.05** | STAY QUIET — nothing was asked |
+
+Rows 2 and 3 are what this dimension buys, and row 4 is the evidence it is not
+just re-reading the scope signal: the two move independently.
+
+It is a **fourth noul, not a clause on the scope question** — the same lesson
+as delegation, for the third time. It also correctly refuses a *different*
+assistant's name: "AISOC 帮我跑个应急响应" scores `addressed` 0.22 for this agent
+and is admitted, if at all, on `delegatable`.
+
+There is no separate "agent name" setting. The question points at `agent`, so
+the name comes from `HERMES_JEV_AGENT_DESCRIPTION` / `jev.agent_description`.
+**A description that never names the assistant leaves nothing to match** and
+this proposition sits near zero — the other disjuncts still decide, but the
+feature does nothing. If you want it, make sure the description starts with the
+name.
 
 ### Delegation is its own question
 
@@ -341,11 +403,19 @@ With a deliberately narrow agent (`只负责告警研判`) and two remote specia
 The agent's own work is unaffected (row 1 — delegation correctly reads low), the
 two requests it would hand off are now admitted, and off-topic stays out.
 
-### Why two questions and not one
+### Why separate questions and never one compound one
+
+This is the layer's most-repeated lesson: **every** time two propositions have
+been folded into one question with an "and" or an "or", the calibration
+collapsed. It has now been measured three times — scope+wants_answer,
+scope+delegatable, and scope+addressed — and the failure is always the same
+shape: the model hedges, both signals slide toward the middle, and the
+threshold stops discriminating. The cost of keeping them apart is zero, because
+Jev answers every question in one forward pass.
 
 Folded into a single "is this in scope AND should you answer it" question, both
-signals collapse toward the middle and the threshold stops discriminating.
-Measured on the same security-ops scope, same messages:
+signals collapse toward the middle. Measured on the same security-ops scope,
+same messages:
 
 (Numbers from the tuning run that produced the current wording; the split
 columns there predate the measured run in the next section, which is why a
@@ -382,6 +452,11 @@ squarely our topic (0.97) but asks for nothing (0.05). `帮我把这份周报排
 is a real request (0.96) in someone else's domain (0.18). A single combined
 question would have to average those, and either question alone would admit one
 of them.
+
+That run predates `addressed`, which is why the table has three columns rather
+than four. It changes the verdict only where a message names the assistant:
+`帮我把这份周报排版一下` stays quiet, while `aegis 帮我把这份周报排版一下` would now
+be answered.
 
 ### Tuning
 
@@ -882,9 +957,10 @@ Every decision logs its outcome and latency on one line, prefix `[Jev]`, so
 layer decided and what it cost. Real output:
 
 ```
-INFO  [Jev] channel admission: ANSWER in 1260ms (api) — in_scope=0.98 wants_answer=0.97 threshold=0.70 chat=安全运营大群
-INFO  [Jev] channel admission: ANSWER in 0ms (cache) — in_scope=0.98 wants_answer=0.97 threshold=0.70 chat=安全运营大群
-INFO  [Jev] channel admission: STAY QUIET in 1132ms (api) — in_scope=0.02 wants_answer=0.47 threshold=0.70 chat=安全运营大群
+INFO  [Jev] channel admission: ANSWER in 860ms (api) — in_scope=0.87 delegatable=0.92 addressed=0.07 wants_answer=0.96 threshold=0.80 chat=CISO team
+INFO  [Jev] channel admission: ANSWER in 0ms (cache) — in_scope=0.87 delegatable=0.92 addressed=0.07 wants_answer=0.96 threshold=0.80 chat=CISO team
+INFO  [Jev] channel admission: ANSWER in 962ms (api) — in_scope=0.21 delegatable=0.02 addressed=0.90 wants_answer=0.95 threshold=0.80 chat=CISO team
+INFO  [Jev] channel admission: STAY QUIET in 816ms (api) — in_scope=0.72 delegatable=0.27 addressed=0.24 wants_answer=0.05 threshold=0.80 chat=CISO team
 INFO  [Jev] complexity: high in 1077ms (api) — confidence=1.00
 INFO  [Jev] complexity: high reused for this session (scope=session) -> claude-opus-5
 INFO  [Jev] complexity: high in 871ms (api) — confidence=0.27
@@ -898,6 +974,11 @@ WARN  [Jev] complexity: UNDECIDED in 6ms (api) — ConnectError; keeping the def
 | `INFO` | a decision was reached — `ANSWER` / `STAY QUIET`, a band, `OTHER`, or a band `reused` from the session | This is the record of what the layer did. `STAY QUIET` is logged as loudly as `ANSWER`, because a silent bot is exactly what an operator comes to the log to explain. A `reused` line has no latency figure: nothing was asked. The `confidence=` figure on a band line gates nothing — it is there so a band that keeps coming back thin is visible as a criterion that needs rewriting. |
 | `WARNING` | `UNDECIDED` — transport error, or an answer missing from the response | Something is wrong with the classifier, and the feature silently degraded. |
 | `DEBUG` | skipped — empty text, or no client because `TYPESAFE_API_KEY` is unset | Ordinary and expected; would otherwise flood the log on every turn with the feature off. |
+
+`delegatable=` appears only when `remote_agents` is configured. Lines 3 and 4
+are the two dimensions doing work the scope question cannot: line 3 is answered
+on the name alone (`in_scope` 0.21), line 4 is on topic and named but asks for
+nothing, so `wants_answer` 0.05 vetoes it.
 
 The `(api)` / `(cache)` / `(api+cache)` marker says whether the call went over
 the wire. Without it a `0ms` line looks like a bug — it is a memo hit
@@ -930,7 +1011,7 @@ silence, a timed-out complexity call means the default model.
 | File | Role |
 |---|---|
 | `agent/jev_client.py` | transport + the `noul` / `choice` / `score` primitives (`choice` carries a per-option criterion), `_parse_answer` (legend/argmax normalization), TTL+LRU decision memo |
-| `agent/jev_policy.py` | `_SCOPE_QUESTION`, `_WANTS_ANSWER_QUESTION`, `_COMPLEXITY_QUESTION`, `DEFAULT_COMPLEXITY_CRITERIA`, `_complexity_criteria`, `_relevance_state`, settings resolution, feature gates, band → model |
+| `agent/jev_policy.py` | `_SCOPE_QUESTION`, `_DELEGATABLE_QUESTION`, `_ADDRESSED_QUESTION`, `_WANTS_ANSWER_QUESTION`, `_COMPLEXITY_QUESTION`, `DEFAULT_COMPLEXITY_CRITERIA`, `_complexity_criteria`, `_relevance_request`, settings resolution, feature gates, band → model |
 | `gateway/run.py` | `_apply_jev_complexity_route` on the turn route |
 | `plugins/platforms/feishu/adapter.py` | `_admit` → `group_mention_missing`, the gate, the forced topic reply |
 | `workagent/backend/a2a_service/executor.py` | both gates on the A2A turn |
@@ -951,7 +1032,9 @@ silence, a timed-out complexity call means the default model.
   cost of the mistake you care about, and remember that a false *negative* here
   is silent.
 - Every decision is one extra HTTP round trip. Measured on the configured
-  endpoint: admission ≈ 471 input / 39 output tokens, $0.0000198; complexity
+  endpoint: admission ≈ 678 input / 75 output tokens, $0.0000285 with all four
+  propositions and a populated `remote_agents` (it was ≈ 471 / 39 with two);
+  complexity
   ≈ 534 / 47 tokens, $0.0000224; **0.9–1.3s** each through a proxy (see
   *Measured latency* above). Complexity got **more** expensive with the four
   described options, not less: it was ≈ 395 / 19 when it was a `score` over
