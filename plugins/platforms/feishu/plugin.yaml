@@ -82,3 +82,11 @@ optional_env:
     description: "When the first message of a new session sits inside a topic, also inject up to this many of that topic's messages as <thread_messages> (default 20, capped at 50; 0 disables)"
     prompt: "Group history topic message limit"
     password: false
+  - name: FEISHU_GROUP_HISTORY_SOURCE
+    description: "How group history is fetched: api (lark SDK client, default) or cli (runs lark-cli im +chat-messages-list / +threads-messages-list as the bot and can render interactive-card bodies). Same limits, window and block shape either way"
+    prompt: "Group history source (api/cli)"
+    password: false
+  - name: FEISHU_GROUP_HISTORY_CLI_BIN
+    description: "lark-cli executable used by the cli group history source: a name on PATH or an absolute path (default lark-cli)"
+    prompt: "lark-cli executable"
+    password: false

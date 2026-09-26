@@ -129,6 +129,75 @@ def test_group_history_thread_limit_setting(monkeypatch, raw, expected):
     assert FeishuAdapter._load_settings({}).group_history_thread_limit == expected
 
 
+@pytest.mark.parametrize(
+    "raw, expected",
+    [(None, "api"), ("api", "api"), ("cli", "cli"), ("lark-cli", "cli"), ("feishu-cli", "cli"), ("bogus", "api")],
+)
+def test_group_history_source_setting(monkeypatch, raw, expected):
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("FEISHU_GROUP_HISTORY_SOURCE", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("FEISHU_GROUP_HISTORY_SOURCE", raw)
+    assert FeishuAdapter._load_settings({}).group_history_source == expected
+
+
+def test_group_history_cli_bin_setting(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("FEISHU_GROUP_HISTORY_CLI_BIN", raising=False)
+    assert FeishuAdapter._load_settings({}).group_history_cli_bin == "lark-cli"
+    monkeypatch.setenv("FEISHU_GROUP_HISTORY_CLI_BIN", "/opt/lark/lark-cli")
+    assert FeishuAdapter._load_settings({}).group_history_cli_bin == "/opt/lark/lark-cli"
+    assert FeishuAdapter._load_settings({"group_history_cli_bin": "feishu-cli"}).group_history_cli_bin == "feishu-cli"
+    assert FeishuAdapter._load_settings({"group_history_cli_bin": "   "}).group_history_cli_bin == "/opt/lark/lark-cli"
+
+
+def test_adapter_picks_backend_from_source_setting():
+    from tools import feishu_group_history as gh
+
+    adapter = _history_adapter()
+    api_settings = adapter._group_history_settings()
+    assert api_settings.source == "api"
+    assert isinstance(adapter._build_group_history_source(api_settings), gh.ApiHistorySource)
+
+    adapter._group_history_source = "lark-cli"
+    adapter._group_history_cli_bin = "/opt/lark/lark-cli"
+    cli_settings = adapter._group_history_settings()
+    assert cli_settings.source == "cli" and cli_settings.cli_bin == "/opt/lark/lark-cli"
+    backend = adapter._build_group_history_source(cli_settings)
+    assert isinstance(backend, gh.LarkCliHistorySource)
+    assert backend._binary == "/opt/lark/lark-cli"
+
+
+def test_adapter_cli_mode_never_touches_sdk_list_and_renders_cli_content():
+    """End to end through the adapter wrapper in cli mode with a fake CLI runner."""
+    from tools import feishu_group_history as gh
+
+    adapter = _history_adapter()
+    adapter._group_history_source = "cli"
+    adapter._client.im.v1.message.list = Mock(side_effect=AssertionError("SDK must not be used in cli mode"))
+    payload = {"ok": True, "data": {"messages": [
+        {"message_id": "om_1", "msg_type": "interactive", "content": '<card title="x">\nbody\n</card>',
+         "create_time": "2026-09-26 20:15", "deleted": False,
+         "sender": {"id": "cli_self", "sender_type": "app", "name": "Hermes"}},
+    ]}}
+
+    async def runner(argv):
+        return 0, json.dumps(payload).encode(), b""
+
+    real_builder = adapter._build_group_history_source
+
+    def patched_builder(settings):
+        backend = real_builder(settings)
+        backend._runner = runner
+        return backend
+
+    adapter._build_group_history_source = patched_builder
+    with patch("tools.feishu_group_history.shutil.which", return_value="/opt/bin/lark-cli"):
+        block = asyncio.run(adapter._fetch_group_history_block(chat_id="oc_g", exclude_message_id="om_now"))
+    assert block == '<group_messages>\n[09-26 20:15] [assistant]: <card title="x"> body </card>\n</group_messages>'
+    assert gh.METADATA_KEY == _FEISHU_GROUP_HISTORY_METADATA_KEY
+
+
 def test_group_history_new_knobs_extra_beats_env(monkeypatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("FEISHU_GROUP_HISTORY_MSG_MAX_CHARS", "10")
