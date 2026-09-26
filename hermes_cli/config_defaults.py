@@ -1955,7 +1955,7 @@ DEFAULT_CONFIG = {
 
     # Jev (TypeSafe System One) decision layer — typed, calibrated judgements
     # made BEFORE the agent loop runs.  Both features are off by default and
-    # both fail safe: with no TYPESAFE_API_KEY, no business_scope, no band
+    # both fail safe: with no TYPESAFE_API_KEY, no agent_description, no band
     # model, or any transport error, every surface keeps its pre-Jev behavior.
     # Each key below can be overridden by the matching environment variable,
     # which takes precedence (TYPESAFE_*, HERMES_JEV_*).
@@ -1997,9 +1997,6 @@ DEFAULT_CONFIG = {
         #     cost of a decision per message and a possible mid-conversation
         #     model switch.
         "complexity_scope": "session",
-        # Superseded by agent_description; still read as a fallback so an
-        # existing deployment does not lose its channel gate on upgrade.
-        "business_scope": "",
         # Plain-language description of what this agent is and does. Used by
         # BOTH decisions: channel admission judges relevance against it (channel
         # autoreply stays off while it is empty — there is nothing to judge

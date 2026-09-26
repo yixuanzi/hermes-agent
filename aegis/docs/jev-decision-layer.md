@@ -11,8 +11,8 @@ forward pass and returns *calibrated* probabilities instead of prose.
 | 2 | **Complexity routing** — classify each turn low/medium/high/`other` against configurable criteria and run it on that band's model (`other` → the default model) | `HERMES_JEV_COMPLEXITY_ROUTING` (+ `HERMES_JEV_CRITERIA_{LOW,MEDIUM,HIGH}` to define the bands) | Gateway (all platforms), WORKAGENT A2A service |
 
 Both are **off by default** and independent — enabling one does not enable the
-other. Both **fail safe**: with no API key, no business scope, no band model, a
-unreadable answer, or any transport error, every surface keeps exactly the
+other. Both **fail safe**: with no API key, no agent description, no band model,
+an unreadable answer, or any transport error, every surface keeps exactly the
 behavior it had before Jev existed.
 
 ## Configuration
@@ -29,11 +29,16 @@ TYPESAFE_BASE_URL=https://api.typesafe.ai      # with or without a trailing /v1
 TYPESAFE_MODEL=jev-latest
 HERMES_JEV_TIMEOUT=8
 
+# Shared by BOTH features — what this assistant is.
+# Feature 1 judges relevance against it and reads the agent's name out of it;
+# feature 2 rates the work as this agent would do it.
+HERMES_JEV_AGENT_DESCRIPTION="Aegis, a security-operations assistant for a SOC team: alert triage, vulnerability and asset management, incident response, policy and compliance questions."
+HERMES_JEV_REMOTE_AGENTS="avgc: vulnerability scanning; aisoc: incident response"
+
 # Feature 1
 HERMES_JEV_AUTOREPLY=true               # false (default) = no admission stage at all
 HERMES_JEV_CHANNEL_AUTOREPLY=true       # inert unless AUTOREPLY is on
 HERMES_JEV_THREAD_AUTOREPLY=false       # also judge inside topics
-HERMES_JEV_BUSINESS_SCOPE="Security operations: alert triage, vulnerability and asset management, incident response, policy and compliance questions."
 HERMES_JEV_RELEVANCE_THRESHOLD=0.7
 
 # Feature 2
@@ -47,8 +52,6 @@ HERMES_JEV_MODEL_LOW=gpt-5-mini
 HERMES_JEV_MODEL_MEDIUM=gpt-5
 HERMES_JEV_MODEL_HIGH=claude-opus-5
 HERMES_JEV_PROVIDER_HIGH=anthropic        # optional, per band
-
-HERMES_JEV_AGENT_DESCRIPTION="Hermes security-operations assistant for a SOC team."
 ```
 
 ```yaml
@@ -62,8 +65,7 @@ jev:
   thread_autoreply: false        # also judge inside topics
   complexity_routing: false
   complexity_scope: session      # session | turn
-  business_scope: ""
-  agent_description: ""    
+  agent_description: ""          # shared by both features; required for feature 1
   remote_agents: ""
   relevance_threshold: 0.7
   criteria:                      # "" = the built-in generic criterion
@@ -77,7 +79,7 @@ jev:
 ```
 
 These keys are **profile-scoped**, not global: a multiplexing gateway can serve
-two business scopes and two sets of band models from one process.
+two agent descriptions and two sets of band models from one process.
 
 ### Band configuration
 
@@ -207,8 +209,8 @@ With `HERMES_JEV_AUTOREPLY=false` this table collapses: nothing is judged and
 nothing is silenced, so `require_mention` alone decides every row.
 
 The `require_mention: false` + autoreply `on` row is the one that matters: that
-configuration answers *every* message in the group, so it is where a
-business-scope filter is worth the most. The channel sub-switch changes only
+configuration answers *every* message in the group, so it is where a relevance
+filter is worth the most. The channel sub-switch changes only
 the two unmentioned rows — a mentioned message behaves identically either way,
 which is the whole carve-out: this stage is about UNADDRESSED messages.
 
@@ -256,18 +258,15 @@ single forward pass, so the extra ones cost no extra round trip.
 
 | key | required | source | why it is there |
 |---|---|---|---|
-| `agent` | **yes** | `HERMES_JEV_AGENT_DESCRIPTION` / `jev.agent_description`, verbatim | What this assistant is. Relevance is judged against it, so its wording is the real tuning surface. The same key feeds the complexity question. |
+| `agent` | **yes** | `HERMES_JEV_AGENT_DESCRIPTION` / `jev.agent_description`, verbatim | What this assistant is. |
 | `message` | **yes** | the inbound text | What is being judged. |
 | `remote_agents` | no — omitted when empty | `HERMES_JEV_REMOTE_AGENTS` / `jev.remote_agents` | Specialists this agent can delegate to. A request one of them handles is this agent's business too — it can hand the work off. Adds the `delegatable` question. |
-
-`agent` does double duty: it is what `in_scope` is judged against **and** where
-`addressed` reads the assistant's name from.
 | `channel` | no — omitted when empty | Feishu: chat display name, falling back to `chat_id`. A2A: `<source>.channel` | Lets the model read the room. "有人看一下吗" in `安全运营大群` reads differently than in a random group. |
 | `sender` | no — omitted when empty | Feishu: resolved display name. A2A: `<source>.uname` | Supports the "directed at a specific named person" clause. |
 
-`jev.business_scope` was the earlier name for the `agent` source. It is still
-read when `agent_description` is empty, so an existing deployment keeps its gate
-on upgrade; prefer the new key, which both decisions share.
+`agent` carries three jobs at once, which is why its wording is the real tuning
+surface: `in_scope` is judged against it, `addressed` reads the assistant's name
+out of it, and the complexity question rates work as this agent would do it.
 
 Note what is **not** here: anything about how the request will be *executed*.
 Admission asks only whether the request is this agent's business; how much work
@@ -284,8 +283,8 @@ Not the raw payload. By the time the gate runs, `text` has been through:
 2. `_strip_edge_self_mentions()` — leading `@Bot` removed (irrelevant here; a
    message that mentioned us never reaches this gate)
 3. `_build_mention_hint()` prepended — so `@李四 你看下这个` arrives with the
-   mention of **another** person visible, which is what lets question 2 answer
-   `false` for messages aimed at someone specific
+   mention of **another** person visible, which is what lets `wants_answer`
+   answer `false` for messages aimed at someone specific
 
 On the WORKAGENT A2A service `message` is `user_input` **including the
 `<source>{…}</source>` prefix**, because the executor deliberately keeps that
@@ -386,7 +385,9 @@ Folded, the gap collapses from ~0.85 to ~0.15 and an off-topic request reaches
 Split, both propositions stay crisp and the verdict ORs them. Jev answers all
 three in one forward pass, so the extra question costs no extra round trip.
 
-This is the same lesson as the scope / wants-answer split below, found twice.
+This is the same lesson as the scope / wants-answer split below — see *Why
+separate questions and never one compound one*, where it has now been found
+three times.
 
 #### What delegation buys
 
@@ -407,15 +408,14 @@ two requests it would hand off are now admitted, and off-topic stays out.
 
 This is the layer's most-repeated lesson: **every** time two propositions have
 been folded into one question with an "and" or an "or", the calibration
-collapsed. It has now been measured three times — scope+wants_answer,
-scope+delegatable, and scope+addressed — and the failure is always the same
-shape: the model hedges, both signals slide toward the middle, and the
-threshold stops discriminating. The cost of keeping them apart is zero, because
-Jev answers every question in one forward pass.
+collapsed — measured three times now, on scope+wants_answer, scope+delegatable
+and scope+addressed. The failure is always the same shape: the model hedges,
+both signals slide toward the middle, and the threshold stops discriminating.
+Keeping them apart costs nothing, because Jev answers every question in one
+forward pass.
 
-Folded into a single "is this in scope AND should you answer it" question, both
-signals collapse toward the middle. Measured on the same security-ops scope,
-same messages:
+The original measurement, folding "is this in scope" and "should you answer it"
+into one question, on the same security-ops scope and messages:
 
 (Numbers from the tuning run that produced the current wording; the split
 columns there predate the measured run in the next section, which is why a
@@ -460,22 +460,30 @@ be answered.
 
 ### Tuning
 
-`business_scope` is the highest-leverage knob — it is pasted verbatim into the
-state and both questions resolve against it. Write it as an inventory of
-responsibilities, not a mission statement:
+`agent_description` is the highest-leverage knob. It is pasted verbatim into the
+state, `in_scope` resolves against it, and `addressed` looks for the assistant's
+name in it. Write it as a **named** inventory of responsibilities, not an
+anonymous mission statement:
 
-> ✅ `Security operations: alert triage, vulnerability and asset management, incident response procedure, security policy and compliance questions.`
+> ✅ `Aegis, a security-operations assistant: alert triage, vulnerability and asset management, incident response procedure, security policy and compliance questions.`
 >
 > ❌ `Helps the team stay secure.`
 
-`relevance_threshold` (default `0.7`) moves both bars together. Raise it toward
-0.9 to speak only when unmistakably addressed; the cost of a false negative here
-is **silent**, so prefer raising it and letting people @-mention over lowering it
+The name matters as much as the list — drop it and `addressed` has nothing to
+match, so the "asks for us by name" disjunct silently stops working while the
+other two carry on.
+
+`relevance_threshold` (default `0.7`) is a single bar that every proposition is
+measured against, disjuncts and `wants_answer` alike. Raise it toward 0.9 to
+speak only when unmistakably addressed; the cost of a false negative here is
+**silent**, so prefer raising it and letting people @-mention over lowering it
 and having the bot interrupt.
 
-`HERMES_JEV_BUSINESS_SCOPE` is required. Without it there is nothing to judge
-relevance against, so the gate stays closed and unmentioned messages keep being
-dropped — with a warning in the log.
+`HERMES_JEV_AGENT_DESCRIPTION` is **required**. Without it there is nothing to
+judge relevance against, so the gate stays closed and unmentioned messages keep
+being dropped — with a warning in the log.
+
+### Where an admitted message is answered
 
 **Feishu/Lark only** today: an admitted message is answered in a **topic under
 the triggering message**, keyed on its `om_*` root. That topic reply is forced
@@ -483,13 +491,20 @@ even when `FEISHU_REPLY_THREAD=false`, because that switch expresses where an
 *invited* answer goes, and an uninvited one belongs under the message that
 prompted it. The event carries `metadata["jev_channel_autoreply"] = True`.
 
-On the WORKAGENT A2A service the gate applies only when the caller's `<source>`
-envelope says the request came from a channel (`chat_type` of
-`group`/`channel`/`supergroup`) without a mention. A declined request completes
-with a `SKIPPED: …` marker and `{"hermes": {"jev": {"in_scope": false}}}` so the
-calling agent can tell "nothing to say" from an empty reply. A plain RPC call
-carries no `chat_type` and is **never** gated — the caller is blocking on an
-answer, and silently refusing it would strand them.
+### The gate on the A2A service
+
+It applies only when the caller's `<source>` envelope says the request came from
+a channel (`chat_type` of `group`/`channel`/`supergroup`) without a mention. A
+declined request completes with a `SKIPPED: …` marker and
+`{"hermes": {"jev": {"in_scope": false}}}` so the calling agent can tell
+"nothing to say" from an empty reply. A plain RPC call carries no `chat_type`
+and is **never** gated — the caller is blocking on an answer, and silently
+refusing it would strand them.
+
+In practice no in-tree caller populates `chat_type`: `tools/a2a_delegate_tool.py`
+builds an envelope of `platform` / `conn` / `uid` / `uname` only. The gate is
+therefore inert on this surface today, which is also why the `HERMES_JEV_AUTOREPLY`
+master switch deliberately does not reach it.
 
 ## Feature 2 — complexity routing
 
@@ -563,9 +578,8 @@ context id, so a delegate conversation is rated once and its follow-ups inherit
 the band. The gateway's one-shot background-task path has no session of its own
 and is therefore always rated per turn, which is what a single-turn task means.
 
-An **undecided** turn is deliberately not remembered: a transport error or a
-transport error must not pin a whole session to the default model, so the next
-turn tries again. `other` *is* remembered — it routes to the same default model,
+An **undecided** turn is deliberately not remembered: a transport error must not
+pin a whole session to the default model, so the next turn tries again. `other` *is* remembered — it routes to the same default model,
 but it is a decision rather than a failure, and re-asking it every turn would
 buy nothing.
 
@@ -609,7 +623,7 @@ expressible and still logged.
       "criteria": {
         "low": "A greeting, an acknowledgement, or a single short factual answer or lookup that needs no reasoning.",
         "medium": "A focused task needing a few steps, wiki maintenance, a brief analysis and comparison or information retrieval and summarization",
-        "high": "Multi-step work needing planning, deep analysis, cross-referencing several sources, incident response or a substantial code change.",
+        "high": "Multi-step work needing planning, deep analysis, cross-referencing, several sources, incident response or a substantial code change.",
         "other": "The request fits none of the other options — it is outside what they describe, not merely between two of them."
       }
     }
@@ -630,7 +644,7 @@ by it. A test asserts no default criterion string appears in the instructions.
 | `agent` | no — omitted when empty | `HERMES_JEV_AGENT_DESCRIPTION` / `jev.agent_description` | Complexity is the cost of the task *as this agent would do it*. |
 
 `request` and `agent` are the whole state; a test asserts that as a closed set.
-No business scope, no channel, no sender. `agent` describes the *executor* and
+No channel, no sender, no tool inventory. `agent` describes the *executor* and
 is stable per agent, so it cannot make the same request band differently from
 one room to the next — which is exactly why the channel and the sender stay out.
 
@@ -638,7 +652,8 @@ There used to be a third field, `tools`: a hand-maintained inventory of what the
 agent could do. It is **gone**, along with `HERMES_JEV_TOOLS` and `jev.tools`.
 It was a second copy of what `agent` already says, it never tracked the live
 toolset (`platform_toolsets`, enabled plugins), and a band criterion — which is
-configuration now — says the same thing better. See *What the context buys*.
+configuration now — says the same thing better. See *The criterion replaces the
+tool inventory*.
 
 The question is built to name **only the fields actually sent**: referencing a
 state key the request does not carry is worse than sending no context at all.
@@ -768,8 +783,10 @@ a band that keeps coming back thin is a band whose criterion needs rewriting.
 `HERMES_JEV_CRITERIA_{LOW,MEDIUM,HIGH}` / `jev.criteria.<band>`, merging the same
 way the band models do: env overrides config per band, and a band left empty
 falls back to the built-in criterion in `DEFAULT_COMPLEXITY_CRITERIA`. A blank
-string is a fallback, not an empty description — sending an option with nothing
-written against it strips exactly the calibration the answer is then gated on.
+string is a fallback, not an empty description — an option sent with nothing
+written against it loses most of its calibration (measured: 0.35 confident
+against 1.00 with a description), and a thin answer is one you can no longer
+tell apart from a guess when reading the log.
 
 The defaults describe a **general assistant** and are phrased in terms of effort.
 Override them when this agent's idea of "hard" differs: a fleet-wide scan is
@@ -829,9 +846,10 @@ inventory in the state, rows 3 and 4 were `other` at 0.88 and 0.96 — a unique
 index and a report layout, both perfectly ordinary `medium` work, pushed off the
 routing table. With `agent` alone they stay `medium`.
 
-Row 4 shows the residual still taking mass: `medium` survives but at 0.30, under
-the gate, so that turn reaches the default model anyway — through an undecided
-answer rather than an `other`.
+Row 4 shows the residual still taking mass without winning: `medium` survives at
+0.30. With no confidence floor that turn **does** run on the `medium` model —
+but 0.30 against a plausible `other` is exactly the ~0.5 neighbourhood where the
+band changes between runs, so it is a row to watch rather than one to trust.
 
 Two wordings that push back against this were measured and **rejected**: telling
 the model that "outside the subject area is not a reason to pick `other`" moved
@@ -842,9 +860,10 @@ now, because splitting the mass three ways to avoid a legible `other` makes the
 answer less readable for no change in routing.
 
 A narrow criterion set has the mirror-image cost: with SOC-specific criteria
-that never mention greetings, `谢谢` fell to `low` (0.44) with `other` at 0.42 —
-under the gate. If you write your own criteria, make sure the cheap ambient
-traffic your agent actually receives is described by one of them.
+that never mention greetings, `谢谢` scored `low` 0.44 against `other` 0.42 — a
+two-point margin, which is a coin flip between the LOW model and the default
+one. If you write your own criteria, make sure the cheap ambient traffic your
+agent actually receives is described by one of them.
 
 ### Numbers here are one run, not constants
 
@@ -1031,20 +1050,22 @@ silence, a timed-out complexity call means the default model.
   in-scope probability is right about 90% of the time — set thresholds for the
   cost of the mistake you care about, and remember that a false *negative* here
   is silent.
-- Every decision is one extra HTTP round trip. Measured on the configured
-  endpoint: admission ≈ 678 input / 75 output tokens, $0.0000285 with all four
-  propositions and a populated `remote_agents` (it was ≈ 471 / 39 with two);
-  complexity
-  ≈ 534 / 47 tokens, $0.0000224; **0.9–1.3s** each through a proxy (see
-  *Measured latency* above). Complexity got **more** expensive with the four
-  described options, not less: it was ≈ 395 / 19 when it was a `score` over
-  three bare rungs plus a tool inventory. The four criteria are ~140 input
-  tokens, and a 4-way distribution is a longer answer than a 3-rung score. That
-  is the price of the options being configurable and of `other` existing;
-  writing *shorter* criteria is the lever if it matters. A channel message with both features on costs two
-  calls — the two states differ (`agent` + `message` vs. `agent` + `request`), so
-  they cannot share a request, and keeping them separate is what lets each
-  feature be toggled on its own.
+- Every decision is one extra HTTP round trip, **0.9–1.3s** each through a proxy
+  (see *Measured latency*). Measured on the configured endpoint:
+
+  | decision | tokens (in / out) | cost | was |
+  |---|---|---|---|
+  | admission | 678 / 75 | $0.0000285 | 471 / 39 with two propositions |
+  | complexity | 534 / 47 | $0.0000224 | 395 / 19 as a `score` + tool inventory |
+
+  Both got **more** expensive, not less. Admission pays for two extra
+  propositions; complexity pays ~140 input tokens for the four criteria and a
+  longer answer for a 4-way distribution instead of a 3-rung score. That is the
+  price of configurable options, of `other`, and of never folding two questions
+  into one — writing *shorter* criteria is the lever if it matters.
+- A channel message with both features on costs **two** calls. The states differ
+  (`agent` + `message` vs. `agent` + `request`), so they cannot share a request,
+  and keeping them separate is what lets each feature be toggled on its own.
 - The decision memo in `JevClient` is keyed on the exact `(model, endpoint,
   state, question)` tuple with a 120s TTL. It coalesces retried deliveries and
   repeated identical text; it is **not** shared between the two features,

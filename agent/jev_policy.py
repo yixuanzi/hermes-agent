@@ -329,7 +329,6 @@ class JevSettings:
     thread_autoreply: bool = False
     complexity_routing: bool = False
     complexity_scope: str = DEFAULT_COMPLEXITY_SCOPE
-    business_scope: str = ""
     agent_description: str = ""
     remote_agents: str = ""
     relevance_threshold: float = 0.7
@@ -342,16 +341,6 @@ class JevSettings:
     def configured(self) -> bool:
         """Can the client reach Jev at all?"""
         return bool(self.api_key)
-
-    @property
-    def admission_scope(self) -> str:
-        """What channel admission is judged against.
-
-        ``agent_description`` is the source; ``business_scope`` is the older
-        key it replaced and is still honored so an existing deployment does not
-        silently lose its gate on upgrade.
-        """
-        return self.agent_description or self.business_scope
 
 
 def _resolve_complexity_criteria(config: Mapping[str, Any]) -> Dict[str, str]:
@@ -469,7 +458,6 @@ def load_jev_settings() -> JevSettings:
         complexity_scope=_as_scope(
             pick("HERMES_JEV_COMPLEXITY_SCOPE", "complexity_scope")
         ),
-        business_scope=str(pick("HERMES_JEV_BUSINESS_SCOPE", "business_scope") or "").strip(),
         agent_description=str(
             pick("HERMES_JEV_AGENT_DESCRIPTION", "agent_description") or ""
         ).strip(),
@@ -567,18 +555,19 @@ def channel_autoreply_active(
     if not settings.configured:
         logger.debug("[Jev] channel autoreply requested but TYPESAFE_API_KEY is unset")
         return False
-    if not settings.admission_scope:
+    if not settings.agent_description:
+        legacy = _env("HERMES_JEV_BUSINESS_SCOPE") or _jev_config().get("business_scope")
         logger.warning(
             "[Jev] channel autoreply is on but HERMES_JEV_AGENT_DESCRIPTION / "
             "jev.agent_description is empty — there is nothing to judge relevance "
-            "against, so the mention gate stays closed"
+            "against, so the mention gate stays closed.%s",
+            # business_scope was the older name for this setting and is no longer
+            # read. Saying so here is the difference between a one-line fix and a
+            # silently quiet bot, which is the failure mode this gate has to avoid.
+            " HERMES_JEV_BUSINESS_SCOPE / jev.business_scope is set but no longer"
+            " read — rename it to HERMES_JEV_AGENT_DESCRIPTION." if legacy else "",
         )
         return False
-    if not settings.agent_description and settings.business_scope:
-        logger.debug(
-            "[Jev] channel admission is using the legacy business_scope; "
-            "HERMES_JEV_AGENT_DESCRIPTION replaces it"
-        )
     return True
 
 
@@ -649,7 +638,7 @@ def _relevance_request(
     there is nothing to delegate to.
     """
     state: Dict[str, str] = {
-        "agent": settings.admission_scope,
+        "agent": settings.agent_description,
         "message": text,
     }
     questions = {

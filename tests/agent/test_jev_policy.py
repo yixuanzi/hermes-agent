@@ -14,7 +14,7 @@ from agent.jev_policy import TierModel
 _JEV_ENV = [
     "TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_MODEL",
     "HERMES_JEV_TIMEOUT", "HERMES_JEV_CHANNEL_AUTOREPLY",
-    "HERMES_JEV_COMPLEXITY_ROUTING", "HERMES_JEV_BUSINESS_SCOPE",
+    "HERMES_JEV_COMPLEXITY_ROUTING", "HERMES_JEV_BUSINESS_SCOPE",  # removed; still cleared
     "HERMES_JEV_RELEVANCE_THRESHOLD",
     "HERMES_JEV_MODEL_LOW", "HERMES_JEV_MODEL_MEDIUM", "HERMES_JEV_MODEL_HIGH",
     "HERMES_JEV_PROVIDER_LOW", "HERMES_JEV_PROVIDER_MEDIUM", "HERMES_JEV_PROVIDER_HIGH",
@@ -108,7 +108,7 @@ def test_config_yaml_supplies_settings_when_no_env_is_set(jev_env):
             "timeout": 3,
             "channel_autoreply": True,
             "complexity_routing": True,
-            "business_scope": "from config",
+            "agent_description": "from config",
             "relevance_threshold": 0.9,
             "models": {"low": "cfg-low", "high": {"model": "cfg-high", "provider": "openai"}},
         }
@@ -119,7 +119,7 @@ def test_config_yaml_supplies_settings_when_no_env_is_set(jev_env):
     assert settings.timeout == pytest.approx(3.0)
     assert settings.channel_autoreply is True
     assert settings.complexity_routing is True
-    assert settings.business_scope == "from config"
+    assert settings.agent_description == "from config"
     assert settings.relevance_threshold == pytest.approx(0.9)
     assert settings.tier_models["low"] == TierModel(model="cfg-low")
     assert settings.tier_models["high"] == TierModel(model="cfg-high", provider="openai")
@@ -131,19 +131,19 @@ def test_env_wins_over_config_yaml(jev_env, monkeypatch):
         {
             "base_url": "https://cfg.test",
             "channel_autoreply": False,
-            "business_scope": "from config",
+            "agent_description": "from config",
             "models": {"high": "cfg-high"},
         }
     )
     monkeypatch.setenv("TYPESAFE_BASE_URL", "https://env.test")
     monkeypatch.setenv("HERMES_JEV_CHANNEL_AUTOREPLY", "true")
-    monkeypatch.setenv("HERMES_JEV_BUSINESS_SCOPE", "from env")
+    monkeypatch.setenv("HERMES_JEV_AGENT_DESCRIPTION", "from env")
     monkeypatch.setenv("HERMES_JEV_MODEL_HIGH", "env-high")
 
     settings = jev_policy.load_jev_settings()
     assert settings.base_url == "https://env.test"
     assert settings.channel_autoreply is True
-    assert settings.business_scope == "from env"
+    assert settings.agent_description == "from env"
     assert settings.tier_models["high"] == TierModel(model="env-high")
 
 
@@ -203,15 +203,15 @@ def test_channel_autoreply_needs_flag_key_and_scope(jev_env, monkeypatch):
     assert jev_policy.channel_autoreply_active() is False, "no API key"
 
     monkeypatch.setenv("TYPESAFE_API_KEY", "k")
-    assert jev_policy.channel_autoreply_active() is False, "no business scope"
+    assert jev_policy.channel_autoreply_active() is False, "no agent description"
 
-    monkeypatch.setenv("HERMES_JEV_BUSINESS_SCOPE", "security operations")
+    monkeypatch.setenv("HERMES_JEV_AGENT_DESCRIPTION", "security operations")
     assert jev_policy.channel_autoreply_active() is True
 
 
 def test_channel_autoreply_stays_off_while_the_flag_is_off(jev_env, monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "k")
-    monkeypatch.setenv("HERMES_JEV_BUSINESS_SCOPE", "security operations")
+    monkeypatch.setenv("HERMES_JEV_AGENT_DESCRIPTION", "security operations")
     assert jev_policy.channel_autoreply_active() is False
 
 
@@ -1308,32 +1308,45 @@ def test_admission_is_judged_against_the_agent_description():
     assert "business_scope" not in state
 
 
-def test_business_scope_is_still_honored_when_no_agent_description_is_set():
-    # An existing deployment must not lose its channel gate on upgrade.
-    settings = jev_policy.JevSettings(business_scope="legacy scope")
-    assert settings.admission_scope == "legacy scope"
-    state, _ = jev_policy._relevance_request("hi", settings)
-    assert state["agent"] == "legacy scope"
-
-
-def test_the_agent_description_wins_over_the_legacy_scope():
-    settings = jev_policy.JevSettings(
-        agent_description="A SOC assistant.", business_scope="legacy scope",
-    )
-    assert settings.admission_scope == "A SOC assistant."
-
-
-def test_the_gate_opens_on_either_key(jev_env, monkeypatch):
+def test_the_legacy_business_scope_is_no_longer_read(jev_env, monkeypatch):
+    # It was the older name for agent_description and carried the same meaning.
+    # Neither surface feeds the gate any more.
     monkeypatch.setenv("TYPESAFE_API_KEY", "k")
     monkeypatch.setenv("HERMES_JEV_CHANNEL_AUTOREPLY", "true")
-    assert jev_policy.channel_autoreply_active() is False, "neither key set"
-
     monkeypatch.setenv("HERMES_JEV_BUSINESS_SCOPE", "legacy")
-    assert jev_policy.channel_autoreply_active() is True, "legacy key still works"
+    jev_env["business_scope"] = "legacy"
 
-    monkeypatch.delenv("HERMES_JEV_BUSINESS_SCOPE")
+    settings = jev_policy.load_jev_settings()
+    assert not hasattr(settings, "business_scope")
+    assert settings.agent_description == ""
+    assert jev_policy.channel_autoreply_active() is False
+
     monkeypatch.setenv("HERMES_JEV_AGENT_DESCRIPTION", "A SOC assistant.")
     assert jev_policy.channel_autoreply_active() is True
+
+
+def test_a_leftover_business_scope_is_named_in_the_warning(jev_env, monkeypatch, caplog):
+    # Removing it silently would turn a working gate into a quiet bot with no
+    # signal. The warning that fires when there is nothing to judge against
+    # says WHY, so the fix is a rename rather than an investigation.
+    caplog.set_level("WARNING")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    monkeypatch.setenv("HERMES_JEV_CHANNEL_AUTOREPLY", "true")
+    monkeypatch.setenv("HERMES_JEV_BUSINESS_SCOPE", "legacy")
+
+    assert jev_policy.channel_autoreply_active() is False
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "HERMES_JEV_BUSINESS_SCOPE" in line
+    assert "HERMES_JEV_AGENT_DESCRIPTION" in line
+
+
+def test_the_warning_stays_quiet_about_a_key_that_was_never_set(jev_env, monkeypatch, caplog):
+    caplog.set_level("WARNING")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    monkeypatch.setenv("HERMES_JEV_CHANNEL_AUTOREPLY", "true")
+
+    assert jev_policy.channel_autoreply_active() is False
+    assert "HERMES_JEV_BUSINESS_SCOPE" not in _jev_records(caplog)[-1].getMessage()
 
 
 def test_remote_agents_add_a_fourth_proposition():
