@@ -105,12 +105,47 @@ def test_group_history_hours_must_be_positive(monkeypatch, raw, expected):
     assert FeishuAdapter._load_settings({}).group_history_hours == expected
 
 
+@pytest.mark.parametrize(
+    "raw, expected",
+    [(None, 1000), ("0", 0), ("-5", 1000), ("abc", 1000), ("250", 250)],
+)
+def test_group_history_msg_max_chars_setting(monkeypatch, raw, expected):
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("FEISHU_GROUP_HISTORY_MSG_MAX_CHARS", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("FEISHU_GROUP_HISTORY_MSG_MAX_CHARS", raw)
+    assert FeishuAdapter._load_settings({}).group_history_msg_max_chars == expected
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [(None, 20), ("0", 0), ("-1", 20), ("abc", 20), ("7", 7), ("500", 50)],
+)
+def test_group_history_thread_limit_setting(monkeypatch, raw, expected):
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("FEISHU_GROUP_HISTORY_THREAD_LIMIT", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("FEISHU_GROUP_HISTORY_THREAD_LIMIT", raw)
+    assert FeishuAdapter._load_settings({}).group_history_thread_limit == expected
+
+
+def test_group_history_new_knobs_extra_beats_env(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("FEISHU_GROUP_HISTORY_MSG_MAX_CHARS", "10")
+    monkeypatch.setenv("FEISHU_GROUP_HISTORY_THREAD_LIMIT", "10")
+    settings = FeishuAdapter._load_settings(
+        {"group_history_msg_max_chars": 0, "group_history_thread_limit": 3}
+    )
+    assert settings.group_history_msg_max_chars == 0
+    assert settings.group_history_thread_limit == 3
+
+
 # ---------------------------------------------------------------------------
 # Fetch + format
 # ---------------------------------------------------------------------------
 
 
-def _history_adapter(*, limit=20, hours=24.0):
+def _history_adapter(*, limit=20, hours=24.0, msg_max_chars=1000, thread_limit=20):
     adapter = FeishuAdapter.__new__(FeishuAdapter)
     adapter._app_id = "cli_self"
     adapter._bot_open_id = "ou_bot"
@@ -119,6 +154,8 @@ def _history_adapter(*, limit=20, hours=24.0):
     adapter._group_history_enabled = True
     adapter._group_history_limit = limit
     adapter._group_history_hours = hours
+    adapter._group_history_msg_max_chars = msg_max_chars
+    adapter._group_history_thread_limit = thread_limit
     adapter._client = Mock()
     adapter._resolve_sender_name_from_api = AsyncMock(
         side_effect=lambda sender_id, **_: {"ou_alice": "Alice", "ou_bob": "Bob"}.get(sender_id)
@@ -279,6 +316,161 @@ def test_fetch_returns_empty_without_client_or_chat():
 
 
 # ---------------------------------------------------------------------------
+# Topic (thread) history + per-message cap
+# ---------------------------------------------------------------------------
+
+
+def _thread_fixture():
+    """Chat page with a root that has a topic; topic page with the trigger, two replies and the root."""
+    chat_items = [
+        _item("om_now", "trigger", thread_id="omt_1", root_id="om_root", create_time="1758852400000"),
+        _item("om_root", "root post", thread_id="omt_1", create_time="1758852000000"),
+    ]
+    thread_items = [
+        _item("om_now", "trigger", thread_id="omt_1", root_id="om_root", create_time="1758852400000"),
+        _item("om_r2", "bot answer", sender_id="cli_self", sender_type="app", thread_id="omt_1", root_id="om_root",
+              create_time="1758852300000"),
+        _item("om_r1", "bob asks", sender_id="ou_bob", thread_id="omt_1", root_id="om_root",
+              create_time="1758852200000"),
+        _item("om_root", "root post", thread_id="omt_1", create_time="1758852000000"),
+    ]
+    return chat_items, thread_items
+
+
+def _run_fetch(adapter, **kwargs):
+    with patch("hermes_time.get_timezone", return_value=None):
+        return asyncio.run(
+            adapter._fetch_group_history_block(chat_id="oc_g", exclude_message_id="om_now", **kwargs)
+        )
+
+
+def test_fetch_appends_thread_block_without_repeating_group_items():
+    adapter = _history_adapter(thread_limit=20)
+    chat_items, thread_items = _thread_fixture()
+    adapter._client.im.v1.message.list = Mock(
+        side_effect=[_ok_response(chat_items), _ok_response(thread_items)]
+    )
+
+    block = _run_fetch(adapter, thread_id="omt_1")
+
+    group_part, thread_part = block.split("\n\n")
+    assert group_part.startswith("<group_messages>\n") and group_part.endswith("\n</group_messages>")
+    assert thread_part.startswith("<thread_messages>\n") and thread_part.endswith("\n</thread_messages>")
+    group_lines = group_part.split("\n")[1:-1]
+    thread_lines = thread_part.split("\n")[1:-1]
+    assert [line.rsplit(": ", 1)[1] for line in group_lines] == ["root post"]
+    # Chronological, trigger excluded, root not repeated, no reply tags inside a topic.
+    assert [line.rsplit(": ", 1)[1] for line in thread_lines] == ["bob asks", "bot answer"]
+    assert thread_lines[0].endswith("] Bob: bob asks")
+    assert thread_lines[1].endswith("] [assistant]: bot answer")
+    assert "[in-topic]" not in thread_part and "[reply]" not in thread_part
+
+    calls = adapter._client.im.v1.message.list.call_args_list
+    assert len(calls) == 2
+    thread_request = calls[1].args[0]
+    assert thread_request.container_id_type == "thread"
+    assert thread_request.container_id == "omt_1"
+    assert thread_request.sort_type == "ByCreateTimeDesc"
+    assert thread_request.page_size == 21
+    assert thread_request.start_time is None  # no time window for the topic itself
+
+
+def test_fetch_thread_limit_bounds_topic_lines_and_page_size():
+    adapter = _history_adapter(thread_limit=1)
+    chat_items, thread_items = _thread_fixture()
+    adapter._client.im.v1.message.list = Mock(
+        side_effect=[_ok_response(chat_items), _ok_response(thread_items)]
+    )
+    block = _run_fetch(adapter, thread_id="omt_1")
+    thread_part = block.split("\n\n")[1]
+    assert thread_part.split("\n")[1:-1] == [
+        line for line in thread_part.split("\n")[1:-1] if line.endswith("bot answer")
+    ]
+    assert len(thread_part.split("\n")[1:-1]) == 1  # newest surviving topic message only
+    assert adapter._client.im.v1.message.list.call_args_list[1].args[0].page_size == 2
+
+
+def test_fetch_topic_lines_do_not_count_against_group_limit():
+    adapter = _history_adapter(limit=1, thread_limit=20)
+    chat_items, thread_items = _thread_fixture()
+    adapter._client.im.v1.message.list = Mock(
+        side_effect=[_ok_response(chat_items), _ok_response(thread_items)]
+    )
+    block = _run_fetch(adapter, thread_id="omt_1")
+    group_part, thread_part = block.split("\n\n")
+    assert len(group_part.split("\n")[1:-1]) == 1
+    assert len(thread_part.split("\n")[1:-1]) == 2
+
+
+@pytest.mark.parametrize("kwargs", [{"thread_limit": 0}, {}])
+def test_fetch_skips_topic_call_when_disabled_or_not_in_topic(kwargs):
+    adapter = _history_adapter(**kwargs)
+    chat_items, _ = _thread_fixture()
+    adapter._client.im.v1.message.list = Mock(return_value=_ok_response(chat_items))
+    thread_id = "omt_1" if kwargs else None
+    block = _run_fetch(adapter, thread_id=thread_id)
+    assert adapter._client.im.v1.message.list.call_count == 1
+    assert "<thread_messages>" not in block
+
+
+def test_fetch_skips_topic_call_for_om_anchor():
+    adapter = _history_adapter()
+    chat_items, _ = _thread_fixture()
+    adapter._client.im.v1.message.list = Mock(return_value=_ok_response(chat_items))
+    block = _run_fetch(adapter, thread_id="om_root")
+    assert adapter._client.im.v1.message.list.call_count == 1
+    assert "<thread_messages>" not in block
+
+
+def test_fetch_topic_failure_keeps_group_block():
+    adapter = _history_adapter()
+    chat_items, _ = _thread_fixture()
+    failed = Mock()
+    failed.success = Mock(return_value=False)
+    failed.code = 1
+    failed.msg = "nope"
+    adapter._client.im.v1.message.list = Mock(side_effect=[_ok_response(chat_items), failed])
+    block = _run_fetch(adapter, thread_id="omt_1")
+    assert block.startswith("<group_messages>") and block.endswith("</group_messages>")
+    assert "<thread_messages>" not in block
+
+
+def test_fetch_topic_only_when_group_window_is_empty():
+    adapter = _history_adapter()
+    _, thread_items = _thread_fixture()
+    adapter._client.im.v1.message.list = Mock(
+        side_effect=[_ok_response([]), _ok_response(thread_items)]
+    )
+    block = _run_fetch(adapter, thread_id="omt_1")
+    assert block.startswith("<thread_messages>")
+    # Nothing was shown in the group block, so the root appears in the topic block.
+    assert [line.rsplit(": ", 1)[1] for line in block.split("\n")[1:-1]] == ["root post", "bob asks", "bot answer"]
+
+
+def test_fetch_group_failure_returns_empty_and_skips_topic():
+    adapter = _history_adapter()
+    failed = Mock()
+    failed.success = Mock(return_value=False)
+    failed.code = 1
+    failed.msg = "nope"
+    adapter._client.im.v1.message.list = Mock(return_value=failed)
+    assert _run_fetch(adapter, thread_id="omt_1") == ""
+    assert adapter._client.im.v1.message.list.call_count == 1
+
+
+@pytest.mark.parametrize("cap, expect_len", [(10, 10), (0, 1500)])
+def test_msg_max_chars_caps_each_body(cap, expect_len):
+    adapter = _history_adapter(msg_max_chars=cap)
+    long_body = "x" * 1500
+    adapter._client.im.v1.message.list = Mock(return_value=_ok_response([_item("om_1", long_body)]))
+    block = _run_fetch(adapter)
+    body = block.split("\n")[1].rsplit(": ", 1)[1]
+    assert len(body) == expect_len
+    if cap:
+        assert body.endswith("...")
+
+
+# ---------------------------------------------------------------------------
 # Inbound gate in _process_inbound_message
 # ---------------------------------------------------------------------------
 
@@ -341,9 +533,28 @@ def test_new_group_session_carries_block_on_metadata_not_text():
     adapter = _inbound_adapter()
     event = _run_inbound(adapter, _message("do the thing"))
 
-    adapter._fetch_group_history_block.assert_awaited_once_with(chat_id="oc_g", exclude_message_id="om_now")
+    adapter._fetch_group_history_block.assert_awaited_once_with(
+        chat_id="oc_g", exclude_message_id="om_now", thread_id=None
+    )
     assert event.text == "do the thing"
     assert event.metadata[_FEISHU_GROUP_HISTORY_METADATA_KEY] == BLOCK
+
+
+def test_topic_message_passes_its_real_thread_id_to_the_fetch():
+    adapter = _inbound_adapter()
+    _run_inbound(adapter, _message("inside a topic", thread_id="omt_topic", root_id="om_root"))
+    adapter._fetch_group_history_block.assert_awaited_once_with(
+        chat_id="oc_g", exclude_message_id="om_now", thread_id="omt_topic"
+    )
+
+
+def test_auto_thread_root_passes_no_thread_id_to_the_fetch():
+    """The om_* auto-thread anchor is a message id, not a listable topic container."""
+    adapter = _inbound_adapter()
+    adapter._reply_thread_enabled = Mock(return_value=True)
+    adapter._mark_auto_thread_pending = Mock()
+    _run_inbound(adapter, _message("hello"))
+    assert adapter._fetch_group_history_block.await_args.kwargs["thread_id"] is None
 
 
 def test_mention_hint_and_text_are_untouched_by_the_block():

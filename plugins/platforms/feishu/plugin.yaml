@@ -74,3 +74,11 @@ optional_env:
     description: "Only inject group messages created within this many hours (default 24)"
     prompt: "Group history window (hours)"
     password: false
+  - name: FEISHU_GROUP_HISTORY_MSG_MAX_CHARS
+    description: "Truncate each injected message body to this many characters (default 1000; 0 disables truncation)"
+    prompt: "Group history per-message cap"
+    password: false
+  - name: FEISHU_GROUP_HISTORY_THREAD_LIMIT
+    description: "When the first message of a new session sits inside a topic, also inject up to this many of that topic's messages as <thread_messages> (default 20, capped at 50; 0 disables)"
+    prompt: "Group history topic message limit"
+    password: false

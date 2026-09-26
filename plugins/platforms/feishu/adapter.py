@@ -315,8 +315,9 @@ _FEISHU_MESSAGE_TEXT_CACHE_SIZE = 512       # LRU cap for reply-context message 
 # Recent-group-history injection for root group messages (FEISHU_GROUP_HISTORY).
 _DEFAULT_GROUP_HISTORY_LIMIT = 20
 _DEFAULT_GROUP_HISTORY_HOURS = 24.0
+_DEFAULT_GROUP_HISTORY_THREAD_LIMIT = 20    # extra lines from the trigger's own topic
 _FEISHU_GROUP_HISTORY_PAGE_SIZE_MAX = 50    # im/v1/messages page_size ceiling
-_FEISHU_GROUP_HISTORY_MSG_MAX_CHARS = 1000  # per-line cap inside <group_messages>
+_FEISHU_GROUP_HISTORY_MSG_MAX_CHARS = 1000  # default per-line cap; 0 = no cap
 # MessageEvent.metadata key the gateway reads to place the block under <source>.
 _FEISHU_GROUP_HISTORY_METADATA_KEY = "group_history_block"
 
@@ -483,6 +484,11 @@ class FeishuAdapterSettings:
     group_history_enabled: bool = False
     group_history_limit: int = _DEFAULT_GROUP_HISTORY_LIMIT
     group_history_hours: float = _DEFAULT_GROUP_HISTORY_HOURS
+    # Per-message body cap inside the block (0 disables truncation).
+    group_history_msg_max_chars: int = _FEISHU_GROUP_HISTORY_MSG_MAX_CHARS
+    # When the first-turn message sits in a topic, also pull this many of the
+    # topic's own messages (0 disables the extra fetch).
+    group_history_thread_limit: int = _DEFAULT_GROUP_HISTORY_THREAD_LIMIT
 
 
 @dataclass
@@ -2167,6 +2173,25 @@ class FeishuAdapter(BasePlatformAdapter):
                 extra.get("group_history_hours", os.getenv("FEISHU_GROUP_HISTORY_HOURS")),
                 default=_DEFAULT_GROUP_HISTORY_HOURS,
             ),
+            group_history_msg_max_chars=_coerce_required_int(
+                extra.get(
+                    "group_history_msg_max_chars",
+                    os.getenv("FEISHU_GROUP_HISTORY_MSG_MAX_CHARS"),
+                ),
+                default=_FEISHU_GROUP_HISTORY_MSG_MAX_CHARS,
+                min_value=0,
+            ),
+            group_history_thread_limit=min(
+                _coerce_required_int(
+                    extra.get(
+                        "group_history_thread_limit",
+                        os.getenv("FEISHU_GROUP_HISTORY_THREAD_LIMIT"),
+                    ),
+                    default=_DEFAULT_GROUP_HISTORY_THREAD_LIMIT,
+                    min_value=0,
+                ),
+                _FEISHU_GROUP_HISTORY_PAGE_SIZE_MAX,
+            ),
         )
 
     def _apply_settings(self, settings: FeishuAdapterSettings) -> None:
@@ -2204,6 +2229,8 @@ class FeishuAdapter(BasePlatformAdapter):
         self._group_history_enabled = settings.group_history_enabled
         self._group_history_limit = settings.group_history_limit
         self._group_history_hours = settings.group_history_hours
+        self._group_history_msg_max_chars = settings.group_history_msg_max_chars
+        self._group_history_thread_limit = settings.group_history_thread_limit
 
     def _build_event_handler(self) -> Any:
         if EventDispatcherHandler is None:
@@ -5368,6 +5395,9 @@ class FeishuAdapter(BasePlatformAdapter):
             history_block = await self._fetch_group_history_block(
                 chat_id=chat_id,
                 exclude_message_id=message_id,
+                # The real ``omt_*`` topic id, if the trigger sits in one; the
+                # auto-thread ``om_*`` anchor is not a listable container.
+                thread_id=actual_thread_id,
             )
         normalized = MessageEvent(
             text=text,
@@ -6895,77 +6925,151 @@ class FeishuAdapter(BasePlatformAdapter):
             return False
         return not self._session_exists_for_source(source)
 
+    async def _list_history_items(
+        self,
+        *,
+        container_id_type: str,
+        container_id: str,
+        page_size: int,
+        start_time: Optional[str] = None,
+    ) -> Optional[List[Any]]:
+        """One ``im/v1/messages`` page, newest first.  ``None`` on API failure."""
+        from lark_oapi.api.im.v1 import ListMessageRequest
+
+        builder = (
+            ListMessageRequest.builder()
+            .container_id_type(container_id_type)
+            .container_id(container_id)
+            .sort_type("ByCreateTimeDesc")
+            .page_size(max(1, min(page_size, _FEISHU_GROUP_HISTORY_PAGE_SIZE_MAX)))
+        )
+        if start_time is not None:
+            builder = builder.start_time(start_time)
+        response = await self._run_blocking(self._client.im.v1.message.list, builder.build())
+        if not response or getattr(response, "success", lambda: False)() is False:
+            logger.warning(
+                "[Feishu] Failed to list %s history for %s: [%s] %s",
+                container_id_type,
+                container_id,
+                getattr(response, "code", "unknown"),
+                getattr(response, "msg", "message list failed"),
+            )
+            return None
+        return list(getattr(getattr(response, "data", None), "items", None) or [])
+
     async def _fetch_group_history_block(
         self,
         *,
         chat_id: str,
         exclude_message_id: str,
+        thread_id: Optional[str] = None,
     ) -> str:
-        """Render the chat's recent messages as a ``<group_messages>`` block.
+        """Render recent history for a cold-start group turn.
 
-        Pulls at most ``group_history_limit`` messages created within the last
-        ``group_history_hours`` (one page, newest first, then reversed so the
-        block reads chronologically).  The triggering message is excluded —
-        it is delivered as the user turn itself.  Every failure degrades to
-        an empty string; this feature must never block a turn.
+        Always: the chat's messages created within the last
+        ``group_history_hours``, newest ``group_history_limit`` of them, as a
+        ``<group_messages>`` block.  The chat container only yields chat-level
+        posts, never replies inside topics.
+
+        Additionally, when ``thread_id`` names a real ``omt_*`` topic the
+        trigger sits in and ``group_history_thread_limit`` > 0: that topic's
+        newest ``group_history_thread_limit`` messages (no time window — the
+        topic *is* the conversation) as a ``<thread_messages>`` block after
+        the group block.  Messages already shown in the group block, and the
+        triggering message itself, are not repeated.
+
+        Every failure degrades to what was gathered so far, or an empty
+        string; this feature must never block a turn.
         """
         client = getattr(self, "_client", None)
         if client is None or not chat_id:
             return ""
         limit = max(1, int(getattr(self, "_group_history_limit", _DEFAULT_GROUP_HISTORY_LIMIT)))
         hours = float(getattr(self, "_group_history_hours", _DEFAULT_GROUP_HISTORY_HOURS))
+        thread_limit = max(
+            0, int(getattr(self, "_group_history_thread_limit", _DEFAULT_GROUP_HISTORY_THREAD_LIMIT))
+        )
         try:
-            from lark_oapi.api.im.v1 import ListMessageRequest
-
-            now = time.time()
             # ``start_time`` is unix seconds; ``create_time`` on items is ms.
-            start_time = str(int(now - hours * 3600))
-            request = (
-                ListMessageRequest.builder()
-                .container_id_type("chat")
-                .container_id(chat_id)
-                .start_time(start_time)
-                .sort_type("ByCreateTimeDesc")
-                .page_size(min(limit + 1, _FEISHU_GROUP_HISTORY_PAGE_SIZE_MAX))
-                .build()
+            start_time = str(int(time.time() - hours * 3600))
+            items = await self._list_history_items(
+                container_id_type="chat",
+                container_id=chat_id,
+                page_size=limit + 1,
+                start_time=start_time,
             )
-            response = await self._run_blocking(client.im.v1.message.list, request)
-            if not response or getattr(response, "success", lambda: False)() is False:
-                logger.warning(
-                    "[Feishu] Failed to list group history for %s: [%s] %s",
-                    chat_id,
-                    getattr(response, "code", "unknown"),
-                    getattr(response, "msg", "message list failed"),
-                )
+            if items is None:
                 return ""
-            items = getattr(getattr(response, "data", None), "items", None) or []
-            block = await self._format_group_history_items(
+            group_block, shown_ids = await self._format_history_items(
                 items,
-                exclude_message_id=exclude_message_id,
+                exclude_message_ids={str(exclude_message_id or "")},
                 limit=limit,
+                wrapper="group_messages",
+                tag_replies=True,
             )
-            injected = block.count("\n") - 1 if block else 0
+
+            thread_block = ""
+            thread_item_count = 0
+            fetch_thread = bool(
+                thread_id
+                and thread_limit > 0
+                and not self._is_message_thread_anchor(str(thread_id))
+            )
+            if fetch_thread:
+                thread_items = await self._list_history_items(
+                    container_id_type="thread",
+                    container_id=str(thread_id),
+                    page_size=thread_limit + 1,
+                )
+                if thread_items:
+                    thread_item_count = len(thread_items)
+                    thread_block, _ = await self._format_history_items(
+                        thread_items,
+                        exclude_message_ids={str(exclude_message_id or ""), *shown_ids},
+                        limit=thread_limit,
+                        wrapper="thread_messages",
+                        tag_replies=False,
+                    )
+
             logger.info(
-                "[Feishu] Group history for %s: %d item(s) returned within %.1fh "
-                "(trigger excluded), %d line(s) injected",
+                "[Feishu] Group history for %s: %d chat item(s) within %.1fh -> %d line(s)%s",
                 chat_id,
                 len(items),
                 hours,
-                max(injected, 0),
+                self._history_line_count(group_block),
+                (
+                    f"; topic {thread_id}: {thread_item_count} item(s) -> "
+                    f"{self._history_line_count(thread_block)} line(s)"
+                    if fetch_thread
+                    else ""
+                ),
             )
-            return block
+            return "\n\n".join(block for block in (group_block, thread_block) if block)
         except Exception:
             logger.warning("[Feishu] Failed to build group history for %s", chat_id, exc_info=True)
             return ""
 
-    async def _format_group_history_items(
+    @staticmethod
+    def _history_line_count(block: str) -> int:
+        """Number of message lines inside a rendered ``<...>`` history block."""
+        return max(block.count("\n") - 1, 0) if block else 0
+
+    async def _format_history_items(
         self,
         items: Sequence[Any],
         *,
-        exclude_message_id: str,
+        exclude_message_ids: set[str],
         limit: int,
-    ) -> str:
-        """Format ``im/v1/messages`` items (newest first) into the history block."""
+        wrapper: str,
+        tag_replies: bool,
+    ) -> Tuple[str, set[str]]:
+        """Format ``im/v1/messages`` items (newest first) into a history block.
+
+        Returns ``(block, message_ids_included)``; the block is ``""`` and
+        the set empty when nothing usable remains.  ``tag_replies`` adds the
+        ``[reply]`` / ``[in-topic]`` markers, which are meaningful in a chat
+        listing and pure noise inside a single topic's listing.
+        """
         from gateway.session import neutralize_untrusted_inline_text
 
         try:
@@ -6974,13 +7078,17 @@ class FeishuAdapter(BasePlatformAdapter):
             tz = get_timezone()
         except Exception:
             tz = None
+        max_chars = max(
+            0, int(getattr(self, "_group_history_msg_max_chars", _FEISHU_GROUP_HISTORY_MSG_MAX_CHARS))
+        )
 
         selected: List[Tuple[Any, str]] = []
+        included: set[str] = set()
         for item in items:
             if getattr(item, "deleted", False):
                 continue
             item_id = str(getattr(item, "message_id", "") or "")
-            if exclude_message_id and item_id == str(exclude_message_id):
+            if item_id and item_id in exclude_message_ids:
                 continue
             body = getattr(item, "body", None)
             text = self._extract_text_from_raw_content(
@@ -6991,10 +7099,12 @@ class FeishuAdapter(BasePlatformAdapter):
             if not text:
                 continue
             selected.append((item, text))
+            if item_id:
+                included.add(item_id)
             if len(selected) >= limit:
                 break
         if not selected:
-            return ""
+            return "", set()
         selected.reverse()  # chronological order
 
         # Resolve human sender names once per distinct id (10-minute cache).
@@ -7018,7 +7128,7 @@ class FeishuAdapter(BasePlatformAdapter):
             # ``thread_id`` sits inside a topic; a bare ``thread_id`` on a
             # root post only means a topic hangs under it, so no tag.
             tags = ""
-            if getattr(item, "root_id", None):
+            if tag_replies and getattr(item, "root_id", None):
                 tags += "[in-topic] " if getattr(item, "thread_id", None) else "[reply] "
             if sender_type == "app" and sender_id and sender_id == getattr(self, "_app_id", None):
                 who = "[assistant]"
@@ -7029,13 +7139,11 @@ class FeishuAdapter(BasePlatformAdapter):
                 who = f"[bot] {bot_name}"
             else:
                 who = neutralize_untrusted_inline_text(names.get(sender_id) or sender_id or "unknown")
-            safe_text = neutralize_untrusted_inline_text(
-                text, max_chars=_FEISHU_GROUP_HISTORY_MSG_MAX_CHARS
-            )
+            safe_text = neutralize_untrusted_inline_text(text, max_chars=max_chars)
             stamp = self._format_group_history_time(getattr(item, "create_time", None), tz)
             prefix = f"[{stamp}] " if stamp else ""
             lines.append(f"{prefix}{tags}{who}: {safe_text}")
-        return "<group_messages>\n" + "\n".join(lines) + "\n</group_messages>"
+        return f"<{wrapper}>\n" + "\n".join(lines) + f"\n</{wrapper}>", included
 
     @staticmethod
     def _format_group_history_time(create_time: Any, tz: Any) -> str:
