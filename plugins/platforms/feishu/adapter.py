@@ -324,6 +324,7 @@ _FEISHU_GROUP_HISTORY_MSG_MAX_CHARS = _group_history.DEFAULT_MSG_MAX_CHARS
 _FEISHU_GROUP_HISTORY_METADATA_KEY = _group_history.METADATA_KEY
 _DEFAULT_GROUP_HISTORY_SOURCE = _group_history.SOURCE_API
 _DEFAULT_GROUP_HISTORY_CLI_BIN = _group_history.DEFAULT_CLI_BIN
+_DEFAULT_GROUP_HISTORY_CARD_REGIONS = _group_history.DEFAULT_CARD_REGIONS
 
 # QR onboarding constants
 _ONBOARD_ACCOUNTS_URLS = {
@@ -497,6 +498,8 @@ class FeishuAdapterSettings:
     # renders interactive-card bodies the raw API does not expose as text).
     group_history_source: str = _DEFAULT_GROUP_HISTORY_SOURCE
     group_history_cli_bin: str = _DEFAULT_GROUP_HISTORY_CLI_BIN
+    # Which regions of an interactive card enter the block: title / trace / body.
+    group_history_card_regions: Tuple[str, ...] = _DEFAULT_GROUP_HISTORY_CARD_REGIONS
 
 
 @dataclass
@@ -2208,6 +2211,9 @@ class FeishuAdapter(BasePlatformAdapter):
                 or str(os.getenv("FEISHU_GROUP_HISTORY_CLI_BIN") or "").strip()
                 or _DEFAULT_GROUP_HISTORY_CLI_BIN
             ),
+            group_history_card_regions=_group_history.normalize_card_regions(
+                extra.get("group_history_card_regions", os.getenv("FEISHU_GROUP_HISTORY_CARD_REGIONS"))
+            ),
         )
 
     def _apply_settings(self, settings: FeishuAdapterSettings) -> None:
@@ -2249,6 +2255,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._group_history_thread_limit = settings.group_history_thread_limit
         self._group_history_source = settings.group_history_source
         self._group_history_cli_bin = settings.group_history_cli_bin
+        self._group_history_card_regions = settings.group_history_card_regions
 
     def _build_event_handler(self) -> Any:
         if EventDispatcherHandler is None:
@@ -6960,18 +6967,24 @@ class FeishuAdapter(BasePlatformAdapter):
             ),
             cli_bin=str(getattr(self, "_group_history_cli_bin", _DEFAULT_GROUP_HISTORY_CLI_BIN) or "")
             or _DEFAULT_GROUP_HISTORY_CLI_BIN,
+            card_regions=_group_history.normalize_card_regions(
+                getattr(self, "_group_history_card_regions", _DEFAULT_GROUP_HISTORY_CARD_REGIONS)
+            ),
         )
 
     def _build_group_history_source(self, settings: "_group_history.GroupHistorySettings") -> Any:
         """Pick the fetch backend for ``settings.source``."""
         tz = _group_history.default_timezone()
         if settings.source == _group_history.SOURCE_CLI:
-            return _group_history.LarkCliHistorySource(binary=settings.cli_bin, tz=tz)
+            return _group_history.LarkCliHistorySource(
+                binary=settings.cli_bin, tz=tz, card_regions=settings.card_regions
+            )
         return _group_history.ApiHistorySource(
             client=self._client,
             run_blocking=self._run_blocking,
             extract_text=self._extract_text_from_raw_content,
             tz=tz,
+            card_regions=settings.card_regions,
         )
 
     async def _fetch_group_history_block(

@@ -52,6 +52,17 @@ DEFAULT_CLI_BIN = "lark-cli"
 CLI_TIMEOUT_SECONDS = 30.0
 METADATA_KEY = "group_history_block"   # MessageEvent.metadata key the gateway reads
 
+# Interactive-card region selection (FEISHU_GROUP_HISTORY_CARD_REGIONS).
+CARD_REGION_TITLE = "title"
+CARD_REGION_TRACE = "trace"      # the collapsible execution-trace panel
+CARD_REGION_BODY = "body"        # the final rich-text answer
+CARD_REGIONS_ALL: Tuple[str, ...] = (CARD_REGION_TITLE, CARD_REGION_TRACE, CARD_REGION_BODY)
+DEFAULT_CARD_REGIONS: Tuple[str, ...] = (CARD_REGION_TITLE, CARD_REGION_BODY)
+# Element ids this fork's CardKit card uses (plugins/platforms/feishu/feishu_cardkit.py).
+HERMES_CARD_PANEL_ID = "hermes_trace_panel"
+HERMES_CARD_BODY_ID = "hermes_body"
+RAW_CARD_CONTENT_TYPE = "raw_card_content"   # im/v1/messages card_msg_content_type
+
 _CLI_SOURCE_ALIASES = {"lark-cli", "lark_cli", "larkcli", "cli", "feishu-cli", "feishu_cli", "feishucli"}
 
 
@@ -73,6 +84,32 @@ def normalize_history_source(value: Any) -> str:
     return SOURCE_API
 
 
+def normalize_card_regions(value: Any) -> Tuple[str, ...]:
+    """Parse ``FEISHU_GROUP_HISTORY_CARD_REGIONS`` (``title,body`` by default).
+
+    Accepts a comma/semicolon separated string or a list; ``all`` selects every
+    region.  Unknown tokens are dropped, and a selection with nothing valid
+    left falls back to the default with a warning, so a typo never blanks
+    every card out of the history.
+    """
+    if value is None:
+        return DEFAULT_CARD_REGIONS
+    if isinstance(value, (list, tuple, set, frozenset)):
+        tokens = [str(t).strip().lower() for t in value]
+    else:
+        raw = str(value).strip().lower()
+        if not raw:
+            return DEFAULT_CARD_REGIONS
+        tokens = [t.strip() for t in raw.replace(";", ",").split(",")]
+    if "all" in tokens:
+        return CARD_REGIONS_ALL
+    picked = tuple(region for region in CARD_REGIONS_ALL if region in tokens)
+    if not picked:
+        logger.warning("[Feishu] No valid card regions in %r; using %s", value, ",".join(DEFAULT_CARD_REGIONS))
+        return DEFAULT_CARD_REGIONS
+    return picked
+
+
 @dataclass(frozen=True)
 class GroupHistorySettings:
     enabled: bool = False
@@ -82,6 +119,7 @@ class GroupHistorySettings:
     msg_max_chars: int = DEFAULT_MSG_MAX_CHARS
     source: str = SOURCE_API
     cli_bin: str = DEFAULT_CLI_BIN
+    card_regions: Tuple[str, ...] = DEFAULT_CARD_REGIONS
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +200,212 @@ def format_stamp_from_cli(create_time: Any, tz: Any = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Interactive cards: pick regions instead of dumping the whole card
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CardRegions:
+    """Text of a card's three regions, each ``""`` when absent."""
+
+    title: str = ""
+    trace: str = ""
+    body: str = ""
+
+    def render(self, selected: Sequence[str]) -> str:
+        """Join the selected regions into one history body (same for both backends)."""
+        parts: List[str] = []
+        if CARD_REGION_TITLE in selected and self.title:
+            parts.append(f"【{self.title}】")
+        if CARD_REGION_TRACE in selected and self.trace:
+            parts.append(f"[trace: {self.trace}]")
+        if CARD_REGION_BODY in selected and self.body:
+            parts.append(self.body)
+        return " ".join(part.strip() for part in parts if part.strip())
+
+
+def _card_node_children(node: Dict[str, Any]) -> List[Any]:
+    """Child elements of a card node in either the authoring or compiled shape."""
+    prop = node.get("property")
+    for container in (node, prop if isinstance(prop, dict) else {}):
+        children = container.get("elements")
+        if isinstance(children, list):
+            return children
+    return []
+
+
+def _card_node_text(node: Any) -> str:
+    """Flatten one card element (authoring JSON or server-compiled JSON) to text.
+
+    Compiled markdown arrives as ``plain_text`` runs with a ``textStyle``
+    (``bold`` is restored as ``**…**``) and ``br`` nodes; authoring markdown
+    is a single ``content`` string.  Non-text elements (images, actions)
+    contribute nothing.
+    """
+    if isinstance(node, str):
+        return node
+    if isinstance(node, list):
+        return "".join(_card_node_text(child) for child in node)
+    if not isinstance(node, dict):
+        return ""
+    tag = str(node.get("tag") or "")
+    if tag == "br":
+        return "\n"
+    prop = node.get("property") if isinstance(node.get("property"), dict) else {}
+    content = node.get("content")
+    if content is None:
+        content = prop.get("content")
+    if isinstance(content, dict):          # e.g. {"tag": "plain_text", "content": "..."}
+        content = content.get("content")
+    text = ""
+    if isinstance(content, str):
+        text = content
+        style = prop.get("textStyle") if isinstance(prop.get("textStyle"), dict) else None
+        attrs = style.get("attributes") if style else None
+        if text.strip() and isinstance(attrs, list) and "bold" in attrs:
+            text = f"**{text}**"
+    children = _card_node_children(node)
+    if children:
+        joiner = "" if tag in {"markdown", "plain_text", "div", "text", ""} else "\n"
+        child_text = joiner.join(_card_node_text(child) for child in children)
+        text = f"{text}{child_text}" if text else child_text
+    return text
+
+
+def _card_title_text(card: Dict[str, Any]) -> str:
+    header = card.get("header")
+    if isinstance(header, dict):
+        title = header.get("title")
+        if title is None and isinstance(header.get("property"), dict):
+            title = header["property"].get("title")
+        text = _card_node_text(title) if title is not None else ""
+        if text.strip():
+            return text.strip()
+    legacy = card.get("title")
+    return legacy.strip() if isinstance(legacy, str) else ""
+
+
+def _card_body_elements(card: Dict[str, Any]) -> List[Any]:
+    body = card.get("body")
+    if isinstance(body, dict):
+        children = _card_node_children(body)
+        if children:
+            return children
+    elements = card.get("elements")
+    if isinstance(elements, list):
+        # Legacy schema-1 cards nest inline elements one level deeper.
+        return elements
+    return []
+
+
+def _panel_text(panel: Dict[str, Any]) -> str:
+    prop = panel.get("property") if isinstance(panel.get("property"), dict) else {}
+    header = panel.get("header")
+    if header is None:
+        header = prop.get("header")
+    header_title = ""
+    if isinstance(header, dict):
+        header_title = _card_node_text(header.get("title")).strip()
+    inner = "\n".join(_card_node_text(child) for child in _card_node_children(panel)).strip()
+    return "\n".join(part for part in (header_title, inner) if part)
+
+
+def parse_raw_card_content(raw_content: str) -> Optional[CardRegions]:
+    """Split an interactive message's card JSON into title / trace / body.
+
+    Understands the server-compiled shape returned with
+    ``card_msg_content_type=raw_card_content`` (``{"json_card": "<json>"}``
+    with ``property``-nested nodes) and the authoring shape a bot sends.
+    This fork's own cards are matched by element id (``hermes_trace_panel``,
+    ``hermes_body``); any other card falls back to "every collapsible panel is
+    trace, everything else is body".  ``None`` when the payload is not a card.
+    """
+    try:
+        outer = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
+    except ValueError:
+        return None
+    if not isinstance(outer, dict):
+        return None
+    card: Any = outer.get("json_card", outer)
+    if isinstance(card, str):
+        try:
+            card = json.loads(card)
+        except ValueError:
+            return None
+    if isinstance(card, dict) and isinstance(card.get("card"), dict):
+        card = card["card"]
+    if not isinstance(card, dict):
+        return None
+    elements = _card_body_elements(card)
+    title = _card_title_text(card)
+    if not elements and not title:
+        return None
+
+    def _eid(node: Any) -> str:
+        return str(node.get("id") or node.get("element_id") or "") if isinstance(node, dict) else ""
+
+    hermes_body = [e for e in elements if _eid(e) == HERMES_CARD_BODY_ID]
+    hermes_panel = [e for e in elements if _eid(e) == HERMES_CARD_PANEL_ID]
+    panels = hermes_panel or [e for e in elements if isinstance(e, dict) and e.get("tag") == "collapsible_panel"]
+    body_nodes = hermes_body or [e for e in elements if not (isinstance(e, dict) and e.get("tag") == "collapsible_panel")]
+    trace = "\n".join(_panel_text(panel) for panel in panels).strip()
+    body = "\n".join(_card_node_text(node) for node in body_nodes).strip()
+    return CardRegions(title=title, trace=trace, body=body)
+
+
+_CLI_CARD_RE = re.compile(r'^<card(?:\s+title="(?P<title>[^"]*)")?\s*>\n?(?P<inner>.*?)\n?</card>\s*$', re.S)
+_CLI_PANEL_OPEN = "\u25b6"    # ▶  first line of a rendered collapsible panel
+_CLI_PANEL_CLOSE = "\u25b2"   # ▲  terminator line of a rendered collapsible panel
+
+
+def parse_cli_card_text(content: str) -> Optional[CardRegions]:
+    """Split lark-cli's rendered ``<card title="…">…</card>`` text into regions.
+
+    lark-cli renders a collapsible panel as a ``▶ <header>`` line followed by
+    indented content and a bare ``▲`` line; everything else inside the card is
+    body.  ``None`` when ``content`` is not a rendered card.
+    """
+    if not isinstance(content, str):
+        return None
+    match = _CLI_CARD_RE.match(content.strip())
+    if not match:
+        return None
+    import html as _html
+
+    title = _html.unescape(match.group("title") or "").strip()
+    body_lines: List[str] = []
+    trace_lines: List[str] = []
+    in_panel = False
+    for line in match.group("inner").split("\n"):
+        stripped = line.strip()
+        if not in_panel and stripped.startswith(_CLI_PANEL_OPEN):
+            in_panel = True
+            header = stripped[len(_CLI_PANEL_OPEN):].strip()
+            if header:
+                trace_lines.append(header)
+            continue
+        if in_panel:
+            if stripped == _CLI_PANEL_CLOSE:
+                in_panel = False
+                continue
+            if line.startswith("    ") or line.startswith("\t") or not stripped:
+                if stripped:
+                    trace_lines.append(stripped)
+                continue
+            in_panel = False  # unindented line without a terminator: panel ended
+        body_lines.append(line)
+    return CardRegions(
+        title=title,
+        trace="\n".join(trace_lines).strip(),
+        body="\n".join(body_lines).strip(),
+    )
+
+
+def _is_card_type(msg_type: str) -> bool:
+    return str(msg_type or "").lower() in {"interactive", "card"}
+
+
+# ---------------------------------------------------------------------------
 # Backend 1: lark SDK client (im/v1/messages)
 # ---------------------------------------------------------------------------
 
@@ -178,11 +422,13 @@ class ApiHistorySource:
         run_blocking: Callable[..., Awaitable[Any]],
         extract_text: Callable[..., Optional[str]],
         tz: Any = None,
+        card_regions: Sequence[str] = DEFAULT_CARD_REGIONS,
     ) -> None:
         self._client = client
         self._run_blocking = run_blocking
         self._extract_text = extract_text
         self._tz = tz
+        self._card_regions = tuple(card_regions)
 
     async def list_chat(
         self, chat_id: str, *, page_size: int, since_epoch: float
@@ -209,6 +455,8 @@ class ApiHistorySource:
             .container_id(container_id)
             .sort_type("ByCreateTimeDesc")
             .page_size(_clamp_page_size(page_size))
+            # Without this, a CardKit card comes back as a title-only stub.
+            .card_msg_content_type(RAW_CARD_CONTENT_TYPE)
         )
         if start_time is not None:
             builder = builder.start_time(start_time)
@@ -227,11 +475,19 @@ class ApiHistorySource:
 
     def _to_message(self, item: Any) -> HistoryMessage:
         body = getattr(item, "body", None)
-        text = self._extract_text(
-            msg_type=str(getattr(item, "msg_type", "") or ""),
-            raw_content=str(getattr(body, "content", "") or ""),
-            mentions=getattr(item, "mentions", None),
-        )
+        msg_type = str(getattr(item, "msg_type", "") or "")
+        raw_content = str(getattr(body, "content", "") or "")
+        text: Optional[str] = None
+        if _is_card_type(msg_type):
+            regions = parse_raw_card_content(raw_content)
+            if regions is not None:
+                text = regions.render(self._card_regions)
+        if text is None:
+            text = self._extract_text(
+                msg_type=msg_type,
+                raw_content=raw_content,
+                mentions=getattr(item, "mentions", None),
+            )
         sender = getattr(item, "sender", None)
         root_id = getattr(item, "root_id", None)
         return HistoryMessage(
@@ -289,11 +545,13 @@ class LarkCliHistorySource:
         timeout: float = CLI_TIMEOUT_SECONDS,
         runner: Optional[CommandRunner] = None,
         tz: Any = None,
+        card_regions: Sequence[str] = DEFAULT_CARD_REGIONS,
     ) -> None:
         self._binary = (binary or DEFAULT_CLI_BIN).strip() or DEFAULT_CLI_BIN
         self._timeout = timeout
         self._runner = runner
         self._tz = tz
+        self._card_regions = tuple(card_regions)
 
     async def list_chat(
         self, chat_id: str, *, page_size: int, since_epoch: float
@@ -369,9 +627,14 @@ class LarkCliHistorySource:
             sender = {}
         root_id = m.get("root_id") or m.get("parent_id")
         content = m.get("content")
+        text = content if isinstance(content, str) else ("" if content is None else str(content))
+        if _is_card_type(str(m.get("msg_type") or "")):
+            regions = parse_cli_card_text(text)
+            if regions is not None:
+                text = regions.render(self._card_regions)
         return HistoryMessage(
             message_id=str(m.get("message_id") or ""),
-            text=content if isinstance(content, str) else ("" if content is None else str(content)),
+            text=text,
             sender_id=str(sender.get("id") or ""),
             sender_type=str(sender.get("sender_type") or ""),
             sender_name=str(sender.get("name") or ""),

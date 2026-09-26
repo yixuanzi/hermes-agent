@@ -149,7 +149,9 @@ def test_cli_parses_rendered_messages_and_ignores_inline_thread_replies():
     assert root.sender_name == "Alice" and root.sender_type == "user" and root.sender_id == "ou_alice"
     assert root.stamp == "09-26 20:15"
     assert root.is_reply is False and root.in_thread is False  # thread_id alone marks "has a topic"
-    assert card_msg.text == card  # interactive body survives as rendered text
+    # Interactive body survives as text, reduced to the default title+body regions
+    # (the "▶ 🔧 执行过程" panel line is trace and is dropped).
+    assert card_msg.text == "【🤖 Hermes】 我是 **Hermes**"
     assert card_msg.sender_type == "app" and card_msg.sender_id == "cli_self"
     assert gone.deleted is True
 
@@ -330,3 +332,175 @@ def test_build_skips_topic_for_om_anchor_and_returns_empty_on_chat_failure():
     )))
     assert block == ""
     assert len(runner.calls) == 1  # topic never attempted after the chat listing failed
+
+
+# ---------------------------------------------------------------------------
+# Interactive cards: region selection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        (None, ("title", "body")), ("", ("title", "body")), ("title,body", ("title", "body")),
+        ("body", ("body",)), ("BODY;TITLE", ("title", "body")), ("all", ("title", "trace", "body")),
+        ("trace,body", ("trace", "body")), (["title"], ("title",)), ("bogus", ("title", "body")),
+        ("bogus,body", ("body",)),
+    ],
+)
+def test_normalize_card_regions(raw, expected):
+    assert gh.normalize_card_regions(raw) == expected
+
+
+CLI_CARD = (
+    '<card title="🤖 Aegis">\n'
+    "▶ 🔧 执行过程 · 4 步\n"
+    "    - A2A a2a_list...\n"
+    "    - 💻 terminal: `python3 ...`\n"
+    "▲\n"
+    "两个问题都已核实：\n\n"
+    "**结论**：可用。\n"
+    "</card>"
+)
+
+
+def test_parse_cli_card_text_splits_regions():
+    regions = gh.parse_cli_card_text(CLI_CARD)
+    assert regions.title == "🤖 Aegis"
+    assert regions.trace == "🔧 执行过程 · 4 步\n- A2A a2a_list...\n- 💻 terminal: `python3 ...`"
+    assert regions.body == "两个问题都已核实：\n\n**结论**：可用。"
+    assert regions.render(("title", "body")) == "【🤖 Aegis】 两个问题都已核实：\n\n**结论**：可用。"
+    assert regions.render(("body",)) == "两个问题都已核实：\n\n**结论**：可用。"
+    assert regions.render(("title", "trace", "body")).startswith("【🤖 Aegis】 [trace: 🔧 执行过程 · 4 步\n- A2A")
+
+
+def test_parse_cli_card_text_edge_cases():
+    assert gh.parse_cli_card_text("plain text") is None
+    assert gh.parse_cli_card_text(None) is None
+    # No title attribute, panel without a terminator: the unindented line resumes the body.
+    regions = gh.parse_cli_card_text("<card>\n▶ steps\n    one\nanswer\n</card>")
+    assert regions.title == "" and regions.trace == "steps\none" and regions.body == "answer"
+    # HTML entities in the title are decoded.
+    assert gh.parse_cli_card_text('<card title="A &amp; B">\nx\n</card>').title == "A & B"
+    # Two panels both count as trace.
+    regions = gh.parse_cli_card_text("<card title=\"t\">\n▶ p1\n    a\n▲\nbody\n▶ p2\n    b\n▲\n</card>")
+    assert regions.trace == "p1\na\np2\nb" and regions.body == "body"
+
+
+def _compiled_card():
+    """Shape returned by im/v1/messages with card_msg_content_type=raw_card_content."""
+    def run(rid, content, bold=False):
+        prop = {"content": content, "textAlign": "left"}
+        if bold:
+            prop["textStyle"] = {"attributes": ["bold"]}
+        return {"id": rid, "tag": "plain_text", "property": prop}
+    card = {
+        "schema": "2.0",
+        "header": {"tag": "card_header", "property": {"title": {"tag": "plain_text", "property": {"content": "🤖 Hermes"}}}},
+        "body": {"tag": "body", "property": {"elements": [
+            {"id": "hermes_trace_panel", "tag": "collapsible_panel", "property": {
+                "expanded": False,
+                "header": {"title": {"tag": "plain_text", "property": {"content": "🔧 执行过程 · 2 步"}}},
+                "elements": [{"id": "hermes_trace", "tag": "markdown", "property": {"elements": [
+                    run("t0", "- step one"), {"id": "t1", "tag": "br"}, run("t2", "- step two"),
+                ]}}],
+            }},
+            {"id": "hermes_body", "tag": "markdown", "property": {"elements": [
+                run("b0", "Hello "), run("b1", "World", bold=True), {"id": "b2", "tag": "br"}, run("b3", "done"),
+            ]}},
+        ]}},
+    }
+    return json.dumps({"card_schema": 2, "json_card": json.dumps(card, ensure_ascii=False), "json_attachment": {}})
+
+
+def test_parse_raw_card_content_compiled_shape_picks_hermes_regions():
+    regions = gh.parse_raw_card_content(_compiled_card())
+    assert regions.title == "🤖 Hermes"
+    assert regions.trace == "🔧 执行过程 · 2 步\n- step one\n- step two"
+    assert regions.body == "Hello **World**\ndone"
+    assert regions.render(("title", "body")) == "【🤖 Hermes】 Hello **World**\ndone"
+
+
+def test_parse_raw_card_content_authoring_shape_and_generic_fallback():
+    authoring = {
+        "schema": "2.0",
+        "header": {"title": {"tag": "plain_text", "content": "Report"}},
+        "body": {"elements": [
+            {"tag": "markdown", "content": "intro"},
+            {"tag": "collapsible_panel", "header": {"title": {"tag": "plain_text", "content": "details"}},
+             "elements": [{"tag": "markdown", "content": "inner"}]},
+            {"tag": "markdown", "content": "outro"},
+            {"tag": "img", "img_key": "img_x"},
+        ]},
+    }
+    regions = gh.parse_raw_card_content(json.dumps(authoring))
+    assert regions.title == "Report"
+    assert regions.trace == "details\ninner"
+    assert regions.body == "intro\noutro"
+
+
+def test_parse_raw_card_content_rejects_non_cards():
+    assert gh.parse_raw_card_content(json.dumps({"text": "hi"})) is None
+    assert gh.parse_raw_card_content("not json") is None
+    assert gh.parse_raw_card_content(json.dumps({"json_card": "nope"})) is None
+    # Legacy title-only stub still yields its title.
+    stub = json.dumps({"title": "🤖 Aegis", "elements": [[{"tag": "img", "image_key": "k"}]]})
+    assert gh.parse_raw_card_content(stub).title == "🤖 Aegis"
+
+
+def test_api_backend_requests_raw_cards_and_renders_selected_regions():
+    item = SimpleNamespace(message_id="om_c", msg_type="interactive", body=SimpleNamespace(content=_compiled_card()),
+                           mentions=None, sender=SimpleNamespace(id="cli_self", sender_type="app", sender_name="Hermes"),
+                           create_time="1758852000000", thread_id=None, root_id=None, deleted=False)
+    response = Mock(); response.success = Mock(return_value=True); response.data = SimpleNamespace(items=[item])
+    client = Mock(); client.im.v1.message.list = Mock(return_value=response)
+
+    async def run_blocking(fn, *args):
+        return fn(*args)
+
+    extract_text = Mock(side_effect=AssertionError("card must not fall through to the generic extractor"))
+    source = gh.ApiHistorySource(client=client, run_blocking=run_blocking, extract_text=extract_text, tz=None,
+                                 card_regions=("title", "body"))
+    msgs = asyncio.run(source.list_thread("omt_1", page_size=5))
+    assert client.im.v1.message.list.call_args.args[0].card_msg_content_type == "raw_card_content"
+    assert msgs[0].text == "【🤖 Hermes】 Hello **World**\ndone"
+
+    body_only = gh.ApiHistorySource(client=client, run_blocking=run_blocking, extract_text=extract_text, tz=None,
+                                    card_regions=("body",))
+    assert asyncio.run(body_only.list_thread("omt_1", page_size=5))[0].text == "Hello **World**\ndone"
+
+
+def test_api_backend_falls_back_to_extractor_for_unparseable_cards():
+    item = SimpleNamespace(message_id="om_c", msg_type="interactive", body=SimpleNamespace(content="not json"),
+                           mentions=None, sender=SimpleNamespace(id="ou_a", sender_type="user", sender_name=None),
+                           create_time="1758852000000", thread_id=None, root_id=None, deleted=False)
+    response = Mock(); response.success = Mock(return_value=True); response.data = SimpleNamespace(items=[item])
+    client = Mock(); client.im.v1.message.list = Mock(return_value=response)
+
+    async def run_blocking(fn, *args):
+        return fn(*args)
+
+    source = gh.ApiHistorySource(client=client, run_blocking=run_blocking, extract_text=lambda **kw: "[card]", tz=None)
+    assert asyncio.run(source.list_thread("omt_1", page_size=5))[0].text == "[card]"
+
+
+def test_cli_backend_renders_selected_card_regions():
+    runner = _runner(_cli_payload([_cli_msg("om_c", CLI_CARD, sender_type="app", sender_id="cli_self", name="Aegis",
+                                             msg_type="interactive")]))
+    msgs = _with_binary(lambda: asyncio.run(_cli_source(runner).list_chat("oc_g", page_size=5, since_epoch=0)))
+    assert msgs[0].text == "【🤖 Aegis】 两个问题都已核实：\n\n**结论**：可用。"
+    all_regions = gh.LarkCliHistorySource(runner=runner, card_regions=("title", "trace", "body"))
+    msgs = _with_binary(lambda: asyncio.run(all_regions.list_chat("oc_g", page_size=5, since_epoch=0)))
+    assert "[trace: 🔧 执行过程 · 4 步" in msgs[0].text
+    # A text message is untouched by the card parser.
+    runner = _runner(_cli_payload([_cli_msg("om_t", "<card title=\"x\">\nnot a card type\n</card>")]))
+    msgs = _with_binary(lambda: asyncio.run(_cli_source(runner).list_chat("oc_g", page_size=5, since_epoch=0)))
+    assert msgs[0].text.startswith("<card")
+
+
+def test_card_regions_render_identically_across_backends():
+    cli_card = '<card title="🤖 Hermes">\n▶ 🔧 执行过程 · 2 步\n    - step one\n    - step two\n▲\nHello **World**\ndone\n</card>'
+    cli = gh.parse_cli_card_text(cli_card)
+    api = gh.parse_raw_card_content(_compiled_card())
+    for regions in (("title", "body"), ("body",), ("title", "trace", "body")):
+        assert cli.render(regions) == api.render(regions)

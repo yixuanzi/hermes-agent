@@ -90,3 +90,7 @@ optional_env:
     description: "lark-cli executable used by the cli group history source: a name on PATH or an absolute path (default lark-cli)"
     prompt: "lark-cli executable"
     password: false
+  - name: FEISHU_GROUP_HISTORY_CARD_REGIONS
+    description: "Regions of an interactive card to include in group history: comma-separated subset of title, trace (collapsible execution-trace panel), body (final answer), or all (default title,body)"
+    prompt: "Card regions (title,body / all)"
+    password: false

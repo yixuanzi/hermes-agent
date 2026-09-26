@@ -194,8 +194,42 @@ def test_adapter_cli_mode_never_touches_sdk_list_and_renders_cli_content():
     adapter._build_group_history_source = patched_builder
     with patch("tools.feishu_group_history.shutil.which", return_value="/opt/bin/lark-cli"):
         block = asyncio.run(adapter._fetch_group_history_block(chat_id="oc_g", exclude_message_id="om_now"))
-    assert block == '<group_messages>\n[09-26 20:15] [assistant]: <card title="x"> body </card>\n</group_messages>'
+    # Default card regions (title,body): the card renders as 【title】 body.
+    assert block == "<group_messages>\n[09-26 20:15] [assistant]: 【x】 body\n</group_messages>"
     assert gh.METADATA_KEY == _FEISHU_GROUP_HISTORY_METADATA_KEY
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [(None, ("title", "body")), ("all", ("title", "trace", "body")), ("body", ("body",)), ("bogus", ("title", "body"))],
+)
+def test_group_history_card_regions_setting(monkeypatch, raw, expected):
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("FEISHU_GROUP_HISTORY_CARD_REGIONS", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("FEISHU_GROUP_HISTORY_CARD_REGIONS", raw)
+    assert FeishuAdapter._load_settings({}).group_history_card_regions == expected
+
+
+def test_group_history_card_regions_extra_accepts_list_and_beats_env(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("FEISHU_GROUP_HISTORY_CARD_REGIONS", "all")
+    assert FeishuAdapter._load_settings({"group_history_card_regions": ["title"]}).group_history_card_regions == ("title",)
+    assert FeishuAdapter._load_settings({"group_history_card_regions": "body,title"}).group_history_card_regions == ("title", "body")
+
+
+def test_adapter_passes_card_regions_to_both_backends():
+    from tools import feishu_group_history as gh
+
+    adapter = _history_adapter()
+    assert adapter._group_history_settings().card_regions == ("title", "body")  # default when unset
+    adapter._group_history_card_regions = ("body",)
+    settings = adapter._group_history_settings()
+    assert settings.card_regions == ("body",)
+    assert adapter._build_group_history_source(settings)._card_regions == ("body",)
+    adapter._group_history_source = "cli"
+    cli_backend = adapter._build_group_history_source(adapter._group_history_settings())
+    assert isinstance(cli_backend, gh.LarkCliHistorySource) and cli_backend._card_regions == ("body",)
 
 
 def test_group_history_new_knobs_extra_beats_env(monkeypatch):
