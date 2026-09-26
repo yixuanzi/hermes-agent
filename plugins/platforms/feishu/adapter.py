@@ -312,6 +312,14 @@ _FEISHU_REACTION_FAILURE = "CrossMark"
 _FEISHU_PROCESSING_REACTION_CACHE_SIZE = 1024
 _FEISHU_MESSAGE_TEXT_CACHE_SIZE = 512       # LRU cap for reply-context message text lookups
 
+# Recent-group-history injection for root group messages (FEISHU_GROUP_HISTORY).
+_DEFAULT_GROUP_HISTORY_LIMIT = 20
+_DEFAULT_GROUP_HISTORY_HOURS = 24.0
+_FEISHU_GROUP_HISTORY_PAGE_SIZE_MAX = 50    # im/v1/messages page_size ceiling
+_FEISHU_GROUP_HISTORY_MSG_MAX_CHARS = 1000  # per-line cap inside <group_messages>
+# MessageEvent.metadata key the gateway reads to place the block under <source>.
+_FEISHU_GROUP_HISTORY_METADATA_KEY = "group_history_block"
+
 # QR onboarding constants
 _ONBOARD_ACCOUNTS_URLS = {
     "feishu": "https://accounts.feishu.cn",
@@ -470,6 +478,11 @@ class FeishuAdapterSettings:
     # text/post messages.  Opt-in: the text/post path stays the default, and
     # remains the automatic fallback whenever a card call fails.
     card_output: bool = False
+    # Prepend the group's recent messages (wrapped in <group_messages>) to a
+    # root group message.  Opt-in; limit is capped by the API page size.
+    group_history_enabled: bool = False
+    group_history_limit: int = _DEFAULT_GROUP_HISTORY_LIMIT
+    group_history_hours: float = _DEFAULT_GROUP_HISTORY_HOURS
 
 
 @dataclass
@@ -918,6 +931,17 @@ def _coerce_int(value: Any, default: Optional[int] = None, min_value: int = 0) -
 def _coerce_required_int(value: Any, default: int, min_value: int = 0) -> int:
     parsed = _coerce_int(value, default=default, min_value=min_value)
     return default if parsed is None else parsed
+
+
+def _coerce_positive_float(value: Any, default: float) -> float:
+    """Coerce value to a strictly positive float, falling back to ``default``."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed != parsed or parsed <= 0:  # NaN or non-positive
+        return default
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -2126,6 +2150,23 @@ class FeishuAdapter(BasePlatformAdapter):
                 if "card_output" in extra
                 else _env_boolean_default_false("FEISHU_CARD_OUTPUT")
             ),
+            group_history_enabled=(
+                _to_boolean(extra["group_history_enabled"])
+                if "group_history_enabled" in extra
+                else _env_boolean_default_false("FEISHU_GROUP_HISTORY")
+            ),
+            group_history_limit=min(
+                _coerce_required_int(
+                    extra.get("group_history_limit", os.getenv("FEISHU_GROUP_HISTORY_LIMIT")),
+                    default=_DEFAULT_GROUP_HISTORY_LIMIT,
+                    min_value=1,
+                ),
+                _FEISHU_GROUP_HISTORY_PAGE_SIZE_MAX,
+            ),
+            group_history_hours=_coerce_positive_float(
+                extra.get("group_history_hours", os.getenv("FEISHU_GROUP_HISTORY_HOURS")),
+                default=_DEFAULT_GROUP_HISTORY_HOURS,
+            ),
         )
 
     def _apply_settings(self, settings: FeishuAdapterSettings) -> None:
@@ -2160,6 +2201,9 @@ class FeishuAdapter(BasePlatformAdapter):
         self._require_mention = settings.require_mention
         self._reply_thread_enabled_setting = settings.reply_thread
         self._card_output_enabled = settings.card_output
+        self._group_history_enabled = settings.group_history_enabled
+        self._group_history_limit = settings.group_history_limit
+        self._group_history_hours = settings.group_history_hours
 
     def _build_event_handler(self) -> Any:
         if EventDispatcherHandler is None:
@@ -5308,6 +5352,23 @@ class FeishuAdapter(BasePlatformAdapter):
             ),
         ):
             return
+        # Recent group history for the first turn of a new group session.
+        # Carried on event metadata, not in ``text``: the gateway inserts it
+        # directly under its ``<source>`` header in
+        # ``_prepare_inbound_message_text``, above the shared-session
+        # ``[Name]`` prefix and reply quote, so those keep their shape.
+        # Evaluated after the auto-thread block above so ``source`` carries
+        # the session identity the gateway will actually use.
+        history_block = ""
+        if self._should_inject_group_history(
+            chat_type=chat_type,
+            inbound_type=inbound_type,
+            source=source,
+        ):
+            history_block = await self._fetch_group_history_block(
+                chat_id=chat_id,
+                exclude_message_id=message_id,
+            )
         normalized = MessageEvent(
             text=text,
             message_type=inbound_type,
@@ -5325,6 +5386,10 @@ class FeishuAdapter(BasePlatformAdapter):
             # Downstream (hooks, plugins, logs) can tell an unprompted
             # Jev-admitted turn apart from a normal @-mentioned one.
             normalized.metadata["jev_channel_autoreply"] = True
+        if history_block:
+            # Text batching merges follow-ups into the *first* event and keeps
+            # its metadata, so a burst still yields exactly one block per turn.
+            normalized.metadata[_FEISHU_GROUP_HISTORY_METADATA_KEY] = history_block
         await self._dispatch_inbound_event(normalized)
 
     async def _dispatch_inbound_event(self, event: MessageEvent) -> None:
@@ -6795,6 +6860,196 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.debug("[Feishu] Failed to fetch last message in thread %s: %s", thread_id, exc)
         return None
+
+    # =========================================================================
+    # Recent group history injection (FEISHU_GROUP_HISTORY)
+    # =========================================================================
+
+    def _should_inject_group_history(
+        self,
+        *,
+        chat_type: str,
+        inbound_type: MessageType,
+        source: Any,
+    ) -> bool:
+        """True when a group message opens a session that has no context yet.
+
+        ``chat_type`` is the raw event value (``p2p`` vs anything else), the
+        same group test ``_admit`` uses.  Slash commands are excluded like the
+        mention hint is: a ``/reset`` must reach command dispatch untouched.
+
+        The gate is the *session*, not the thread flags: Feishu stamps a
+        ``thread_id`` on a plain quote-reply chain as soon as any topic
+        exists under it, so "root vs topic" cannot be read from the event.
+        A message whose resolved ``source`` already has an active or
+        persisted session inherits that session's history and gets no block;
+        a message that opens a new session gets one cold-start block.
+        """
+        if not getattr(self, "_group_history_enabled", False):
+            return False
+        if getattr(self, "_client", None) is None:
+            return False
+        if (chat_type or "p2p") == "p2p":
+            return False
+        if inbound_type == MessageType.COMMAND:
+            return False
+        return not self._session_exists_for_source(source)
+
+    async def _fetch_group_history_block(
+        self,
+        *,
+        chat_id: str,
+        exclude_message_id: str,
+    ) -> str:
+        """Render the chat's recent messages as a ``<group_messages>`` block.
+
+        Pulls at most ``group_history_limit`` messages created within the last
+        ``group_history_hours`` (one page, newest first, then reversed so the
+        block reads chronologically).  The triggering message is excluded —
+        it is delivered as the user turn itself.  Every failure degrades to
+        an empty string; this feature must never block a turn.
+        """
+        client = getattr(self, "_client", None)
+        if client is None or not chat_id:
+            return ""
+        limit = max(1, int(getattr(self, "_group_history_limit", _DEFAULT_GROUP_HISTORY_LIMIT)))
+        hours = float(getattr(self, "_group_history_hours", _DEFAULT_GROUP_HISTORY_HOURS))
+        try:
+            from lark_oapi.api.im.v1 import ListMessageRequest
+
+            now = time.time()
+            # ``start_time`` is unix seconds; ``create_time`` on items is ms.
+            start_time = str(int(now - hours * 3600))
+            request = (
+                ListMessageRequest.builder()
+                .container_id_type("chat")
+                .container_id(chat_id)
+                .start_time(start_time)
+                .sort_type("ByCreateTimeDesc")
+                .page_size(min(limit + 1, _FEISHU_GROUP_HISTORY_PAGE_SIZE_MAX))
+                .build()
+            )
+            response = await self._run_blocking(client.im.v1.message.list, request)
+            if not response or getattr(response, "success", lambda: False)() is False:
+                logger.warning(
+                    "[Feishu] Failed to list group history for %s: [%s] %s",
+                    chat_id,
+                    getattr(response, "code", "unknown"),
+                    getattr(response, "msg", "message list failed"),
+                )
+                return ""
+            items = getattr(getattr(response, "data", None), "items", None) or []
+            block = await self._format_group_history_items(
+                items,
+                exclude_message_id=exclude_message_id,
+                limit=limit,
+            )
+            injected = block.count("\n") - 1 if block else 0
+            logger.info(
+                "[Feishu] Group history for %s: %d item(s) returned within %.1fh "
+                "(trigger excluded), %d line(s) injected",
+                chat_id,
+                len(items),
+                hours,
+                max(injected, 0),
+            )
+            return block
+        except Exception:
+            logger.warning("[Feishu] Failed to build group history for %s", chat_id, exc_info=True)
+            return ""
+
+    async def _format_group_history_items(
+        self,
+        items: Sequence[Any],
+        *,
+        exclude_message_id: str,
+        limit: int,
+    ) -> str:
+        """Format ``im/v1/messages`` items (newest first) into the history block."""
+        from gateway.session import neutralize_untrusted_inline_text
+
+        try:
+            from hermes_time import get_timezone
+
+            tz = get_timezone()
+        except Exception:
+            tz = None
+
+        selected: List[Tuple[Any, str]] = []
+        for item in items:
+            if getattr(item, "deleted", False):
+                continue
+            item_id = str(getattr(item, "message_id", "") or "")
+            if exclude_message_id and item_id == str(exclude_message_id):
+                continue
+            body = getattr(item, "body", None)
+            text = self._extract_text_from_raw_content(
+                msg_type=str(getattr(item, "msg_type", "") or ""),
+                raw_content=str(getattr(body, "content", "") or ""),
+                mentions=getattr(item, "mentions", None),
+            )
+            if not text:
+                continue
+            selected.append((item, text))
+            if len(selected) >= limit:
+                break
+        if not selected:
+            return ""
+        selected.reverse()  # chronological order
+
+        # Resolve human sender names once per distinct id (10-minute cache).
+        names: Dict[str, str] = {}
+        for item, _ in selected:
+            sender = getattr(item, "sender", None)
+            sender_id = str(getattr(sender, "id", "") or "")
+            if not sender_id or sender_id in names:
+                continue
+            if str(getattr(sender, "sender_type", "") or "") == "app":
+                continue
+            resolved = await self._resolve_sender_name_from_api(sender_id, is_bot=False)
+            names[sender_id] = resolved or sender_id
+
+        lines: List[str] = []
+        for item, text in selected:
+            sender = getattr(item, "sender", None)
+            sender_id = str(getattr(sender, "id", "") or "")
+            sender_type = str(getattr(sender, "sender_type", "") or "")
+            # ``root_id`` marks a reply.  A reply that also carries a
+            # ``thread_id`` sits inside a topic; a bare ``thread_id`` on a
+            # root post only means a topic hangs under it, so no tag.
+            tags = ""
+            if getattr(item, "root_id", None):
+                tags += "[in-topic] " if getattr(item, "thread_id", None) else "[reply] "
+            if sender_type == "app" and sender_id and sender_id == getattr(self, "_app_id", None):
+                who = "[assistant]"
+            elif sender_type == "app":
+                bot_name = neutralize_untrusted_inline_text(
+                    getattr(sender, "sender_name", None) or "bot"
+                )
+                who = f"[bot] {bot_name}"
+            else:
+                who = neutralize_untrusted_inline_text(names.get(sender_id) or sender_id or "unknown")
+            safe_text = neutralize_untrusted_inline_text(
+                text, max_chars=_FEISHU_GROUP_HISTORY_MSG_MAX_CHARS
+            )
+            stamp = self._format_group_history_time(getattr(item, "create_time", None), tz)
+            prefix = f"[{stamp}] " if stamp else ""
+            lines.append(f"{prefix}{tags}{who}: {safe_text}")
+        return "<group_messages>\n" + "\n".join(lines) + "\n</group_messages>"
+
+    @staticmethod
+    def _format_group_history_time(create_time: Any, tz: Any) -> str:
+        """Render a Feishu ``create_time`` (ms since epoch) as ``MM-DD HH:MM``."""
+        try:
+            millis = int(str(create_time).strip())
+        except (TypeError, ValueError):
+            return ""
+        if millis <= 0:
+            return ""
+        try:
+            return datetime.fromtimestamp(millis / 1000, tz).strftime("%m-%d %H:%M")
+        except (OverflowError, OSError, ValueError):
+            return ""
 
     async def _send_attachment_message(
         self,

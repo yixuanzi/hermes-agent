@@ -16992,6 +16992,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.warning("@ context reference expansion failed: %s", exc)
                 logger.debug("@ context reference expansion failure detail", exc_info=True)
 
+        # Adapter-supplied group history (Feishu ``group_history_block``) goes
+        # directly under the ``<source>`` header, above every other block, so
+        # the shared-session ``[Name]`` prefix, reply quote and media notes keep
+        # their existing shape and the history is one detachable preamble.
+        _event_metadata = getattr(event, "metadata", None)
+        _group_history_block = ""
+        if isinstance(_event_metadata, dict):
+            _group_history_block = str(_event_metadata.get("group_history_block") or "").strip()
+        if _group_history_block:
+            message_text = f"{_group_history_block}\n\n{message_text}"
+
         if _source_header:
             message_text = f"{_source_header}\n\n{message_text}"
 

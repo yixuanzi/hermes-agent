@@ -62,3 +62,15 @@ optional_env:
     description: "Line added to the card body when a reply ships files; the files themselves arrive as separate messages. May contain {names} (default '📎 已发送文件：{names}')"
     prompt: "Attachment note"
     password: false
+  - name: FEISHU_GROUP_HISTORY
+    description: "Prepend the group's recent messages, wrapped in <group_messages>, to the first message of a new group session. Default false; set true to opt in"
+    prompt: "Inject recent group history? (true/false)"
+    password: false
+  - name: FEISHU_GROUP_HISTORY_LIMIT
+    description: "Max number of recent group messages to inject (default 20, capped at 50)"
+    prompt: "Group history message limit"
+    password: false
+  - name: FEISHU_GROUP_HISTORY_HOURS
+    description: "Only inject group messages created within this many hours (default 24)"
+    prompt: "Group history window (hours)"
+    password: false
