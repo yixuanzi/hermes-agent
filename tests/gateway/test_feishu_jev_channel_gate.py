@@ -282,7 +282,7 @@ def test_a_normal_dm_does_not_arm_the_gate(monkeypatch):
 # --- the gate inside inbound processing ------------------------------------
 
 
-def _inbound_adapter(monkeypatch, *, verdict, reply_thread: bool = True):
+def _inbound_adapter(monkeypatch, *, verdict, reply_thread: bool = True, busy: bool = False):
     """A bare adapter whose inbound dependencies are stubbed to constants."""
     import json
     from unittest.mock import AsyncMock, Mock
@@ -307,6 +307,17 @@ def _inbound_adapter(monkeypatch, *, verdict, reply_thread: bool = True):
     adapter._dispatch_inbound_event = AsyncMock()
     adapter._maybe_route_delegate_interaction_message = AsyncMock(return_value=False)
     adapter._maybe_route_delegate_foreground_message = AsyncMock(return_value=False)
+    # The real resolver needs a SessionSource; build_source is stubbed here, so
+    # the boundary is stubbed too. `_thread_session_is_busy` itself is tested
+    # directly further down.
+    busy_checked: list[object] = []
+
+    def _busy(source, *, root_message_id=None):
+        busy_checked.append(root_message_id)
+        return busy
+
+    adapter._thread_session_is_busy = _busy
+    adapter._busy_checked = busy_checked
 
     judged: list[str] = []
 
@@ -317,7 +328,7 @@ def _inbound_adapter(monkeypatch, *, verdict, reply_thread: bool = True):
     adapter._jev_message_in_scope = _in_scope
     adapter._judged = judged
 
-    def _run(text="生产环境有一批告警需要研判"):
+    def _run(text="生产环境有一批告警需要研判", **markers):
         message = SimpleNamespace(
             content=json.dumps({"text": text}),
             message_type="text",
@@ -326,7 +337,8 @@ def _inbound_adapter(monkeypatch, *, verdict, reply_thread: bool = True):
             chat_id="oc_ops",
             parent_id=None,
             upper_message_id=None,
-            thread_id=None,
+            thread_id=markers.get("thread_id"),
+            root_id=markers.get("root_id"),
         )
         asyncio.run(
             adapter._process_inbound_message(
@@ -370,6 +382,80 @@ def test_the_topic_reply_is_forced_even_when_reply_thread_is_disabled(monkeypatc
     run()
     event = adapter._dispatch_inbound_event.call_args.args[0]
     assert event.source.thread_id == "om_trigger"
+
+
+# --- a topic that is already working is left alone ------------------------
+#
+# HERMES_JEV_THREAD_AUTOREPLY lets an unprompted message inside a topic be
+# judged. It must not let one barge into a turn already running there: an
+# @-mentioned follow-up is queued and answered after the current turn, but a
+# message nobody addressed to us has no such claim, so it is dropped.
+
+
+def test_a_busy_topic_is_dropped_without_consulting_jev(monkeypatch):
+    adapter, run = _inbound_adapter(monkeypatch, verdict=True, busy=True)
+    run(thread_id="omt_1")
+    assert adapter._dispatch_inbound_event.await_count == 0
+    assert adapter._judged == [], "the verdict could not have changed the outcome"
+
+
+def test_an_idle_topic_is_judged_as_before(monkeypatch):
+    adapter, run = _inbound_adapter(monkeypatch, verdict=True, busy=False)
+    run(thread_id="omt_1")
+    assert adapter._dispatch_inbound_event.await_count == 1
+    assert len(adapter._judged) == 1
+
+
+def test_a_busy_topic_that_is_out_of_scope_is_dropped_either_way(monkeypatch):
+    adapter, run = _inbound_adapter(monkeypatch, verdict=False, busy=True)
+    run(thread_id="omt_1")
+    assert adapter._dispatch_inbound_event.await_count == 0
+
+
+def test_a_top_level_message_is_never_busy_checked(monkeypatch):
+    # The check is scoped to messages already inside a topic. A top-level
+    # message opens a NEW topic, so there is no in-progress conversation of
+    # its own to interrupt.
+    adapter, run = _inbound_adapter(monkeypatch, verdict=True, busy=True)
+    run()
+    assert adapter._busy_checked == []
+    assert adapter._dispatch_inbound_event.await_count == 1
+
+
+@pytest.mark.parametrize("markers", [{"thread_id": "omt_1"}, {"root_id": "om_root"}])
+def test_both_kinds_of_topic_marker_trigger_the_check(monkeypatch, markers):
+    adapter, run = _inbound_adapter(monkeypatch, verdict=True, busy=True)
+    run(**markers)
+    assert len(adapter._busy_checked) == 1
+    assert adapter._dispatch_inbound_event.await_count == 0
+
+
+def test_the_root_id_is_handed_to_the_resolver(monkeypatch):
+    # The busy check has to resolve root-keyed vs real-thread identity the same
+    # way dispatch does, so it needs the root id, not just the thread id.
+    adapter, run = _inbound_adapter(monkeypatch, verdict=True, busy=False)
+    run(thread_id="omt_1", root_id="om_root")
+    assert adapter._busy_checked == ["om_root"]
+
+
+def test_a_mentioned_message_is_unaffected(monkeypatch):
+    # jev_gate_pending is False for an @-mentioned message, so the busy check
+    # never runs and the follow-up is queued by the normal path instead.
+    adapter, run = _inbound_adapter(monkeypatch, verdict=True, busy=True)
+    message_kwargs = {"thread_id": "omt_1"}
+    import json
+    from types import SimpleNamespace as NS
+    message = NS(
+        content=json.dumps({"text": "hi"}), message_type="text",
+        message_id="om_trigger", mentions=[], chat_id="oc_ops",
+        parent_id=None, upper_message_id=None, root_id=None, **message_kwargs,
+    )
+    asyncio.run(adapter._process_inbound_message(
+        data=message, message=message, sender_id=None, chat_type="group",
+        message_id="om_trigger", jev_gate_pending=False,
+    ))
+    assert adapter._busy_checked == []
+    assert adapter._dispatch_inbound_event.await_count == 1
 
 
 def test_an_unmentioned_slash_command_is_dropped_without_consulting_jev(monkeypatch):
@@ -547,3 +633,138 @@ def test_the_master_switch_never_silences_a_dm(monkeypatch):
     asyncio.run(adapter._handle_message_event_data(_event(chat_type="p2p")))
     assert len(seen) == 1
     assert seen[0]["jev_gate_pending"] is False
+
+
+# --- the busy check resolves the session dispatch will actually use --------
+#
+# Everything above stubs `_thread_session_is_busy` at the adapter boundary.
+# These exercise the real thing, because its whole value is that it measures
+# the SAME session key `handle_message` will look up. A check against the
+# other candidate id would read an idle session and answer anyway.
+
+
+def _busy_adapter(**extra):
+    from gateway.config import PlatformConfig
+    from gateway.platforms.base import Platform
+    from plugins.platforms.feishu.adapter import FeishuAdapter
+
+    adapter = FeishuAdapter.__new__(FeishuAdapter)
+    adapter.config = PlatformConfig(extra=extra)
+    # `platform` is what the stale-lock warning formats its prefix from, so a
+    # skeleton without it turns a heal into an AttributeError.
+    adapter.platform = Platform.FEISHU
+    adapter._active_sessions = {}
+    adapter._session_tasks = {}
+    adapter._pending_messages = {}
+    adapter._session_store = None
+    return adapter
+
+
+def _feishu_source(thread_id=None):
+    from gateway.session import SessionSource
+    from gateway.platforms.base import Platform
+
+    return SessionSource(
+        platform=Platform.FEISHU, chat_id="oc_ops", chat_type="group",
+        user_id="u1", thread_id=thread_id,
+    )
+
+
+def test_an_idle_topic_reads_as_idle():
+    adapter = _busy_adapter()
+    assert adapter._thread_session_is_busy(_feishu_source("omt_1")) is False
+
+
+def test_a_running_turn_in_the_same_topic_reads_as_busy():
+    adapter = _busy_adapter()
+    source = _feishu_source("omt_1")
+    adapter._active_sessions[adapter._session_key_for_source(source)] = asyncio.Event()
+    assert adapter._thread_session_is_busy(source) is True
+
+
+def test_a_running_turn_in_a_DIFFERENT_topic_does_not_block_this_one():
+    adapter = _busy_adapter()
+    other = _feishu_source("omt_other")
+    adapter._active_sessions[adapter._session_key_for_source(other)] = asyncio.Event()
+    assert adapter._thread_session_is_busy(_feishu_source("omt_1")) is False
+
+
+def test_the_check_follows_the_root_keyed_session_when_one_exists():
+    # An auto-created topic's later messages key on the om_* root once that
+    # session exists. The busy check must follow the same hop, or it would
+    # look up the omt_* session and find it idle.
+    adapter = _busy_adapter()
+    root_keyed = _feishu_source("om_root")
+    adapter._active_sessions[adapter._session_key_for_source(root_keyed)] = asyncio.Event()
+
+    source = _feishu_source("omt_1")
+    assert adapter._thread_session_is_busy(source, root_message_id="om_root") is True
+    assert source.thread_id == "omt_1", "the probe must not mutate the source"
+
+
+def test_a_human_created_topic_keeps_its_own_identity():
+    # No root-keyed session exists, so the omt_* identity stands and a busy
+    # om_root session is somebody else's conversation.
+    adapter = _busy_adapter()
+    adapter._active_sessions[
+        adapter._session_key_for_source(_feishu_source("om_root"))
+    ] = asyncio.Event()
+    # ...but make the root-keyed probe fail by asking about a different root.
+    assert adapter._thread_session_is_busy(
+        _feishu_source("omt_1"), root_message_id="om_unrelated",
+    ) is False
+
+
+def test_the_root_keyed_probe_reports_whether_the_root_won():
+    # None, not "the id that won": a caller that inferred the outcome from a
+    # string comparison would read a tie as a win and mark a topic established
+    # whose session does not exist.
+    adapter = _busy_adapter()
+    source = _feishu_source("omt_1")
+    assert adapter._auto_thread_root_session(source, "om_root") is None
+
+    adapter._active_sessions[
+        adapter._session_key_for_source(_feishu_source("om_root"))
+    ] = asyncio.Event()
+    assert adapter._auto_thread_root_session(source, "om_root") == "om_root"
+    assert source.thread_id == "omt_1", "the probe must not mutate the source"
+
+
+def test_an_unbuildable_session_key_is_not_treated_as_busy():
+    adapter = _busy_adapter()
+    assert adapter._thread_session_is_busy(SimpleNamespace(thread_id=None)) is False
+
+
+def test_a_raising_busy_check_falls_through_to_the_verdict():
+    adapter = _busy_adapter()
+
+    def _boom(_key):
+        raise RuntimeError("bookkeeping exploded")
+
+    adapter.session_has_running_task = _boom
+    assert adapter._thread_session_is_busy(_feishu_source("omt_1")) is False
+
+
+# --- the base adapter's busy predicate ------------------------------------
+
+
+def test_session_has_running_task_heals_a_stale_lock():
+    # A guard whose owner task already exited must not silence a topic
+    # forever — it is a split-brain, not a running turn.
+    adapter = _busy_adapter()
+    adapter._active_sessions["k"] = asyncio.Event()
+    adapter._session_tasks["k"] = SimpleNamespace(done=lambda: True)
+    assert adapter.session_has_running_task("k") is False
+    assert "k" not in adapter._active_sessions
+
+
+def test_session_has_running_task_keeps_a_live_lock():
+    adapter = _busy_adapter()
+    adapter._active_sessions["k"] = asyncio.Event()
+    adapter._session_tasks["k"] = SimpleNamespace(done=lambda: False)
+    assert adapter.session_has_running_task("k") is True
+
+
+@pytest.mark.parametrize("key", ["", "unknown"])
+def test_session_has_running_task_is_false_for_a_key_with_no_guard(key):
+    assert _busy_adapter().session_has_running_task(key) is False

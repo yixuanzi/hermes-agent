@@ -2033,20 +2033,89 @@ class FeishuAdapter(BasePlatformAdapter):
         failed.move_to_end(root_message_id)
         self._trim_oldest_dict_entries(failed, self.CHAT_LOCK_MAX_SIZE)
 
-    def _session_exists_for_source(self, source: Any) -> bool:
-        """Check active and persisted routing state for a candidate source."""
+    def _session_key_for_source(self, source: Any) -> str:
+        """The session key ``source`` routes to, or "" when it cannot be built.
+
+        One spelling of the flags for every caller: the auto-thread probe, the
+        Jev busy check, and anything added later. Two spellings would drift,
+        and a key that disagrees with the one ``handle_message`` computes is a
+        check that silently measures the wrong session.
+        """
         try:
             from gateway.session import build_session_key
 
             extra = getattr(getattr(self, "config", None), "extra", None) or {}
-            session_key = build_session_key(
+            return build_session_key(
                 source,
                 group_sessions_per_user=extra.get("group_sessions_per_user", True),
                 thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
                 profile=getattr(source, "profile", None),
             )
         except Exception:
-            logger.debug("[Feishu] Failed to build candidate auto-thread session key", exc_info=True)
+            logger.debug("[Feishu] Failed to build session key for source", exc_info=True)
+            return ""
+
+    def _auto_thread_root_session(self, source: Any, root_message_id: str) -> Optional[str]:
+        """The root-keyed thread id for this topic, or ``None`` if it does not win.
+
+        A message in an auto-created topic reuses the root-keyed (``om_*``)
+        session when that session already exists; a human-created topic keeps
+        its historical real-thread (``omt_*``) identity.
+
+        ``None`` rather than "the id that won" so the caller never has to infer
+        the outcome from a string comparison — that would read as a win in the
+        case where the two ids happen to be equal, and mark a topic established
+        whose session does not exist. Read-only: ``source`` is restored before
+        returning, so a caller that only wants to *know* the answer does not
+        have to undo anything.
+        """
+        real_thread_id = source.thread_id
+        source.thread_id = str(root_message_id)
+        try:
+            exists = self._session_exists_for_source(source)
+        finally:
+            source.thread_id = real_thread_id
+        return str(root_message_id) if exists else None
+
+    def _thread_session_is_busy(
+        self, source: Any, *, root_message_id: Optional[str] = None
+    ) -> bool:
+        """Is a turn already running in the topic this message belongs to?
+
+        Asked only of messages already inside a topic, and only on the
+        unprompted path. It resolves the SAME session identity the dispatch
+        path will settle on — via ``_auto_thread_root_session``, so the root-
+        vs-real-thread rule has one spelling — because a check against the
+        other candidate would measure a session this message never enters.
+
+        A session that does not exist yet has no running task, so a brand-new
+        topic reads as idle and goes on to be judged.
+        """
+        real_thread_id = source.thread_id
+        if root_message_id:
+            source.thread_id = (
+                self._auto_thread_root_session(source, root_message_id)
+                or real_thread_id
+            )
+        try:
+            session_key = self._session_key_for_source(source)
+        finally:
+            source.thread_id = real_thread_id
+        if not session_key:
+            return False
+        try:
+            return self.session_has_running_task(session_key)
+        except Exception:
+            # Never let a bookkeeping error decide whether a message is
+            # answered; fall through to the Jev verdict, which is fail-closed
+            # on its own.
+            logger.debug("[Feishu] thread busy-check failed", exc_info=True)
+            return False
+
+    def _session_exists_for_source(self, source: Any) -> bool:
+        """Check active and persisted routing state for a candidate source."""
+        session_key = self._session_key_for_source(source)
+        if not session_key:
             return False
 
         if session_key in (getattr(self, "_active_sessions", None) or {}):
@@ -5303,6 +5372,22 @@ class FeishuAdapter(BasePlatformAdapter):
             chat_info=chat_info,
             event_chat_type=chat_type,
         )
+        # Built before the Jev gate rather than after it: the gate's busy check
+        # needs to know which session this message routes to, and build_source
+        # is pure — it resolves a profile and returns a SessionSource, touching
+        # no adapter state, so building one for a message the gate then drops
+        # costs nothing but the call.
+        source = self.build_source(
+            chat_id=chat_id,
+            chat_name=chat_info.get("name") or chat_id or "Feishu Chat",
+            chat_type=source_chat_type,
+            user_id=sender_profile["user_id"],
+            user_name=sender_profile["user_name"],
+            thread_id=thread_id,
+            user_id_alt=sender_profile["user_id_alt"],
+            is_bot=is_bot,
+            message_id=message_id,
+        )
         # Jev relevance gate for a group message that did not @-mention us.
         # Slash commands are excluded outright: an unaddressed "/reset" typed at
         # another bot must never reach this agent's command dispatch.
@@ -5311,6 +5396,21 @@ class FeishuAdapter(BasePlatformAdapter):
             if inbound_type == MessageType.COMMAND:
                 logger.debug(
                     "[Feishu] dropping unmentioned group command id=%s", message_id,
+                )
+                return
+            if (actual_thread_id or root_message_id) and self._thread_session_is_busy(
+                source, root_message_id=root_message_id,
+            ):
+                # A turn is already running in this topic. An @-mention would be
+                # queued and answered after it; an unprompted reply has no such
+                # claim, so it is dropped instead — the alternative is barging
+                # into work someone actually asked for. Dropped BEFORE the Jev
+                # call, because a verdict that cannot change the outcome is a
+                # second of latency spent on nothing.
+                logger.info(
+                    "[Feishu] dropping inbound event: thread_session_busy id=%s chat_id=%s",
+                    message_id,
+                    chat_id,
                 )
                 return
             if not await self._jev_message_in_scope(
@@ -5327,17 +5427,6 @@ class FeishuAdapter(BasePlatformAdapter):
             # Answer where the question was asked: an unprompted reply goes into
             # a topic under the triggering message, never as a loose group post.
             force_reply_thread = True
-        source = self.build_source(
-            chat_id=chat_id,
-            chat_name=chat_info.get("name") or chat_id or "Feishu Chat",
-            chat_type=source_chat_type,
-            user_id=sender_profile["user_id"],
-            user_name=sender_profile["user_name"],
-            thread_id=thread_id,
-            user_id_alt=sender_profile["user_id_alt"],
-            is_bot=is_bot,
-            message_id=message_id,
-        )
         if (
             (self._reply_thread_enabled() or force_reply_thread)
             and source_chat_type in {"dm", "group"}
@@ -5356,14 +5445,13 @@ class FeishuAdapter(BasePlatformAdapter):
             # For a later message in an auto-created topic, reuse the root-keyed
             # session only when that root already exists. Human-created topics
             # keep their historical real-thread (omt_*) session identity.
-            real_thread_id = source.thread_id
-            source.thread_id = str(root_message_id)
-            if self._session_exists_for_source(source):
-                thread_id = source.thread_id
-                self._mark_auto_thread_established(str(root_message_id))
+            root_keyed = self._auto_thread_root_session(source, root_message_id)
+            if root_keyed is not None:
+                thread_id = root_keyed
+                source.thread_id = root_keyed
+                self._mark_auto_thread_established(root_keyed)
             else:
-                source.thread_id = real_thread_id
-                thread_id = real_thread_id
+                thread_id = source.thread_id
         # Foreground A2A loops own their route before normal dispatch, text
         # batching, or per-chat serialization can turn a follow-up into a new
         # main-agent turn.  `text` has already had a leading bot mention

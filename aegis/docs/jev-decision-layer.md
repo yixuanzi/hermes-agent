@@ -188,6 +188,41 @@ bot creates the topic from its own reply), so it is a top-level message and is
 judged whenever the stage is on. This sub-switch cannot open the gate on its
 own — `HERMES_JEV_CHANNEL_AUTOREPLY` has to be on too.
 
+#### A busy topic is skipped before Jev is asked
+
+A message inside a topic where **a turn is already running** is dropped without
+a Jev call at all:
+
+| message in a topic | session idle | session running a turn |
+|---|---|---|
+| `@`-mentioned | answered | **queued**, answered after the current turn |
+| unprompted (this gate) | judged | **dropped, never judged** |
+
+The asymmetry is the point. An `@`-mention is someone asking, so `handle_message`
+queues it and it gets its answer in order. A message nobody addressed to the bot
+has no such claim — queueing it would put an answer nobody requested in front of
+work someone did request, and answering it immediately would interrupt that work
+outright. Dropping is the only option that leaves the running turn alone.
+
+It is checked **before** the Jev request, not after: the verdict cannot change
+the outcome, so paying ~1s and an API call for it would be waste.
+
+Scope is messages **already inside a topic**. A top-level group message opens a
+*new* topic, so it has no conversation of its own in progress to interrupt, and
+it is judged as usual.
+
+The check resolves the same session identity dispatch will settle on —
+including the root-keyed (`om_*`) vs real-thread (`omt_*`) hop described above,
+which is why both share `_auto_thread_root_session`. A check against the other
+candidate would look up an idle session and answer anyway. A topic with no
+session yet reads as idle, and a stale session guard is healed rather than
+believed, so one leaked lock silences a topic for a turn, not forever. If the
+check itself fails, the message falls through to the Jev verdict.
+
+```
+INFO  [Feishu] dropping inbound event: thread_session_busy id=om_x chat_id=oc_ops
+```
+
 ### When the gate runs
 
 The gate is **not** tied to the mention-drop path. It judges an unaddressed

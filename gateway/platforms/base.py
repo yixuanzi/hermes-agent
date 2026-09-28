@@ -5757,6 +5757,25 @@ class BasePlatformAdapter(ABC):
         self._discard_text_debounce(session_key)
         return True
 
+    def session_has_running_task(self, session_key: str) -> bool:
+        """Is a turn already running for ``session_key``?
+
+        Answers the question an adapter has to ask *before* deciding to start
+        an unprompted turn: would this message land on top of work already in
+        flight? The normal inbound path does not need it — ``handle_message``
+        queues a follow-up instead — but a turn nobody asked for should not be
+        queued either, and the only way to not-queue it is to know beforehand.
+
+        Heals a stale lock first, so a session whose owner task already exited
+        reads as idle. Without that, one split-brain guard would silence a
+        thread permanently rather than for the length of one turn.
+        """
+        active = getattr(self, "_active_sessions", None) or {}
+        if not session_key or session_key not in active:
+            return False
+        self._heal_stale_session_lock(session_key)
+        return session_key in self._active_sessions
+
     def _start_session_processing(
         self,
         event: MessageEvent,
