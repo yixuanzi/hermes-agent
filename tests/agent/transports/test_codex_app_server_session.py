@@ -896,3 +896,24 @@ class TestClassifyOAuthFailure:
         assert _classify_oauth_failure("") is None
         assert _classify_oauth_failure("", None) is None  # type: ignore[arg-type]
 
+
+
+def test_session_exposes_cwd_closed_turn_state_and_rebinds_hooks(tmp_path):
+    from agent.transports.codex_app_server_session import (
+        CodexAppServerSession,
+        _ServerRequestRouting,
+    )
+
+    session = CodexAppServerSession(cwd=str(tmp_path), on_event=lambda note: None)
+    assert session.cwd == str(tmp_path)
+    assert session.closed is False and session.turn_active is False
+
+    seen = []
+    routing = _ServerRequestRouting(auto_approve_exec=True)
+    session.rebind(approval_callback=None, on_event=seen.append, request_routing=routing)
+    session._on_event({"method": "x"})
+    assert seen == [{"method": "x"}]
+    assert session._routing is routing
+
+    session.close()
+    assert session.closed is True

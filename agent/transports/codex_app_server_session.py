@@ -310,6 +310,36 @@ class CodexAppServerSession:
         self._pending_file_changes: dict[str, str] = {}
         self._closed = False
 
+    @property
+    def cwd(self) -> str:
+        return self._cwd
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def turn_active(self) -> bool:
+        with self._active_turn_lock:
+            return self._active_turn_id is not None
+
+    def rebind(
+        self,
+        *,
+        approval_callback: Optional[Callable[..., str]],
+        on_event: Optional[Callable[[dict], None]],
+        request_routing: Optional[_ServerRequestRouting] = None,
+    ) -> None:
+        """Point the approval/display hooks at a new owner between turns.
+
+        Lets one codex thread outlive the AIAgent that created it (e.g. a
+        gateway agent-cache rebuild within the same Hermes session): the
+        subprocess and thread are kept, only the owner-bound callbacks move.
+        """
+        self._approval_callback = approval_callback
+        self._on_event = on_event
+        self._routing = request_routing or _ServerRequestRouting()
+
     # ---------- lifecycle ----------
 
     def ensure_started(self) -> str:

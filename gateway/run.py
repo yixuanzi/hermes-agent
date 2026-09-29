@@ -23873,6 +23873,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         override = _ims_state.conversation.model_override if _ims_state else None
         return override is not None and override.get("model") == agent_model
 
+    def _fallback_left_config_model(self, session_key: str, agent: Any, cfg_model: str) -> bool:
+        """Return True when a fallback, not a deliberate route, moved *agent* off *cfg_model*.
+
+        Jev complexity routing runs a turn on a band model by design; without
+        the ``_fallback_activated`` check every routed turn looked like a
+        fallback and evicted the cached agent, rebuilding it on every message
+        (and restarting any codex app-server thread it owned).
+        """
+        if agent.model == cfg_model or not getattr(agent, "_fallback_activated", False):
+            return False
+        return not self._is_intentional_model_switch(session_key, agent.model)
+
     def _release_running_agent_state(
         self,
         session_key: str,
@@ -26791,7 +26803,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _cfg_model = normalize_model_for_provider(_cfg_model, _agent_provider)
                 except Exception:
                     pass
-                if _agent.model != _cfg_model and not self._is_intentional_model_switch(session_key, _agent.model):
+                if self._fallback_left_config_model(session_key, _agent, _cfg_model):
                     # Fallback activated on a successful run — evict cached
                     # agent so the next message retries the primary model.
                     self._evict_cached_agent(session_key)

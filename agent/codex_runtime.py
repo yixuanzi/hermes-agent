@@ -444,20 +444,28 @@ def make_codex_app_server_event_bridge(agent) -> Callable[[dict], None]:
       * ``item/agentMessage/delta`` → ``_fire_stream_delta(text)`` so chat
         adapters can render the assistant's reply as it streams.
       * ``item/reasoning/delta`` → ``_fire_reasoning_delta(text)``
-      * ``item/completed`` for ``agentMessage`` →
+      * ``item/completed`` for ``agentMessage`` → held back until the next
+        item of the same turn starts, then surfaced as mid-turn commentary via
         ``_emit_interim_assistant_message({"role": "assistant",
-        "content": text})``. The gateway's ``already_streamed`` check
-        dedupes against any text the stream-delta callback already
-        rendered for the same message.
+        "content": text})`` and followed by a stream-segment reset. The
+        turn's last agentMessage is the final answer and is dropped at the
+        turn boundary — the normal final-response delivery owns it, exactly
+        as the Hermes loop never emits its final answer as interim. Emitting
+        it too (and letting its deltas glue onto the previous message's
+        stream segment) made the gateway deliver the answer twice.
 
     All callback invocations are guarded — a buggy display callback must
     not tear down the codex turn loop. Errors are logged at DEBUG so the
     notification stream keeps flowing regardless.
     """
+    from agent.transports.codex_app_server_session import _notification_scope_ids
+
     # item_id -> (tool_name, args, started_wall_time). Populated on
     # item/started and consumed on item/completed so duration is correct
     # even when codex doesn't report durationMs.
     started: dict[str, tuple[str, dict, float]] = {}
+    # Completed agentMessage awaiting classification: {"text", "turn_id"}.
+    pending_message: dict[str, Any] = {}
 
     def _stable_call_id(item: dict, name: str) -> str:
         """Deterministic tool_call id mirroring CodexEventProjector, so a
@@ -567,24 +575,42 @@ def make_codex_app_server_event_bridge(agent) -> Callable[[dict], None]:
         except Exception:
             logger.debug("_fire_reasoning_delta raised", exc_info=True)
 
-    def _fire_agent_message_completed(item: dict) -> None:
+    def _hold_agent_message(item: dict, turn_id: Any) -> None:
         text = item.get("text") or ""
         if not isinstance(text, str) or not text.strip():
+            return
+        pending_message.clear()
+        pending_message.update(text=text, turn_id=turn_id)
+
+    def _flush_pending_commentary() -> None:
+        """The held agentMessage was followed by more work: it was commentary."""
+        text = pending_message.get("text")
+        pending_message.clear()
+        if text is None:
             return
         # display.show_commentary=false — mid-turn narration stays off the
         # visible interim path on this runtime too (same contract as the
         # codex_responses commentary channel).
-        if not getattr(agent, "show_commentary", True):
-            return
         emit = getattr(agent, "_emit_interim_assistant_message", None)
-        if emit is None:
-            return
-        try:
-            emit({"role": "assistant", "content": text})
-        except Exception:
-            logger.debug(
-                "_emit_interim_assistant_message raised", exc_info=True,
-            )
+        if emit is not None and getattr(agent, "show_commentary", True):
+            try:
+                # Runs before the next message's deltas are recorded, so the
+                # streamed-text tracker still holds exactly this message and
+                # already_streamed is computed against it.
+                emit({"role": "assistant", "content": text})
+            except Exception:
+                logger.debug(
+                    "_emit_interim_assistant_message raised", exc_info=True,
+                )
+        # The next message streams as its own segment (the loop resets this
+        # per API call and breaks the stream after tool iterations).
+        reset = getattr(agent, "_reset_stream_delivery_tracking", None)
+        if callable(reset):
+            try:
+                reset()
+            except Exception:
+                logger.debug("stream tracking reset raised", exc_info=True)
+        agent._stream_needs_break = True
 
     def on_event(note: dict) -> None:
         if not isinstance(note, dict):
@@ -593,7 +619,20 @@ def make_codex_app_server_event_bridge(agent) -> Callable[[dict], None]:
         params = note.get("params") or {}
         if not isinstance(params, dict):
             params = {}
+        _thread_id, turn_id = _notification_scope_ids(note)
+        if method in {"turn/started", "turn/completed"} or (
+            pending_message
+            and turn_id is not None
+            and pending_message.get("turn_id") not in (None, turn_id)
+        ):
+            # Turn boundary: the held message was that turn's final answer.
+            pending_message.clear()
+        # A completed item never streams or starts again, so any later delta
+        # or item/started in the same turn means more work followed the held
+        # message: it was commentary.
         if method == "item/agentMessage/delta":
+            if pending_message:
+                _flush_pending_commentary()
             _fire_text_delta(params)
             return
         if method in {"item/reasoning/delta", "item/reasoning/summaryDelta"}:
@@ -603,6 +642,12 @@ def make_codex_app_server_event_bridge(agent) -> Callable[[dict], None]:
         if not isinstance(item, dict):
             return
         item_type = item.get("type") or ""
+        if pending_message and (
+            method == "item/started"
+            # Fast tool items may report only item/completed.
+            or (method == "item/completed" and item_type in _CODEX_TOOL_ITEM_TYPES)
+        ):
+            _flush_pending_commentary()
         if method == "item/started" and item_type in _CODEX_TOOL_ITEM_TYPES:
             _fire_tool_started(item)
             return
@@ -610,9 +655,111 @@ def make_codex_app_server_event_bridge(agent) -> Callable[[dict], None]:
             if item_type in _CODEX_TOOL_ITEM_TYPES:
                 _fire_tool_completed(item)
             elif item_type == "agentMessage":
-                _fire_agent_message_completed(item)
+                _hold_agent_message(item, turn_id)
 
     return on_event
+
+
+def _drop_turn_input_echo(
+    projected: List[Dict[str, Any]], user_input: Any
+) -> List[Dict[str, Any]]:
+    """Drop codex's ``userMessage`` echo of this turn's own input.
+
+    codex app-server reports the ``turn/start`` input back as a userMessage
+    item, which the projector maps to a user message. Hermes already appended
+    this turn's user message before handing off, so splicing the echo would
+    duplicate the user turn in history and state.db. Only the first projected
+    user message is considered, and only when it matches the input — later
+    user items (mid-turn steer input) are kept.
+    """
+    from agent.transports.codex_app_server_session import _coerce_turn_input_text
+
+    echo = _coerce_turn_input_text(user_input).strip()
+    for index, msg in enumerate(projected or []):
+        if msg.get("role") != "user":
+            continue
+        if str(msg.get("content") or "").strip() == echo:
+            return projected[:index] + projected[index + 1:]
+        break
+    return projected
+
+
+def attach_codex_app_server_session(agent, session=None, *, cwd=None):
+    """Bind a codex app-server session to ``agent`` and return it.
+
+    With ``session=None`` a new (not yet spawned) session is created in
+    ``cwd`` (default: the agent's session cwd). An existing session is
+    re-bound instead, so a codex thread can survive an AIAgent rebuild within
+    the same Hermes session. Either way the approval and display hooks are
+    built for ``agent`` on the calling thread — call this from the agent's
+    turn thread, where the CLI installs its approval callback.
+    """
+    from agent.transports.codex_app_server_session import (
+        CodexAppServerSession,
+        _ServerRequestRouting,
+    )
+
+    # Approval callback: defer to Hermes' standard prompt flow if a
+    # CLI thread has installed one. Gateway / cron contexts get the
+    # codex-side fail-closed default.
+    try:
+        from tools.terminal_tool import _get_approval_callback
+        approval_callback = _get_approval_callback()
+    except Exception:
+        approval_callback = None
+
+    # Gateway / cron contexts have no UI to surface codex's approval
+    # requests through, so codex app-server exec / apply_patch requests
+    # fail closed (silently decline) by default. When the user has
+    # explicitly opted out of Hermes approvals — via `approvals.mode: off`
+    # in config, the /yolo session toggle, or --yolo / HERMES_YOLO_MODE —
+    # honor that and let codex's own sandbox permission profile
+    # (~/.codex/config.toml) be the policy gate instead of double-gating
+    # with a missing Hermes UI. Defaults (manual/smart/unset) preserve the
+    # current fail-closed behavior — this is a no-op for those users.
+    auto_approve_requests = False
+    try:
+        from tools.approval import is_approval_bypass_active
+
+        auto_approve_requests = is_approval_bypass_active()
+    except Exception:
+        logger.debug(
+            "codex app-server: approval-bypass lookup failed; "
+            "keeping fail-closed default",
+            exc_info=True,
+        )
+    routing = _ServerRequestRouting(
+        auto_approve_exec=auto_approve_requests,
+        auto_approve_apply_patch=auto_approve_requests,
+    )
+
+    # Bridge codex JSON-RPC notifications (item/started, item/completed,
+    # item/agentMessage/delta, ...) into Hermes' gateway UI callbacks
+    # (tool_progress_callback, _fire_stream_delta,
+    # _emit_interim_assistant_message). Without this, Discord/Telegram
+    # users see no live tool-progress or interim commentary while
+    # codex_app_server is running — only the final answer (#33200).
+    # Supersedes the narrower item/started-only bridge from #38835.
+    on_event = make_codex_app_server_event_bridge(agent)
+    if session is None:
+        if not cwd:
+            from agent.runtime_cwd import resolve_agent_cwd
+
+            cwd = getattr(agent, "session_cwd", None) or str(resolve_agent_cwd())
+        session = CodexAppServerSession(
+            cwd=cwd,
+            approval_callback=approval_callback,
+            request_routing=routing,
+            on_event=on_event,
+        )
+    else:
+        session.rebind(
+            approval_callback=approval_callback,
+            on_event=on_event,
+            request_routing=routing,
+        )
+    agent._codex_session = session
+    return session
 
 
 def run_codex_app_server_turn(
@@ -631,64 +778,22 @@ def run_codex_app_server_turn(
     Called from run_conversation() when agent.api_mode == "codex_app_server".
     Returns the same dict shape as the chat_completions path.
     """
-    from agent.transports.codex_app_server_session import (
-        CodexAppServerSession,
-        _ServerRequestRouting,
-    )
-
     # Lazy session: one CodexAppServerSession per AIAgent instance.
     # Spawned on first turn, reused across turns, closed at AIAgent
     # shutdown (see _cleanup hook).
-    if not hasattr(agent, "_codex_session") or agent._codex_session is None:
-        from agent.runtime_cwd import resolve_agent_cwd
+    if getattr(agent, "_codex_session", None) is None:
+        attach_codex_app_server_session(agent)
 
-        cwd = getattr(agent, "session_cwd", None) or str(resolve_agent_cwd())
-        # Approval callback: defer to Hermes' standard prompt flow if a
-        # CLI thread has installed one. Gateway / cron contexts get the
-        # codex-side fail-closed default.
+    # Every codex turn streams from a clean segment, mirroring the loop's
+    # per-API-call reset — otherwise the previous turn's final text stays in
+    # the streamed-text tracker and breaks interim de-duplication.
+    _reset_stream = getattr(agent, "_reset_stream_delivery_tracking", None)
+    if callable(_reset_stream):
         try:
-            from tools.terminal_tool import _get_approval_callback
-            approval_callback = _get_approval_callback()
+            _reset_stream()
         except Exception:
-            approval_callback = None
-
-        # Gateway / cron contexts have no UI to surface codex's approval
-        # requests through, so codex app-server exec / apply_patch requests
-        # fail closed (silently decline) by default. When the user has
-        # explicitly opted out of Hermes approvals — via `approvals.mode: off`
-        # in config, the /yolo session toggle, or --yolo / HERMES_YOLO_MODE —
-        # honor that and let codex's own sandbox permission profile
-        # (~/.codex/config.toml) be the policy gate instead of double-gating
-        # with a missing Hermes UI. Defaults (manual/smart/unset) preserve the
-        # current fail-closed behavior — this is a no-op for those users.
-        auto_approve_requests = False
-        try:
-            from tools.approval import is_approval_bypass_active
-
-            auto_approve_requests = is_approval_bypass_active()
-        except Exception:
-            logger.debug(
-                "codex app-server: approval-bypass lookup failed; "
-                "keeping fail-closed default",
-                exc_info=True,
-            )
-
-        # Bridge codex JSON-RPC notifications (item/started, item/completed,
-        # item/agentMessage/delta, ...) into Hermes' gateway UI callbacks
-        # (tool_progress_callback, _fire_stream_delta,
-        # _emit_interim_assistant_message). Without this, Discord/Telegram
-        # users see no live tool-progress or interim commentary while
-        # codex_app_server is running — only the final answer (#33200).
-        # Supersedes the narrower item/started-only bridge from #38835.
-        agent._codex_session = CodexAppServerSession(
-            cwd=cwd,
-            approval_callback=approval_callback,
-            request_routing=_ServerRequestRouting(
-                auto_approve_exec=auto_approve_requests,
-                auto_approve_apply_patch=auto_approve_requests,
-            ),
-            on_event=make_codex_app_server_event_bridge(agent),
-        )
+            logger.debug("stream tracking reset raised", exc_info=True)
+    agent._stream_needs_break = False
 
     # NOTE: the user message is ALREADY appended to messages by the
     # standard run_conversation() flow (line ~11823) before the early
@@ -764,8 +869,11 @@ def run_codex_app_server_turn(
     # Splice projected messages into the conversation. The projector emits
     # standard {role, content, tool_calls, tool_call_id} entries, which
     # is exactly what curator.py / sessions DB expect.
-    if turn.projected_messages:
-        messages.extend(turn.projected_messages)
+    projected_messages = _drop_turn_input_echo(
+        turn.projected_messages, user_message
+    )
+    if projected_messages:
+        messages.extend(projected_messages)
 
         # Persist the newly-projected assistant/tool messages ourselves.
         # This path is an early return that bypasses conversation_loop, whose
@@ -1459,6 +1567,7 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
 
 
 __all__ = [
+    "attach_codex_app_server_session",
     "run_codex_app_server_turn",
     "run_codex_stream",
     "run_codex_create_stream_fallback",

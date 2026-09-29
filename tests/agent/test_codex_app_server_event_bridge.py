@@ -250,17 +250,61 @@ class TestToolProgressDispatch:
 
 
 class TestAgentMessageInterimDispatch:
-    def test_completed_agent_message_emits_interim(self):
+    def test_agent_message_followed_by_work_emits_interim(self):
         agent = _make_stub_agent()
+        agent._reset_stream_delivery_tracking = MagicMock()
         bridge = make_codex_app_server_event_bridge(agent)
         bridge(_item_completed({
             "type": "agentMessage",
             "id": "am-1",
             "text": "I'll check the config first.",
         }))
+        # Not yet known whether this is commentary or the final answer.
+        agent._emit_interim_assistant_message.assert_not_called()
+        bridge(_item_started({
+            "type": "commandExecution", "id": "cmd-1", "command": "ls",
+        }))
         agent._emit_interim_assistant_message.assert_called_once_with(
             {"role": "assistant", "content": "I'll check the config first."}
         )
+        # The next message streams as its own segment.
+        agent._reset_stream_delivery_tracking.assert_called_once_with()
+        assert agent._stream_needs_break is True
+
+    def test_next_message_delta_flushes_commentary_before_streaming(self):
+        agent = _make_stub_agent()
+        order = []
+        agent._emit_interim_assistant_message.side_effect = lambda m: order.append("interim")
+        agent._fire_stream_delta.side_effect = lambda t: order.append(f"delta:{t}")
+        bridge = make_codex_app_server_event_bridge(agent)
+        bridge(_item_completed({"type": "agentMessage", "id": "am-1", "text": "Checking."}))
+        bridge({"method": "item/agentMessage/delta",
+                "params": {"itemId": "am-2", "delta": "Done"}})
+        assert order == ["interim", "delta:Done"]
+
+    def test_final_agent_message_is_not_emitted_as_interim(self):
+        """The turn's last agentMessage is the final answer: the normal
+        final-response delivery owns it, so emitting it as interim too made
+        gateways deliver the answer twice."""
+        agent = _make_stub_agent()
+        bridge = make_codex_app_server_event_bridge(agent)
+        bridge(_item_completed({"type": "agentMessage", "id": "am-9", "text": "All done."}))
+        bridge({"method": "turn/completed", "params": {"turn": {"id": "t1", "status": "completed"}}})
+        # Next turn's first item must not resurrect the previous final answer.
+        bridge(_item_started({"type": "commandExecution", "id": "cmd-2", "command": "pwd"}))
+        agent._emit_interim_assistant_message.assert_not_called()
+
+    def test_held_message_from_previous_turn_is_dropped(self):
+        agent = _make_stub_agent()
+        bridge = make_codex_app_server_event_bridge(agent)
+        bridge({"method": "item/completed", "params": {
+            "turnId": "t1", "item": {"type": "agentMessage", "id": "am-1", "text": "final"},
+        }})
+        # Turn ended without turn/completed; the next turn's events carry a new id.
+        bridge({"method": "item/started", "params": {
+            "turnId": "t2", "item": {"type": "commandExecution", "id": "c1", "command": "ls"},
+        }})
+        agent._emit_interim_assistant_message.assert_not_called()
 
 
 
@@ -274,11 +318,11 @@ class TestAgentMessageInterimDispatch:
         bridge(_item_completed({
             "type": "agentMessage", "id": "am-5", "text": "I'll check config.",
         }))
-        agent._emit_interim_assistant_message.assert_not_called()
         # Tool progress is unaffected by the commentary toggle.
         bridge(_item_started({
             "type": "commandExecution", "id": "cmd-1", "command": "ls",
         }))
+        agent._emit_interim_assistant_message.assert_not_called()
         agent.tool_progress_callback.assert_called_once()
 
 
@@ -306,6 +350,9 @@ class TestBridgeRobustness:
                 "params": {"delta": "x"}})
         bridge(_item_completed({
             "type": "agentMessage", "id": "am-x", "text": "hi",
+        }))
+        bridge(_item_started({
+            "type": "commandExecution", "id": "exec-y", "command": "pwd",
         }))
 
 

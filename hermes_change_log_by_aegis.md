@@ -265,6 +265,9 @@ Intent: Mark Feishu tool-progress sends with `hermes_progress` and the long-runn
 Feature: Plugin slash-command caller identity binding.
 Intent: Bind the invoking user's userenv identity (from the adapter's `SessionSource`) around plugin-registered slash-command handlers for the duration of the call, mirroring the tool-call path in `agent/tool_executor.py`. Plugin command dispatch runs inside `_handle_message` before `_set_session_env` binds `HERMES_SESSION_*`, so without this binding identity-dependent plugin commands (e.g. `/userenv`) would see no caller and fail closed. Identity must always come from the gateway source, never from message text, and the ContextVar must be reset after the handler returns.
 
+Feature: Fallback eviction limited to real fallbacks.
+Intent: After a successful turn the gateway evicts the cached agent when a fallback left it off the configured model, so the next message retries the primary. The check compared only `agent.model` with the configured model, so every Jev-routed turn (band model by design) looked like a fallback and rebuilt the AIAgent on every message — defeating Jev's own at-most-once-rebuild contract and restarting any codex app-server thread the agent owned. `_fallback_left_config_model()` now also requires `agent._fallback_activated` (set only when the fallback chain actually switched providers this turn), while still respecting intentional `/model` overrides.
+
 Feature: Jev complexity-based turn model routing.
 Intent: Let a turn run on a model sized to the difficulty of the request. `_apply_jev_complexity_route` is a module-level function, not a method, because the turn-route builder is exercised with a stand-in `self` and must not gain instance-state requirements. It mutates the route in place INCLUDING the signature, since the agent-cache key is derived from it and a band switch has to rebuild the agent rather than reuse one bound to the previous model — the same cache boundary a `/model` switch crosses, which is why banding is confidence-gated rather than applied to every turn. A band pinned to another provider swaps credentials through the existing per-provider resolver; a band on the session's own provider only re-derives `api_mode` for the model being switched to. Every failure — routing off, no band, unresolvable credentials, classifier error, empty message — leaves the route exactly as the session resolved it. The turn's session **id** is threaded through `_resolve_turn_agent_config` so the policy layer can decide a band once per session under the default `complexity_scope: session`; under that scope a conversation crosses the agent-cache boundary at most once, which is the point of making it the default.
 
@@ -371,17 +374,22 @@ Intent: Exercise Agent Card discovery, single and multi-turn context reuse, poll
 ## File: `plugins/ext-tools/__init__.py`
 
 Feature: Stateless extension host for tools and slash commands.
-Intent: Register plugin-owned capabilities (the `cron_prompt` tool and the `/userenv` slash command) in one place so new stateless surface arrives as one module per capability without growing the Hermes core tool schema or command registry.
+Intent: Register plugin-owned capabilities (the `cron_prompt` tool, the `/userenv` slash command, and the `/codex` session runtime switch with its hooks) in one place so new surface arrives as one module per capability without growing the Hermes core tool schema, command registry, or agent loop.
 
 ## File: `plugins/ext-tools/userenv_cmd.py`
 
 Feature: `/userenv` self-service env slash command.
 Intent: Let authenticated runtime users list, get, set, and delete only their own persisted env variables through the gateway command path, so secret values never enter the LLM conversation context. Identity comes from the userenv ContextVar bound by the gateway (never from message text), missing identity fails closed for data operations while help text stays available, `get` responses mask values to the first/last four characters, and storage reuses `tools/user_env_store.py` with `CURRENT_USER_NAME` remaining system-managed.
 
+## File: `plugins/ext-tools/codex_cmd.py`
+
+Feature: `/codex on|off|status [cwd=DIR]` session-scoped codex app-server switch.
+Intent: Let one conversation hand its turns to the locally configured `codex app-server` immediately (from the next message) and switch back, without the global `model.openai_runtime` flag, its provider gate (`openai-codex` only), or any `~/.codex/config.toml` / MCP migration. State is kept in plugin memory keyed by Hermes session_id (gateway sessions not yet created are held by gateway session_key and bound on their first turn), so `/new`, auto-reset, or session finalize ends the mode. The switch happens only at turn boundaries inside the `pre_llm_call` hook, which runs on the agent thread before the core `api_mode == "codex_app_server"` branch; the live agent comes from `get_active_subagent_parent()` (bound around every `run_conversation`). This reuses `run_codex_app_server_turn` end to end (event bridge, projection/persistence, usage, approvals, interrupt/steer). The host `api_mode` and `session_cwd` are snapshotted on the agent and restored on off; while active, auxiliary routing and the background review fork keep the host transport instead of the core `codex_app_server -> codex_responses` downgrade, which is only correct for `openai-codex`. `cwd=` pins the codex thread directory and retires the thread when it changes. The codex thread belongs to the Hermes session, not to one AIAgent: the plugin creates it through `attach_codex_app_server_session()` at the turn boundary, records it in the session state, and when the gateway rebuilds the AIAgent for the same session (agent-cache eviction, per-sender rebuilds in shared chats, cross-process writes) it releases the thread from the old agent and re-binds it to the new one, so multi-turn codex context survives rebuilds; a retired or closed thread is replaced, and `/codex off` or session finalize closes it (immediately when idle, otherwise at the next turn boundary). Session identity at command time comes from the CLI `_cli_ref`, a gateway `(runner, source)` capture made by `pre_gateway_dispatch` on the same `_handle_message` coroutine and cross-checked against the gateway-bound userenv identity, or the single TUI session (multiple TUI sessions are refused as ambiguous). Because codex executes tools in its own process outside rbac-guard's `pre_tool_call`, gateway enabling requires the rbac-guard `admin` role when rbac-guard is loaded (lookup failure fails closed), and in shared sessions only the enabling user's turns go to codex while other members stay on the Hermes loop. Background review forks sharing the session id are never switched.
+
 ## File: `plugins/ext-tools/plugin.yaml`
 
 Feature: ext-tools plugin manifest.
-Intent: Declare the plugin's provided tools and commands (`cron_prompt` tool, `/userenv` command) so discovery surfaces what the plugin contributes without inspecting code.
+Intent: Declare the plugin's provided tools, commands, and hooks (`cron_prompt` tool; `/userenv` and `/codex` commands; `pre_llm_call`, `pre_gateway_dispatch`, `on_session_finalize` hooks used by `/codex`) so discovery surfaces what the plugin contributes without inspecting code.
 
 ## File: `hermes_cli/config_defaults.py`
 
@@ -392,3 +400,19 @@ Intent: Declare the `jev:` section so the endpoint, decision model, feature flag
 
 Feature: Jev environment-variable recognition.
 Intent: Keep the `TYPESAFE_MODEL` / `HERMES_JEV_*` keys (including the per-band model, provider and criteria vars, but NOT the removed `HERMES_JEV_BUSINESS_SCOPE`, which should now report as unknown) known to `.env` reload and doctor so an operator who pins them per deployment is not warned about unknown variables. They are deliberately left out of the global-env allowlist in `agent/secret_scope.py`: a multiplexing gateway should be able to serve two business scopes and two sets of band models from one process, which requires these to stay profile-scoped.
+
+## File: `agent/codex_runtime.py`
+
+Feature: Codex app-server commentary vs final-answer streaming.
+Intent: The event bridge used to emit every completed `agentMessage` as an interim assistant message and never reset per-message stream tracking, so the final answer reached gateways twice (the live stream segment plus a commentary send, with the text glued onto the previous message's segment) and the streamed-text tracker carried the previous turn's text. It now holds a completed agentMessage until the next item of the same turn starts (delta, `item/started`, or a fast tool `item/completed`) — only then is it known to be commentary and emitted, followed by a stream-segment reset and paragraph break — and drops it at the turn boundary (`turn/started`, `turn/completed`, or a different turn id) because it was the final answer, which the normal final-response delivery owns, matching the Hermes loop. `run_codex_app_server_turn` also resets stream delivery tracking at the start of every codex turn, like the loop's per-API-call reset.
+
+Feature: Reusable codex app-server session binding.
+Intent: `attach_codex_app_server_session(agent, session=None, cwd=None)` builds the owner-bound hooks (approval callback from the calling thread, approval-bypass routing, event bridge) once and either creates a new session or re-binds an existing one, then stores it on `agent._codex_session`. The lazy creation in `run_codex_app_server_turn` uses it, and session-level owners (the `/codex` plugin) use it to move one codex thread onto a rebuilt AIAgent instead of starting a fresh thread per agent.
+
+Feature: Codex app-server turn input de-duplication.
+Intent: codex app-server echoes each `turn/start` input back as a `userMessage` item, which the event projector maps to a user message. Hermes has already appended and flushed that user turn before handing off, so `run_codex_app_server_turn` now drops the first projected user message when it matches the turn input, before splicing and persisting. Without this every codex turn stored the user message twice in history and state.db (and replayed it twice to the Hermes loop after switching back). Later user items such as mid-turn steer input are kept.
+
+## File: `agent/transports/codex_app_server_session.py`
+
+Feature: Session state accessors and hook re-binding.
+Intent: Expose read-only `cwd`, `closed`, and `turn_active` and a `rebind(approval_callback, on_event, request_routing)` method so an owner above one AIAgent can check whether a codex thread is reusable or safe to close and point its approval/display callbacks at a new agent between turns, without reaching into private attributes. The subprocess and codex thread are untouched by re-binding.

@@ -161,6 +161,64 @@ def test_codex_turn_persists_each_message_exactly_once():
         shutil.rmtree(tmp)
 
 
+def test_codex_turn_drops_user_input_echo():
+    """codex echoes the turn/start input back as a userMessage item; the
+    already-appended Hermes user turn must not be duplicated in history or DB."""
+    tmp = tempfile.mkdtemp(prefix="codex_echo_")
+    try:
+        db = SessionDB(Path(tmp) / "state.db")
+        sid = "sess-codex-echo"
+        db.create_session(session_id=sid, source="cli", model="codex")
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            session_db=db,
+            session_id=sid,
+        )
+        agent._session_db_created = True
+        turn = _make_turn()
+        turn.projected_messages = [
+            {"role": "user", "content": "USER_TURN"},
+            {"role": "assistant", "content": "CODEX_ASSISTANT"},
+        ]
+        agent._codex_session = MagicMock()
+        agent._codex_session.run_turn.return_value = turn
+        agent.tool_progress_callback = None
+
+        messages = [{"role": "user", "content": "USER_TURN"}]
+        agent._flush_messages_to_session_db(messages)
+        run_codex_app_server_turn(
+            agent,
+            user_message="USER_TURN",
+            original_user_message="USER_TURN",
+            messages=messages,
+            effective_task_id="task-1",
+        )
+
+        assert [m["role"] for m in messages] == ["user", "assistant"]
+        contents = [r["content"] for r in db.get_messages(sid, include_inactive=True)]
+        assert contents.count("USER_TURN") == 1, contents
+        assert contents.count("CODEX_ASSISTANT") == 1, contents
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp)
+
+
+def test_input_echo_drop_keeps_other_user_items():
+    from agent.codex_runtime import _drop_turn_input_echo
+
+    steer = [
+        {"role": "assistant", "content": "working"},
+        {"role": "user", "content": "also check README"},
+    ]
+    assert _drop_turn_input_echo(steer, "hello") == steer
+    assert _drop_turn_input_echo([], "hello") == []
+
+
 class TestGatewayPersistedResolution:
     """The gateway default must preserve standard-runtime skip-db behaviour."""
 
