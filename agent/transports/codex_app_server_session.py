@@ -304,8 +304,12 @@ class CodexAppServerSession:
         on_event: Optional[Callable[[dict], None]] = None,
         request_routing: Optional[_ServerRequestRouting] = None,
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
+        thread_start_params: Optional[dict] = None,
     ) -> None:
         self._cwd = cwd or os.getcwd()
+        # Extra stable thread/start fields (e.g. `sandbox`, `approvalPolicy`,
+        # `config`) — a per-thread override that leaves ~/.codex untouched.
+        self._thread_start_params = dict(thread_start_params or {})
         self._codex_bin = codex_bin
         self._codex_home = codex_home
         self._permission_profile = (
@@ -337,6 +341,10 @@ class CodexAppServerSession:
     @property
     def cwd(self) -> str:
         return self._cwd
+
+    @property
+    def thread_start_params(self) -> dict:
+        return dict(self._thread_start_params)
 
     @property
     def closed(self) -> bool:
@@ -406,7 +414,10 @@ class CodexAppServerSession:
         # codex CLI workflow and avoids fighting codex's own validation.
         # Users who want a write-capable profile configure it in their
         # ~/.codex/config.toml the same way they would for any codex usage.
-        params: dict[str, Any] = {"cwd": self._cwd}
+        # Callers may still pin the stable (non-experimental) `sandbox` /
+        # `approvalPolicy` / `config` fields per thread via
+        # `thread_start_params`; cwd always stays the session's.
+        params: dict[str, Any] = {**self._thread_start_params, "cwd": self._cwd}
         result = self._client.request("thread/start", params, timeout=15)
         # Cross-fill thread.id/sessionId — different codex versions have
         # serialized this under either key. Mirrors openclaw beta.8's

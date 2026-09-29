@@ -1,6 +1,7 @@
 """codex_cmd — /codex slash 命令：把当前会话切到本地 codex app-server 执行。
 
-/codex on [cwd=DIR]   当前会话下一条消息起，整轮交给本地 codex CLI（codex app-server）
+/codex on [cwd=DIR] [sandbox=read|network|full]
+                      当前会话下一条消息起，整轮交给本地 codex CLI（codex app-server）
 /codex off            恢复 Hermes 默认 loop
 /codex status         查看当前会话状态
 /codex [help]         命令帮助（不带参数时默认显示）
@@ -33,6 +34,9 @@
   - 安全：codex 工具在子进程内执行，Hermes 的 rbac-guard pre_tool_call 管不到。
     因此 gateway 下 rbac-guard 启用时只有 admin 能开启；共享会话（群聊）里只有
     开启者本人的消息走 codex，其他成员仍走 Hermes loop（受 RBAC 约束）。
+  - 沙箱档位：sandbox=read|network|full（默认 network：工作区可写 + 网络开启）经
+    thread/start 的 sandbox / approvalPolicy / config 字段按线程指定，不改 ~/.codex；
+    full 为无沙箱且从不审批，回显与 status 醒目警示。
   - 权限可见：/codex on 时即启动本会话的 codex 线程（第一轮直接复用），把 codex 在
     thread/start 上报告的实际权限档、沙箱、网络与审批策略回显给用户；/codex status
     同样展示。启动放在线程里执行，gateway 事件循环不被阻塞。
@@ -56,6 +60,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 logger = logging.getLogger(__name__)
 
 CODEX_API_MODE = "codex_app_server"
+
+# sandbox= 档位 → thread/start 覆盖字段（按线程生效，不写 ~/.codex/config.toml）
+SANDBOX_MODES: dict[str, dict] = {
+    "read": {"sandbox": "read-only"},
+    "network": {
+        "sandbox": "workspace-write",
+        "config": {"sandbox_workspace_write": {"network_access": True}},
+    },
+    "full": {"sandbox": "danger-full-access", "approvalPolicy": "never"},
+}
+DEFAULT_SANDBOX_MODE = "network"
+_SANDBOX_MODE_LABELS = {
+    "read": "只读沙箱，网络关闭",
+    "network": "工作区可写，网络开启",
+    "full": "⚠️ 无沙箱，网络不受限，从不审批",
+}
+_NO_SANDBOX_WARNING = (
+    "⚠️ **无沙箱**：codex 以当前系统账号直接执行任意命令，可读写删除该账号能访问的任何文件，"
+    "网络不受限，且不会请求任何审批（Hermes 审批与 rbac-guard 均不生效）。"
+)
+
+
+def thread_params_for(sandbox_mode: str) -> dict:
+    return SANDBOX_MODES[sandbox_mode]
 # 首次切到 codex 前的宿主运行时快照，挂在 agent 实例上；off 时据此恢复。
 _HOST_ATTR = "_ext_codex_host"
 _MISSING = object()
@@ -68,6 +96,7 @@ class CodexMode:
     # gateway 开启者 (platform, user_id)；CLI/TUI 为 None（本地单用户）
     owner: Optional[tuple[str, str]] = None
     gateway_session_key: Optional[str] = None
+    sandbox: str = DEFAULT_SANDBOX_MODE
     # 本会话的 codex 线程与其当前宿主 agent（弱引用），跨 agent 重建复用
     codex_session: Any = None
     owner_agent: Any = None
@@ -380,14 +409,24 @@ def _bind_codex_session(agent: Any, mode: CodexMode) -> None:
     from agent.codex_runtime import attach_codex_app_server_session
 
     cwd = _effective_cwd(agent)
+    params = thread_params_for(mode.sandbox)
+
+    def _reusable(session: Any) -> bool:
+        return (
+            session is not None
+            and not session.closed
+            and session.cwd == cwd
+            and session.thread_start_params == params
+        )
+
     current = getattr(agent, "_codex_session", None)
-    if current is not None and (current.closed or current.cwd != cwd):
-        _close_codex_session(agent)  # 已退役或 cwd 变了：在新目录重开 codex 线程
+    if current is not None and not _reusable(current):
+        _close_codex_session(agent)  # 已退役，或 cwd / 沙箱档位变了：重开 codex 线程
         current = None
 
     if current is None:
         candidate = mode.codex_session
-        if candidate is not None and not candidate.closed and candidate.cwd == cwd:
+        if _reusable(candidate):
             previous = mode.owner_agent() if mode.owner_agent is not None else None
             if (
                 previous is not None
@@ -400,7 +439,7 @@ def _bind_codex_session(agent: Any, mode: CodexMode) -> None:
             logger.info("/codex: session %s reusing codex thread on rebuilt agent", mode.session_id)
         else:
             _release_codex_session(mode)
-            attach_codex_app_server_session(agent, cwd=cwd)
+            attach_codex_app_server_session(agent, cwd=cwd, thread_start_params=params)
 
     mode.codex_session = agent._codex_session
     mode.owner_agent = weakref.ref(agent)
@@ -482,7 +521,7 @@ def _help_text() -> str:
         "只作用于当前会话，不修改 config.yaml、~/.codex/config.toml 或 MCP 配置。\n"
         "\n"
         "**子命令**\n"
-        "  /codex on [cwd=DIR] — 开启 Codex 模式：下一条消息起整轮对话交给本地 codex 执行，结果回传本会话\n"
+        "  /codex on [cwd=DIR] [sandbox=read|network|full] — 开启 Codex 模式：下一条消息起整轮对话交给本地 codex 执行，结果回传本会话\n"
         "  /codex off — 关闭 Codex 模式：下一条消息起恢复 Hermes 默认 loop，并关闭本会话的 codex 线程\n"
         "  /codex status — 查看当前会话的开关状态、cwd 与开启者\n"
         "  /codex help — 显示本帮助（不带任何参数时默认显示）\n"
@@ -494,14 +533,19 @@ def _help_text() -> str:
         "    • 支持 `~` 与相对路径（相对 `terminal.cwd` 解析，未设置时相对启动目录）；目录必须已存在；"
         "路径含空格时加引号：`cwd=\"~/my proj\"`\n"
         "    • 再次 `on` 不带 cwd 时沿用上次指定的目录；更换目录会在下一轮重开 codex 线程\n"
+        "  sandbox=read|network|full — 仅 `on` 可用，codex 线程的沙箱档位，默认 `network`\n"
+        "    • `read`：只读沙箱，不能写文件，网络关闭；越出沙箱需审批\n"
+        "    • `network`（默认）：工作区可写（cwd、/tmp、$TMPDIR），网络开启；越出沙箱需审批\n"
+        "    • `full`：⚠️ 无沙箱，任意命令、任意文件、网络均不受限，且从不请求审批\n"
+        "    • 每次 `on` 不带 sandbox 时恢复默认 `network`；切换档位会重开 codex 线程\n"
+        "    • 审批：CLI 会弹出 Hermes 审批；飞书 / TUI 等无审批界面的入口，越出沙箱的请求会被自动拒绝\n"
         "\n"
         "**默认行为**\n"
         "  • 每个会话默认关闭，使用 Hermes 默认 loop\n"
         "  • 开启后同一会话多轮复用同一个 codex 线程；线程从空白上下文开始，看不到开启前的 Hermes 对话\n"
         "  • 模型、鉴权、sandbox、MCP 均使用本机 ~/.codex 现有配置；"
         "memory / delegate_task 等 Hermes 工具在该模式下不可用\n"
-        "  • 权限由 codex 按 ~/.codex 配置与目录 trust 决定（受信目录通常为 `:workspace` 工作区可写，"
-        "其余为 `:read-only` 只读），`on` 与 `status` 会显示 codex 报告的实际权限档、沙箱、网络与审批\n"
+        "  • 沙箱与网络由 sandbox 档位决定（不再取决于目录 trust），`on` 与 `status` 会显示 codex 报告的实际沙箱、网络与审批\n"
         "  • 换会话（/new、自动重置）后自动失效\n"
         "  • 消息平台：启用 rbac-guard 时仅 admin 可开启；群聊中只有开启者本人的消息走 Codex"
     )
@@ -556,6 +600,7 @@ _APPROVAL_LABELS = {
     "untrusted": "除少量安全的只读命令外都要审批",
     "never": "从不请求审批，越出沙箱的操作直接失败",
 }
+_NO_SANDBOX = "dangerFullAccess"
 
 
 def _approval_bypass_active(scope: _Scope) -> bool:
@@ -575,7 +620,8 @@ def _approval_bypass_active(scope: _Scope) -> bool:
 def _policy_lines(policy: dict, scope: _Scope) -> list[str]:
     """把 codex 报告的实际策略翻译成用户可读的几行。"""
     sandbox = policy.get("sandbox")
-    sandbox_text = _SANDBOX_LABELS.get(sandbox, str(sandbox))
+    no_sandbox = sandbox == _NO_SANDBOX
+    sandbox_text = "⚠️ 无沙箱：可读写任意文件" if no_sandbox else _SANDBOX_LABELS.get(sandbox, str(sandbox))
     if sandbox == "workspaceWrite":
         writable = ["cwd"] + [f"`{root}`" for root in policy.get("writable_roots") or []]
         if policy.get("slash_tmp_writable"):
@@ -583,12 +629,22 @@ def _policy_lines(policy: dict, scope: _Scope) -> list[str]:
         if policy.get("tmpdir_writable"):
             writable.append("$TMPDIR")
         sandbox_text += f"（可写：{'、'.join(writable)}）"
-    if sandbox != "dangerFullAccess":
+    if not no_sandbox:
         sandbox_text += "；读取不受限"
+    if no_sandbox:
+        network_text = "⚠️ 不受限（无沙箱）"
+    elif policy.get("network_access"):
+        network_text = "开启"
+    else:
+        network_text = "关闭"
 
     approval = policy.get("approval_policy")
     approval_key = approval if isinstance(approval, str) else None
-    approval_text = f"`{approval}` — " + _APPROVAL_LABELS.get(approval_key, "见 codex 配置")
+    if approval_key == "never" and no_sandbox:
+        approval_label = "从不请求审批，所有操作直接执行"
+    else:
+        approval_label = _APPROVAL_LABELS.get(approval_key, "见 codex 配置")
+    approval_text = f"`{approval}` — {approval_label}"
     if approval_key != "never":
         if _approval_bypass_active(scope):
             approval_text += "；越权请求由 Hermes 自动批准（approvals.mode=off / yolo）"
@@ -597,10 +653,12 @@ def _policy_lines(policy: dict, scope: _Scope) -> list[str]:
         else:
             approval_text += "；当前入口没有审批界面，越权请求会被自动拒绝"
 
-    return [
-        f"  • 权限档：`{policy.get('permission_profile') or '未知'}`",
+    lines = []
+    if policy.get("permission_profile"):  # 按线程指定 sandbox 时 codex 不报告权限档
+        lines.append(f"  • 权限档：`{policy['permission_profile']}`")
+    return lines + [
         f"  • 沙箱：{sandbox_text}",
-        f"  • 网络：{'开启' if policy.get('network_access') else '关闭'}",
+        f"  • 网络：{network_text}",
         f"  • 审批：{approval_text}",
     ]
 
@@ -610,7 +668,10 @@ def _session_lines(mode: CodexMode, scope: _Scope) -> list[str]:
     policy = session.effective_policy if session is not None and not session.closed else None
     if policy is None:
         return ["  • codex 线程：未启动（下一条消息时启动），权限以届时 codex 报告为准"]
-    lines = [f"  • codex 线程 cwd：`{session.cwd}`", "  **实际生效权限（codex 报告）**"]
+    lines = [f"  • codex 线程 cwd：`{session.cwd}`"]
+    if policy.get("sandbox") == _NO_SANDBOX:
+        lines.append(f"  {_NO_SANDBOX_WARNING}")
+    lines.append("  **实际生效权限（codex 报告）**")
     return lines + _policy_lines(policy, scope)
 
 
@@ -621,6 +682,7 @@ def _describe(scope: _Scope, mode: Optional[CodexMode]) -> str:
     lines = [
         f"🟢 当前会话 `{session_label}` 已开启 Codex 模式（codex app-server）",
         f"  • cwd：`{mode.cwd}`" if mode.cwd else "  • cwd：会话默认工作目录",
+        f"  • 沙箱档位：`{mode.sandbox}`（{_SANDBOX_MODE_LABELS[mode.sandbox]}）",
     ]
     if mode.owner is not None:
         lines.append(f"  • 开启者：`{mode.owner[0]}:{mode.owner[1]}`（共享会话中仅其消息走 Codex）")
@@ -657,21 +719,30 @@ class _EnablePlan:
             return f"❌ 无法开启 Codex 模式：codex app-server 启动失败：{error}"
         self.mode.codex_session = self.session
         _store_mode(self.mode)
-        if self.replaced is not self.session:
-            _close_if_idle(self.replaced)  # cwd 变了：旧线程作废
+        if self.replaced is not None:
+            _close_if_idle(self.replaced)  # cwd / 沙箱档位变了：旧线程作废
 
-        lines = [
-            f"✅ 已开启 Codex 模式（codex CLI {self.version}）",
+        policy = self.session.effective_policy or {}
+        lines = [f"✅ 已开启 Codex 模式（codex CLI {self.version}）"]
+        if policy.get("sandbox") == _NO_SANDBOX:
+            lines.append(_NO_SANDBOX_WARNING)
+        lines += [
             "下一条消息起整轮由本地 `codex app-server` 执行，结果桥接回本会话；"
-            "模型、鉴权、sandbox、MCP 使用本机 ~/.codex 现有配置。",
+            "模型、鉴权、MCP 使用本机 ~/.codex 现有配置。",
             f"  • cwd：`{self.session.cwd}`",
+            f"  • 沙箱档位：`{self.mode.sandbox}`（{_SANDBOX_MODE_LABELS[self.mode.sandbox]}）",
             "  • Codex 线程从空白上下文开始（看不到此前的 Hermes 对话），"
             "之后本会话内多轮复用同一个线程；memory / delegate_task 等 Hermes 工具在该模式下不可用。",
         ]
         if self.scope.owner is not None:
             lines.append("  • 共享会话（群聊）中只有你的消息走 Codex，其他成员仍由 Hermes 处理。")
+        if self.replaced is not None:
+            lines.append(
+                "  • 已切换 cwd 或沙箱档位：已重开 codex 线程，之前的 codex 上下文不再保留"
+                + ("" if self.replaced.closed else "（旧线程在当前轮结束后关闭）")
+            )
         lines.append("**实际生效权限（codex 报告）**")
-        lines += _policy_lines(self.session.effective_policy or {}, self.scope)
+        lines += _policy_lines(policy, self.scope)
         lines.append("发送 /codex off 恢复 Hermes 默认 loop。")
         return "\n".join(lines)
 
@@ -689,6 +760,10 @@ def _plan_enable(scope: _Scope, options: dict[str, str]):
         cwd, err = _resolve_cwd(options["cwd"])
         if err:
             return err
+    # 不沿用：每次 on 未指定 sandbox 都回到默认档位
+    sandbox_mode = (options.get("sandbox") or DEFAULT_SANDBOX_MODE).strip().lower()
+    if sandbox_mode not in SANDBOX_MODES:
+        return f"❌ 不支持的 sandbox：`{sandbox_mode}`，可选 read / network / full（默认 network）"
     existing = _lookup_mode(scope)
     if existing is not None and existing.owner not in (None, scope.owner):
         return "❌ 当前会话的 Codex 模式由其他成员开启，请先由其 /codex off。"
@@ -697,6 +772,7 @@ def _plan_enable(scope: _Scope, options: dict[str, str]):
         cwd=cwd or (existing.cwd if existing else None),
         owner=scope.owner,
         gateway_session_key=scope.gateway_session_key,
+        sandbox=sandbox_mode,
         codex_session=existing.codex_session if existing else None,
         owner_agent=existing.owner_agent if existing else None,
     )
@@ -705,13 +781,20 @@ def _plan_enable(scope: _Scope, options: dict[str, str]):
     from agent.transports.codex_app_server_session import CodexAppServerSession
 
     thread_cwd = mode.cwd or str(resolve_agent_cwd())
+    params = thread_params_for(sandbox_mode)
     current = mode.codex_session
-    if current is not None and not current.closed and current.cwd == thread_cwd:
+    if (
+        current is not None
+        and not current.closed
+        and current.cwd == thread_cwd
+        and current.thread_start_params == params
+    ):
         return _EnablePlan(scope, mode, current, started_here=False, version=version)
     # 回调在第一轮由 _bind_codex_session 绑定到 agent 线程上
-    session = CodexAppServerSession(cwd=thread_cwd)
+    session = CodexAppServerSession(cwd=thread_cwd, thread_start_params=params)
+    replaced = current if current is not None and not current.closed else None
     return _EnablePlan(
-        scope, mode, session, started_here=True, version=version, replaced=current,
+        scope, mode, session, started_here=True, version=version, replaced=replaced,
     )
 
 
@@ -725,7 +808,7 @@ def codex_command(raw_args: str = ""):
         return _help_text()
     if sub not in ("on", "off", "status"):
         return f"未知子命令：`{sub}`\n\n{_help_text()}"
-    unknown = extras + [k for k in options if not (sub == "on" and k == "cwd")]
+    unknown = extras + [k for k in options if not (sub == "on" and k in ("cwd", "sandbox"))]
     if unknown:
         return f"❌ 不支持的参数：{', '.join(unknown)}\n\n{_help_text()}"
 
@@ -766,7 +849,7 @@ def register(ctx):
             "当前会话切换到本地 Codex CLI（codex app-server）执行整轮对话，"
             "会话级开关，不修改任何配置"
         ),
-        args_hint="on [cwd=DIR] | off | status | help",
+        args_hint="on [cwd=DIR] [sandbox=read|network|full] | off | status | help",
     )
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
     ctx.register_hook("pre_gateway_dispatch", on_pre_gateway_dispatch)

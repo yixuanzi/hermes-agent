@@ -961,3 +961,17 @@ def test_read_only_policy_has_no_writable_tmp():
     })
     assert policy["sandbox"] == "readOnly"
     assert policy["slash_tmp_writable"] is False and policy["tmpdir_writable"] is False
+
+
+def test_thread_start_params_are_sent_with_session_cwd():
+    client = FakeClient()
+    session = CodexAppServerSession(
+        cwd="/work",
+        client_factory=lambda **kw: client,
+        thread_start_params={"sandbox": "danger-full-access", "approvalPolicy": "never",
+                             "cwd": "/ignored"},
+    )
+    session.ensure_started()
+    (method, params), = [r for r in client.requests if r[0] == "thread/start"]
+    assert params == {"sandbox": "danger-full-access", "approvalPolicy": "never", "cwd": "/work"}
+    assert session.thread_start_params["sandbox"] == "danger-full-access"

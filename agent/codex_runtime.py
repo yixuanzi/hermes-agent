@@ -684,11 +684,15 @@ def _drop_turn_input_echo(
     return projected
 
 
-def attach_codex_app_server_session(agent, session=None, *, cwd=None):
+def attach_codex_app_server_session(
+    agent, session=None, *, cwd=None, thread_start_params=None
+):
     """Bind a codex app-server session to ``agent`` and return it.
 
     With ``session=None`` a new (not yet spawned) session is created in
-    ``cwd`` (default: the agent's session cwd). An existing session is
+    ``cwd`` (default: the agent's session cwd), passing
+    ``thread_start_params`` (per-thread sandbox/approval overrides) through
+    to thread/start. An existing session is
     re-bound instead, so a codex thread can survive an AIAgent rebuild within
     the same Hermes session. Either way the approval and display hooks are
     built for ``agent`` on the calling thread — call this from the agent's
@@ -751,6 +755,7 @@ def attach_codex_app_server_session(agent, session=None, *, cwd=None):
             approval_callback=approval_callback,
             request_routing=routing,
             on_event=on_event,
+            thread_start_params=thread_start_params,
         )
     else:
         session.rebind(

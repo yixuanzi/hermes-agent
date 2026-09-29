@@ -63,8 +63,25 @@ def _isolated(monkeypatch):
     from agent.transports.codex_app_server_session import CodexAppServerSession
 
     def _fake_start(self):
+        # 形状与 codex 0.144 实测的 thread/start 响应一致
+        from agent.transports.codex_app_server_session import _effective_policy_from_thread_start
+
+        params = self.thread_start_params
+        kind = {"read-only": "readOnly", "workspace-write": "workspaceWrite",
+                "danger-full-access": "dangerFullAccess"}.get(params.get("sandbox"))
+        if kind is None:
+            self._effective_policy = dict(FAKE_POLICY)
+        else:
+            sandbox = {"type": kind}
+            if kind != "dangerFullAccess":
+                ww = (params.get("config") or {}).get("sandbox_workspace_write") or {}
+                sandbox["networkAccess"] = bool(ww.get("network_access"))
+            if kind == "workspaceWrite":
+                sandbox.update(writableRoots=[], excludeSlashTmp=False, excludeTmpdirEnvVar=False)
+            self._effective_policy = _effective_policy_from_thread_start(
+                {"approvalPolicy": params.get("approvalPolicy", "on-request"), "sandbox": sandbox}
+            )
         self._thread_id = "thread-test"
-        self._effective_policy = dict(FAKE_POLICY)
         return self._thread_id
 
     monkeypatch.setattr(CodexAppServerSession, "ensure_started", _fake_start)
@@ -101,8 +118,10 @@ def test_no_args_shows_full_help_without_a_session(monkeypatch):
     )
     text = codex_cmd.codex_command("")
     assert text == codex_cmd.codex_command("help")
-    for fragment in ("/codex on [cwd=DIR]", "/codex off", "/codex status", "/codex help",
-                     "cwd=DIR", "默认", "terminal.cwd", "每个会话默认关闭"):
+    for fragment in ("/codex on [cwd=DIR] [sandbox=read|network|full]", "/codex off",
+                     "/codex status", "/codex help", "cwd=DIR", "terminal.cwd",
+                     "sandbox=read|network|full", "默认 `network`", "`full`：⚠️ 无沙箱",
+                     "每个会话默认关闭"):
         assert fragment in text
     assert "未知子命令" in codex_cmd.codex_command("maybe")
     assert "不支持的参数" in codex_cmd.codex_command("off cwd=/tmp")
@@ -426,11 +445,13 @@ def test_on_reports_codex_effective_policy_and_prestarts_thread(monkeypatch):
     agent = FakeAgent("sess-cli")
     _use_cli(monkeypatch, agent)
     text = codex_cmd.codex_command("on")
-    for fragment in ("权限档：`:workspace`", "工作区可写（可写：cwd、/tmp、$TMPDIR）",
-                     "读取不受限", "网络：关闭", "`on-request`", "CLI 中弹出 Hermes 审批"):
+    for fragment in ("沙箱档位：`network`", "工作区可写（可写：cwd、/tmp、$TMPDIR）",
+                     "读取不受限", "网络：开启", "`on-request`", "CLI 中弹出 Hermes 审批"):
         assert fragment in text, fragment
+    assert "无沙箱" not in text
     session = codex_cmd.get_mode("sess-cli").codex_session
     assert session.effective_policy["sandbox"] == "workspaceWrite"
+    assert session.thread_start_params == codex_cmd.SANDBOX_MODES["network"]
     _turn(agent)  # 第一轮直接复用提前启动的线程
     assert agent._codex_session is session
     assert "实际生效权限" in codex_cmd.codex_command("status")
@@ -492,3 +513,54 @@ def test_on_inside_event_loop_starts_codex_off_loop(monkeypatch):
     text = asyncio.run(_gateway_turn())
     assert "已开启 Codex 模式" in text and "自动拒绝" in text
     assert start_threads and start_threads[0] is not threading.main_thread()
+
+
+# ------------------------------------------------------------ sandbox modes ----
+def test_full_sandbox_warns_on_enable_and_status(monkeypatch):
+    agent = FakeAgent("sess-cli")
+    _use_cli(monkeypatch, agent)
+    text = codex_cmd.codex_command("on sandbox=full")
+    assert text.splitlines()[1].startswith("⚠️ **无沙箱**")
+    for fragment in ("沙箱档位：`full`", "沙箱：⚠️ 无沙箱：可读写任意文件",
+                     "网络：⚠️ 不受限（无沙箱）", "`never` — 从不请求审批，所有操作直接执行"):
+        assert fragment in text, fragment
+    assert "网络：关闭" not in text and "权限档" not in text
+    status = codex_cmd.codex_command("status")
+    assert "⚠️ **无沙箱**" in status and "网络：⚠️ 不受限（无沙箱）" in status
+    assert codex_cmd.get_mode("sess-cli").codex_session.thread_start_params == {
+        "sandbox": "danger-full-access", "approvalPolicy": "never",
+    }
+
+
+def test_read_sandbox_and_invalid_value(monkeypatch):
+    _use_cli(monkeypatch, FakeAgent("sess-cli"))
+    assert "不支持的 sandbox" in codex_cmd.codex_command("on sandbox=wide")
+    assert codex_cmd.get_mode("sess-cli") is None
+    text = codex_cmd.codex_command("on sandbox=READ")
+    assert "沙箱档位：`read`" in text and "只读：不能写任何文件" in text and "网络：关闭" in text
+
+
+def test_sandbox_switch_reopens_thread_and_default_is_not_sticky(monkeypatch):
+    agent = FakeAgent("sess-cli")
+    _use_cli(monkeypatch, agent)
+    codex_cmd.codex_command("on sandbox=full")
+    _turn(agent)
+    full_thread = agent._codex_session
+
+    text = codex_cmd.codex_command("on")  # 不带 sandbox → 恢复默认 network
+    assert "沙箱档位：`network`" in text and "已重开 codex 线程" in text
+    assert full_thread.closed
+    _turn(agent)
+    assert agent._codex_session is not full_thread
+    assert agent._codex_session.thread_start_params == codex_cmd.SANDBOX_MODES["network"]
+
+
+def test_same_sandbox_on_rebuilt_agent_keeps_thread(monkeypatch):
+    first = FakeAgent("sess-gw")
+    _use_cli(monkeypatch, first)
+    codex_cmd.codex_command("on sandbox=read")
+    _turn(first)
+    thread = first._codex_session
+    rebuilt = FakeAgent("sess-gw")
+    _turn(rebuilt)
+    assert rebuilt._codex_session is thread
