@@ -66,11 +66,13 @@ reset_current_user_env_identity(tok)
 
 # 6/7. 注册接口冒烟
 class FakeCtx:
-    def __init__(self): self.cmds = {}; self.tools = []
+    def __init__(self): self.cmds = {}; self.tools = []; self.hooks = []
     def register_command(self, name, handler, description="", args_hint=""):
         self.cmds[name] = (handler, description, args_hint)
     def register_tool(self, name, toolset="", schema=None, handler=None, **kw):
         self.tools.append(name)
+    def register_hook(self, name, callback):
+        self.hooks.append(name)
 
 ctx = FakeCtx()
 userenv_cmd.register(ctx)

@@ -16,6 +16,17 @@ from tools.user_env_runtime import (  # noqa: E402
 )
 
 
+FAKE_POLICY = {
+    "permission_profile": ":workspace",
+    "approval_policy": "on-request",
+    "sandbox": "workspaceWrite",
+    "network_access": False,
+    "writable_roots": [],
+    "slash_tmp_writable": True,
+    "tmpdir_writable": True,
+}
+
+
 class FakeAgent:
     def __init__(self, session_id="sess-1", api_mode="codex_responses"):
         self.session_id = session_id
@@ -47,6 +58,16 @@ def _isolated(monkeypatch):
     )
     monkeypatch.setattr(codex_cmd, "_codex_binary", lambda: (True, "0.144.1"))
     monkeypatch.setattr(codex_cmd, "_rbac_role", lambda platform, uid: None)
+    monkeypatch.setattr(codex_cmd, "_approval_bypass_active", lambda scope: False)
+    # /codex on 会提前启动 codex 线程：测试里不 spawn 真实 codex
+    from agent.transports.codex_app_server_session import CodexAppServerSession
+
+    def _fake_start(self):
+        self._thread_id = "thread-test"
+        self._effective_policy = dict(FAKE_POLICY)
+        return self._thread_id
+
+    monkeypatch.setattr(CodexAppServerSession, "ensure_started", _fake_start)
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
     yield published
     codex_cmd._gateway_dispatch.set(None)
@@ -70,6 +91,19 @@ def _turn(agent, **kwargs):
 # ------------------------------------------------------------ command ----
 def test_help_unknown_and_bad_args():
     assert "/codex on" in codex_cmd.codex_command("help")
+
+
+def test_no_args_shows_full_help_without_a_session(monkeypatch):
+    import hermes_cli.plugins as plugins_mod
+
+    monkeypatch.setattr(
+        plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None)
+    )
+    text = codex_cmd.codex_command("")
+    assert text == codex_cmd.codex_command("help")
+    for fragment in ("/codex on [cwd=DIR]", "/codex off", "/codex status", "/codex help",
+                     "cwd=DIR", "默认", "terminal.cwd", "每个会话默认关闭"):
+        assert fragment in text
     assert "未知子命令" in codex_cmd.codex_command("maybe")
     assert "不支持的参数" in codex_cmd.codex_command("off cwd=/tmp")
     assert "不支持的参数" in codex_cmd.codex_command("on extra")
@@ -100,7 +134,7 @@ def test_cli_on_status_off(monkeypatch, tmp_path):
     assert "已关闭" in codex_cmd.codex_command("off")
     assert codex_cmd.get_mode("sess-cli") is None
     assert "未开启" in codex_cmd.codex_command("off")
-    assert "Hermes 默认 loop" in codex_cmd.codex_command("")
+    assert "Hermes 默认 loop" in codex_cmd.codex_command("status")
 
 
 def test_on_rejects_missing_cwd_and_missing_codex(monkeypatch, tmp_path):
@@ -385,3 +419,76 @@ def test_session_finalize_drops_state(monkeypatch):
     codex_cmd.on_session_finalize(session_id="sess-cli")
     assert codex_cmd.get_mode("sess-cli") is None
     assert agent._codex_session.closed
+
+
+# ------------------------------------------------------------ effective policy ----
+def test_on_reports_codex_effective_policy_and_prestarts_thread(monkeypatch):
+    agent = FakeAgent("sess-cli")
+    _use_cli(monkeypatch, agent)
+    text = codex_cmd.codex_command("on")
+    for fragment in ("权限档：`:workspace`", "工作区可写（可写：cwd、/tmp、$TMPDIR）",
+                     "读取不受限", "网络：关闭", "`on-request`", "CLI 中弹出 Hermes 审批"):
+        assert fragment in text, fragment
+    session = codex_cmd.get_mode("sess-cli").codex_session
+    assert session.effective_policy["sandbox"] == "workspaceWrite"
+    _turn(agent)  # 第一轮直接复用提前启动的线程
+    assert agent._codex_session is session
+    assert "实际生效权限" in codex_cmd.codex_command("status")
+
+
+def test_policy_lines_per_surface_and_bypass(monkeypatch):
+    read_only = dict(FAKE_POLICY, sandbox="readOnly", permission_profile=":read-only",
+                     slash_tmp_writable=False, tmpdir_writable=False)
+    gateway = codex_cmd._Scope("gateway", "s", gateway_session_key="k", owner=("feishu", "u"))
+    lines = "\n".join(codex_cmd._policy_lines(read_only, gateway))
+    assert "只读：不能写任何文件" in lines and "自动拒绝" in lines
+    monkeypatch.setattr(codex_cmd, "_approval_bypass_active", lambda scope: True)
+    assert "自动批准" in "\n".join(codex_cmd._policy_lines(read_only, gateway))
+
+
+def test_on_start_failure_does_not_enable(monkeypatch):
+    from agent.transports.codex_app_server_session import CodexAppServerSession
+
+    def _boom(self):
+        raise RuntimeError("config error in ~/.codex/config.toml")
+
+    monkeypatch.setattr(CodexAppServerSession, "ensure_started", _boom)
+    _use_cli(monkeypatch, FakeAgent("sess-cli"))
+    text = codex_cmd.codex_command("on")
+    assert "启动失败" in text and "config error" in text
+    assert codex_cmd.get_mode("sess-cli") is None
+
+
+def test_status_shows_unstarted_thread_after_retirement(monkeypatch):
+    agent = FakeAgent("sess-cli")
+    _use_cli(monkeypatch, agent)
+    codex_cmd.codex_command("on")
+    codex_cmd.get_mode("sess-cli").codex_session.close()
+    assert "未启动" in codex_cmd.codex_command("status")
+
+
+def test_on_inside_event_loop_starts_codex_off_loop(monkeypatch):
+    import asyncio
+    import threading
+
+    import hermes_cli.plugins as plugins_mod
+    from agent.transports.codex_app_server_session import CodexAppServerSession
+
+    monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None))
+    start_threads = []
+    original = CodexAppServerSession.ensure_started
+
+    def _record(self):
+        start_threads.append(threading.current_thread())
+        return original(self)
+
+    monkeypatch.setattr(CodexAppServerSession, "ensure_started", _record)
+
+    async def _gateway_turn():
+        result = _gateway_command(FakeRunner("sess-gw"), "on")
+        assert asyncio.iscoroutine(result)
+        return await result
+
+    text = asyncio.run(_gateway_turn())
+    assert "已开启 Codex 模式" in text and "自动拒绝" in text
+    assert start_threads and start_threads[0] is not threading.main_thread()

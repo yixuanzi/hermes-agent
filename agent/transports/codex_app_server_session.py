@@ -52,6 +52,10 @@ _STDERR_TAIL_LINES = 12
 # Permission profile mapping mirrors the docstring in PR proposal:
 # Hermes' tools.terminal.security_mode → Codex's permissions profile id.
 # Defaults if config is missing → workspace-write (matches Codex's own default).
+# NOTE: this is Hermes' *requested* profile only — it is not sent on
+# thread/start (see ensure_started). The profile, sandbox and approval policy
+# codex actually applies come back in the thread/start response
+# (``CodexAppServerSession.effective_policy``).
 _HERMES_TO_CODEX_PERMISSION_PROFILE = {
     "auto": "workspace-write",
     "approval-required": "read-only-with-approval",
@@ -251,6 +255,24 @@ def _classify_oauth_failure(*parts: str) -> Optional[str]:
     return None
 
 
+def _effective_policy_from_thread_start(result: dict) -> dict:
+    """Normalize the policy fields codex reports on a thread/start response."""
+    sandbox = result.get("sandbox") if isinstance(result.get("sandbox"), dict) else {}
+    profile = result.get("activePermissionProfile")
+    profile_id = profile.get("id") if isinstance(profile, dict) else profile
+    return {
+        "permission_profile": profile_id,
+        "approval_policy": result.get("approvalPolicy"),
+        "sandbox": sandbox.get("type"),
+        "network_access": sandbox.get("networkAccess"),
+        "writable_roots": list(sandbox.get("writableRoots") or []),
+        "slash_tmp_writable": sandbox.get("type") == "workspaceWrite"
+        and not sandbox.get("excludeSlashTmp", False),
+        "tmpdir_writable": sandbox.get("type") == "workspaceWrite"
+        and not sandbox.get("excludeTmpdirEnvVar", False),
+    }
+
+
 @dataclass
 class _ServerRequestRouting:
     """Default policies for codex-side approval requests when no interactive
@@ -309,6 +331,8 @@ class CodexAppServerSession:
         # to surface a real summary in the approval prompt (quirk #4).
         self._pending_file_changes: dict[str, str] = {}
         self._closed = False
+        # Sandbox / approval policy codex reported on thread/start.
+        self._effective_policy: Optional[dict] = None
 
     @property
     def cwd(self) -> str:
@@ -317,6 +341,16 @@ class CodexAppServerSession:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def effective_policy(self) -> Optional[dict]:
+        """What codex actually applies to this thread (None until started).
+
+        Keys: permission_profile, approval_policy, sandbox, network_access,
+        writable_roots, slash_tmp_writable, tmpdir_writable. Resolved by codex
+        from ~/.codex/config.toml and the cwd's project trust, not by Hermes.
+        """
+        return dict(self._effective_policy) if self._effective_policy else None
 
     @property
     def turn_active(self) -> bool:
@@ -394,11 +428,17 @@ class CodexAppServerSession:
                 ),
             )
         self._thread_id = thread_id
+        self._effective_policy = _effective_policy_from_thread_start(result)
+        policy = self._effective_policy
         logger.info(
-            "codex app-server thread started: id=%s profile=%s cwd=%s",
+            "codex app-server thread started: id=%s cwd=%s profile=%s "
+            "sandbox=%s approval=%s network=%s",
             self._thread_id[:8],
-            self._permission_profile,
             self._cwd,
+            policy["permission_profile"],
+            policy["sandbox"],
+            policy["approval_policy"],
+            policy["network_access"],
         )
         return self._thread_id
 

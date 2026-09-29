@@ -917,3 +917,47 @@ def test_session_exposes_cwd_closed_turn_state_and_rebinds_hooks(tmp_path):
 
     session.close()
     assert session.closed is True
+
+
+def test_ensure_started_records_codex_effective_policy():
+    client = FakeClient()
+    client._request_handler = lambda method, params: (
+        {
+            "thread": {"id": "thread-policy"},
+            "approvalPolicy": "on-request",
+            "sandbox": {
+                "type": "workspaceWrite",
+                "writableRoots": ["/data"],
+                "networkAccess": False,
+                "excludeTmpdirEnvVar": True,
+                "excludeSlashTmp": False,
+            },
+            "activePermissionProfile": {"id": ":workspace", "extends": None},
+        }
+        if method == "thread/start"
+        else {}
+    )
+    session = make_session(client)
+    assert session.effective_policy is None
+    session.ensure_started()
+    assert session.effective_policy == {
+        "permission_profile": ":workspace",
+        "approval_policy": "on-request",
+        "sandbox": "workspaceWrite",
+        "network_access": False,
+        "writable_roots": ["/data"],
+        "slash_tmp_writable": True,
+        "tmpdir_writable": False,
+    }
+
+
+def test_read_only_policy_has_no_writable_tmp():
+    from agent.transports.codex_app_server_session import _effective_policy_from_thread_start
+
+    policy = _effective_policy_from_thread_start({
+        "approvalPolicy": "on-request",
+        "sandbox": {"type": "readOnly", "networkAccess": False},
+        "activePermissionProfile": {"id": ":read-only"},
+    })
+    assert policy["sandbox"] == "readOnly"
+    assert policy["slash_tmp_writable"] is False and policy["tmpdir_writable"] is False
