@@ -2783,8 +2783,14 @@ class FeishuAdapter(BasePlatformAdapter):
         chat_type: Optional[str],
     ) -> bool:
         del chat_type
+        # Same lightweight-embedder tolerance as the foreground router: an
+        # adapter shell built without ``__init__`` has no pending remote
+        # interactions, so there is nothing for this text to answer.
+        interactions = getattr(self, "_delegate_interactions", None)
+        if not interactions:
+            return False
         candidate = None
-        for state in self._delegate_interactions.values():
+        for state in interactions.values():
             if state.get("kind") != "clarify" or not state.get("awaiting_text") or state.get("resolved"):
                 continue
             if str(state.get("chat_id") or "") != str(chat_id or ""):
