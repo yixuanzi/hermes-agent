@@ -179,6 +179,15 @@ _TRANSIENT_UPDATE_CODES = frozenset({200810, 300120})
 #: How many times one area re-attempts a failed render before giving up.
 _MAX_RENDER_RETRIES = 3
 
+#: A card entity binds to exactly one message.  Delivering one that is already
+#: bound fails with 230099 whose detail carries ErrCode 200780 ("card binding
+#: biz count over limit") — which proves an earlier delivery landed.
+_CARD_ALREADY_BOUND_RE = re.compile(r"\b200780\b")
+
+#: Card entities tried per delivery.  The second is a fresh entity, never the
+#: first one re-sent, because the first may already be bound.
+_MAX_DELIVERY_ENTITIES = 2
+
 #: How long a route stays on the legacy path after a CardKit failure.
 FAILURE_COOLDOWN_SECONDS = 300.0
 
@@ -970,7 +979,11 @@ class FeishuCardOutputManager:
             title=title or self.title_for(owner),
             chat_id=str(chat_id or turn.get("chat_id") or ""),
             metadata=(dict(metadata) if metadata else turn.get("metadata")),
-            reply_to=reply_to or turn.get("reply_to"),
+            # A block handle is what the previous send returned (streaming
+            # chains chunks that way), not a message the reply API can find.
+            reply_to=(
+                None if str(reply_to or "").startswith(BLOCK_ID_PREFIX) else reply_to
+            ) or turn.get("reply_to"),
         )
         session.lock = asyncio.Lock()
         created = await self._create_and_deliver(session)
@@ -981,20 +994,52 @@ class FeishuCardOutputManager:
         return session
 
     async def _create_and_deliver(self, session: FeishuCardSession) -> bool:
-        card_id = await self._create_card(session, minimal=False)
-        if not card_id:
-            card_id = await self._create_card(session, minimal=True)
+        for attempt in range(_MAX_DELIVERY_ENTITIES):
+            if attempt:
+                session.rendered_trace = ""
+                session.rendered_body = ""
+            card_id = await self._create_card(session, minimal=False)
             if not card_id:
-                return False
-            session.rendered_trace = ""
-            session.rendered_body = ""
-        session.card_id = str(card_id)
+                card_id = await self._create_card(session, minimal=True)
+                if not card_id:
+                    return False
+                session.rendered_trace = ""
+                session.rendered_body = ""
+            session.card_id = str(card_id)
+            if await self._deliver_entity(session, first_entity=not attempt):
+                return True
+            if attempt + 1 < _MAX_DELIVERY_ENTITIES:
+                logger.info(
+                    "[Feishu] retrying card delivery with a fresh card entity (was %s)",
+                    session.card_id,
+                )
+        return False
 
+    async def _deliver_entity(
+        self, session: FeishuCardSession, *, first_entity: bool = True
+    ) -> bool:
+        """Deliver ``session.card_id``; ``True`` once it is known to be on screen.
+
+        A rejection is not always a failure.  "Already bound" proves an earlier
+        delivery of this entity landed, and an internal error on the reply that
+        was creating the turn's topic counts as landed when the topic exists
+        afterwards — in both cases re-sending would only strand an empty card
+        next to this one, so the session adopts the card as delivered.
+
+        The topic rule holds for the first entity only.  Once one card has
+        already failed, a topic that appears could hold either card, and
+        adopting the wrong one would stream the answer into a card nobody can
+        see; declining instead sends the answer to the topic as text.
+        """
+        adapter = self._adapter
+        root = str((session.metadata or {}).get("thread_id") or "")
+        was_pending = adapter._auto_thread_is_pending(root)
         payload = json.dumps(
             {"type": "card", "data": {"card_id": session.card_id}}, ensure_ascii=False
         )
+        response: Any = None
         try:
-            response = await self._adapter._feishu_send_with_retry(
+            response = await adapter._feishu_send_with_retry(
                 chat_id=session.chat_id,
                 msg_type="interactive",
                 payload=payload,
@@ -1002,18 +1047,42 @@ class FeishuCardOutputManager:
                 metadata=session.metadata,
             )
         except Exception as exc:
-            logger.warning("[Feishu] card delivery raised: %s", exc, exc_info=True)
-            return False
-        if not self._adapter._response_succeeded(response):
             logger.warning(
-                "[Feishu] card delivery rejected: [%s] %s",
-                getattr(response, "code", "?"), getattr(response, "msg", ""),
+                "[Feishu] card delivery raised (card=%s reply_to=%s): %s",
+                session.card_id, session.reply_to, exc, exc_info=True,
             )
-            return False
-        session.message_id = str(
-            self._adapter._extract_response_field(response, "message_id") or ""
+        else:
+            if adapter._response_succeeded(response):
+                session.message_id = str(
+                    adapter._extract_response_field(response, "message_id") or ""
+                )
+                return True
+            logger.warning(
+                "[Feishu] card delivery rejected (card=%s reply_to=%s thread=%s): %s",
+                session.card_id,
+                session.reply_to,
+                root or None,
+                adapter._feishu_response_diag(response),
+            )
+        already_bound = response is not None and bool(
+            _CARD_ALREADY_BOUND_RE.search(str(getattr(response, "msg", "") or ""))
         )
-        return True
+        topic_appeared = (
+            first_entity
+            and was_pending
+            and adapter._send_outcome_unknown(response)
+            and adapter._auto_thread_is_established(root)
+        )
+        if already_bound or topic_appeared:
+            logger.warning(
+                "[Feishu] adopting card %s as delivered (%s)",
+                session.card_id,
+                "entity already bound" if already_bound
+                else f"topic now exists under {root}",
+            )
+            session.message_id = ""
+            return True
+        return False
 
     async def _create_card(self, session: FeishuCardSession, *, minimal: bool) -> str:
         card = build_card_json(

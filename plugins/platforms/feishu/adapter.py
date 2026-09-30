@@ -294,6 +294,20 @@ async def _read_limited_feishu_webhook_body(request: Any, max_bytes: int) -> byt
 
 _FEISHU_BOT_MSG_TRACK_SIZE = 512                   # LRU size for tracking sent message IDs
 _FEISHU_REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # reply target withdrawn/missing → create fallback
+#: Replies that say a topic can never exist under this root: the root was
+#: withdrawn or is missing, the group does not allow topic replies (230071),
+#: or the root is an aggregated message (230072).  Only these justify
+#: abandoning the prospective topic on the first failure; every other code
+#: (rate limits, card validation, internal errors) says nothing about topics.
+_FEISHU_AUTO_THREAD_UNSUPPORTED_CODES = _FEISHU_REPLY_FALLBACK_CODES | frozenset({230071, 230072})
+#: Feishu's generic internal error.  It has been observed on a topic-creating
+#: card reply that Feishu had in fact bound (a follow-up with the same card
+#: returned "binding over limit"), so the outcome is unknown, not a failure.
+_FEISHU_OUTCOME_UNKNOWN_CODES = frozenset({2200})
+#: In-topic attempts that may fail, with no topic appearing under the root,
+#: before one flat message is sent instead.  Two, so a single transient error
+#: is retried in place rather than costing the whole turn its topic.
+_FEISHU_AUTO_THREAD_SOFT_FAILURE_LIMIT = 2
 #: A topic (``omt_*``) accepts text and cards as ``receive_id_type=thread_id``
 #: but rejects an attachment keyed that way with a bare field-validation
 #: error.  The reply API places the same upload inside the topic fine, so
@@ -1955,6 +1969,9 @@ class FeishuAdapter(BasePlatformAdapter):
         # creation after the one-shot fallback.
         self._pending_auto_thread_roots: "OrderedDict[str, None]" = OrderedDict()
         self._failed_auto_thread_roots: "OrderedDict[str, None]" = OrderedDict()
+        # Pending roots whose in-topic attempts failed without a topic
+        # appearing, counted so the flat fallback waits for a second strike.
+        self._auto_thread_soft_failures: "OrderedDict[str, int]" = OrderedDict()
         # Card output.  The manager owns one live card per route and seals
         # it whenever the speaker changes (main agent ↔ delegated remote
         # agent), which is what gives every a2a_delegate run its own card.
@@ -2018,6 +2035,7 @@ class FeishuAdapter(BasePlatformAdapter):
         pending = self._auto_thread_state("_pending_auto_thread_roots")
         failed = self._auto_thread_state("_failed_auto_thread_roots")
         failed.pop(root_message_id, None)
+        self._auto_thread_state("_auto_thread_soft_failures").pop(root_message_id, None)
         pending[root_message_id] = None
         pending.move_to_end(root_message_id)
         self._trim_oldest_dict_entries(pending, self.CHAT_LOCK_MAX_SIZE)
@@ -2025,13 +2043,126 @@ class FeishuAdapter(BasePlatformAdapter):
     def _mark_auto_thread_established(self, root_message_id: str) -> None:
         self._auto_thread_state("_pending_auto_thread_roots").pop(root_message_id, None)
         self._auto_thread_state("_failed_auto_thread_roots").pop(root_message_id, None)
+        self._auto_thread_state("_auto_thread_soft_failures").pop(root_message_id, None)
 
     def _mark_auto_thread_failed(self, root_message_id: str) -> None:
         self._auto_thread_state("_pending_auto_thread_roots").pop(root_message_id, None)
+        self._auto_thread_state("_auto_thread_soft_failures").pop(root_message_id, None)
         failed = self._auto_thread_state("_failed_auto_thread_roots")
         failed[root_message_id] = None
         failed.move_to_end(root_message_id)
         self._trim_oldest_dict_entries(failed, self.CHAT_LOCK_MAX_SIZE)
+
+    def _note_auto_thread_soft_failure(self, root_message_id: str) -> int:
+        """Count one in-topic failure that left no topic behind; return the total."""
+        strikes = self._auto_thread_state("_auto_thread_soft_failures")
+        count = int(strikes.get(root_message_id) or 0) + 1
+        strikes[root_message_id] = count
+        strikes.move_to_end(root_message_id)
+        self._trim_oldest_dict_entries(strikes, self.CHAT_LOCK_MAX_SIZE)
+        return count
+
+    def _auto_thread_is_pending(self, root_message_id: Any) -> bool:
+        root = str(root_message_id or "")
+        return bool(
+            self._is_message_thread_anchor(root)
+            and root in self._auto_thread_state("_pending_auto_thread_roots")
+        )
+
+    def _auto_thread_is_established(self, root_message_id: Any) -> bool:
+        """True for an ``om_*`` root that is neither pending nor failed.
+
+        Only meaningful for a root the caller saw pending moments ago: a root
+        that was never tracked reads as established too.
+        """
+        root = str(root_message_id or "")
+        return bool(
+            self._is_message_thread_anchor(root)
+            and root not in self._auto_thread_state("_pending_auto_thread_roots")
+            and root not in self._auto_thread_state("_failed_auto_thread_roots")
+        )
+
+    async def _auto_thread_topic_exists(self, root_message_id: str) -> bool:
+        """Does Feishu now report a topic under ``root_message_id``?
+
+        Asked after a topic-creating reply failed with a code that does not
+        rule topics out: an internal error may still have created the reply,
+        and with it the topic.  A lookup failure answers ``False``, which only
+        costs the caller one more in-topic attempt.
+        """
+        if not getattr(self, "_client", None) or not root_message_id:
+            return False
+        try:
+            request = self._build_get_message_request(str(root_message_id))
+            response = await self._run_blocking(self._client.im.v1.message.get, request)
+        except Exception:
+            logger.debug("[Feishu] topic probe for %s failed", root_message_id, exc_info=True)
+            return False
+        if not self._response_succeeded(response):
+            return False
+        items = getattr(getattr(response, "data", None), "items", None) or []
+        root = items[0] if items else None
+        return bool(str(getattr(root, "thread_id", "") or "").strip())
+
+    @staticmethod
+    def _is_card_entity_payload(msg_type: str, payload: Any) -> bool:
+        """True for an interactive message that carries a CardKit ``card_id``.
+
+        A card entity binds to exactly one message, so such a payload is never
+        re-sent as a fallback: a second send of an already-bound entity fails
+        with "card binding biz count over limit" however it is addressed.
+        """
+        if msg_type != "interactive":
+            return False
+        try:
+            data = json.loads(payload)
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            isinstance(data, dict)
+            and data.get("type") == "card"
+            and isinstance(data.get("data"), dict)
+            and data["data"].get("card_id")
+        )
+
+    @staticmethod
+    def _is_card_block_handle(value: Any) -> bool:
+        """True for the synthetic ``hermes-card:`` id card-mode sends return.
+
+        It stands for a block inside a card, not a Feishu message, so it must
+        never reach the reply API — Feishu rejects it with a bare field
+        validation error.
+        """
+        return str(value or "").startswith(_cardkit_module().BLOCK_ID_PREFIX)
+
+    @staticmethod
+    def _send_outcome_unknown(response: Any) -> bool:
+        """True when a failed send may nonetheless have been delivered."""
+        if response is None:
+            return True
+        return getattr(response, "code", None) in _FEISHU_OUTCOME_UNKNOWN_CODES
+
+    @staticmethod
+    def _feishu_response_diag(response: Any) -> str:
+        """``code``/``msg``/``log_id`` of a response, for failure logs.
+
+        The log id is what Feishu support needs to trace a request, and the
+        only way to tell two identical-looking internal errors apart.
+        """
+        if response is None:
+            return "no response"
+        log_id = ""
+        get_log_id = getattr(response, "get_log_id", None)
+        if callable(get_log_id):
+            try:
+                log_id = str(get_log_id() or "")
+            except Exception:
+                log_id = ""
+        return "code={} msg={!r} log_id={}".format(
+            getattr(response, "code", None),
+            str(getattr(response, "msg", "") or ""),
+            log_id or "-",
+        )
 
     def _session_key_for_source(self, source: Any) -> str:
         """The session key ``source`` routes to, or "" when it cannot be built.
@@ -7379,6 +7510,77 @@ class FeishuAdapter(BasePlatformAdapter):
             .build()
         )
 
+    async def _auto_thread_failure_action(
+        self,
+        *,
+        root: str,
+        chat_id: str,
+        msg_type: str,
+        payload: str,
+        reply_to: Optional[str],
+        diag: str,
+        code: Any,
+    ) -> str:
+        """Settle a failed topic-creating send: ``"flat"``, ``"retry"`` or ``"give_up"``.
+
+        Only a code that rules topics out abandons the topic at once.  Anything
+        else is first checked against Feishu — an internal error has been seen
+        on a reply that did create the topic — and then retried in the topic,
+        so a single transient failure no longer drops the rest of the turn into
+        the group; one flat message is sent only once a second in-topic attempt
+        has also failed without a topic appearing.  A card entity is never
+        re-sent from here (``"give_up"``): it may already be bound to the
+        message that failed, and the card layer owns its retry.
+        """
+        card_entity = self._is_card_entity_payload(msg_type, payload)
+        if code in _FEISHU_AUTO_THREAD_UNSUPPORTED_CODES:
+            self._mark_auto_thread_failed(root)
+            logger.warning(
+                "[Feishu] Auto-thread reply to %s cannot create a topic (%s, reply_to=%s); "
+                "%s in chat %s",
+                root,
+                diag,
+                reply_to,
+                "leaving the card to its own fallback" if card_entity
+                else "falling back to one flat message",
+                chat_id,
+            )
+            return "give_up" if card_entity else "flat"
+        if await self._auto_thread_topic_exists(root):
+            self._mark_auto_thread_established(root)
+            logger.warning(
+                "[Feishu] Auto-thread reply to %s failed (%s, reply_to=%s) but the topic "
+                "exists; keeping topic routing in chat %s",
+                root,
+                diag,
+                reply_to,
+                chat_id,
+            )
+            return "give_up" if card_entity else "retry"
+        strikes = self._note_auto_thread_soft_failure(root)
+        if card_entity or strikes < _FEISHU_AUTO_THREAD_SOFT_FAILURE_LIMIT:
+            logger.warning(
+                "[Feishu] Auto-thread reply to %s failed (%s, reply_to=%s); no topic yet, "
+                "keeping topic routing (%d/%d) in chat %s",
+                root,
+                diag,
+                reply_to,
+                strikes,
+                _FEISHU_AUTO_THREAD_SOFT_FAILURE_LIMIT,
+                chat_id,
+            )
+            return "give_up" if card_entity else "retry"
+        self._mark_auto_thread_failed(root)
+        logger.warning(
+            "[Feishu] Auto-thread reply to %s failed again (%s, reply_to=%s); "
+            "falling back to one flat message in chat %s",
+            root,
+            diag,
+            reply_to,
+            chat_id,
+        )
+        return "flat"
+
     async def _feishu_send_with_retry(
         self,
         *,
@@ -7389,6 +7591,13 @@ class FeishuAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]],
     ) -> Any:
         last_error: Optional[Exception] = None
+        if self._is_card_block_handle(reply_to):
+            # Streaming chains its chunks by the id the previous send returned,
+            # which in card mode is a block handle.  Drop it: the thread
+            # metadata still places the message, and nothing else can.
+            logger.debug("[Feishu] ignoring card block handle %s as a reply target", reply_to)
+            reply_to = None
+        retry_in_topic = False
         active_reply_to = reply_to
         active_metadata = metadata
         auto_thread_root = str((metadata or {}).get("thread_id") or "")
@@ -7425,14 +7634,20 @@ class FeishuAdapter(BasePlatformAdapter):
                         # root remains pending; formatting rejection is not a
                         # topic-creation failure.
                         return response
-                    logger.warning(
-                        "[Feishu] Auto-thread reply to %s failed (code %s); "
-                        "falling back to one flat message in chat %s",
-                        auto_thread_root,
-                        getattr(response, "code", None),
-                        chat_id,
+                    action = await self._auto_thread_failure_action(
+                        root=auto_thread_root,
+                        chat_id=chat_id,
+                        msg_type=msg_type,
+                        payload=payload,
+                        reply_to=active_reply_to,
+                        diag=self._feishu_response_diag(response),
+                        code=getattr(response, "code", None),
                     )
-                    self._mark_auto_thread_failed(auto_thread_root)
+                    if action == "give_up":
+                        return response
+                    if action == "retry":
+                        retry_in_topic = True
+                        break
                     return await self._send_raw_message(
                         chat_id=chat_id,
                         msg_type=msg_type,
@@ -7475,15 +7690,17 @@ class FeishuAdapter(BasePlatformAdapter):
                 if msg_type == "post" and _POST_CONTENT_INVALID_RE.search(str(exc)):
                     raise
                 if attempt >= _FEISHU_SEND_ATTEMPTS - 1:
-                    if auto_thread_pending:
-                        logger.warning(
-                            "[Feishu] Auto-thread reply to %s raised after retries; "
-                            "falling back to one flat message in chat %s: %s",
-                            auto_thread_root,
-                            chat_id,
-                            exc,
-                        )
-                        self._mark_auto_thread_failed(auto_thread_root)
+                    # After an exception the caller retries the whole message,
+                    # so anything short of "flat" re-raises for it to do so.
+                    if auto_thread_pending and await self._auto_thread_failure_action(
+                        root=auto_thread_root,
+                        chat_id=chat_id,
+                        msg_type=msg_type,
+                        payload=payload,
+                        reply_to=active_reply_to,
+                        diag=f"raised after retries: {exc}",
+                        code=None,
+                    ) == "flat":
                         return await self._send_raw_message(
                             chat_id=chat_id,
                             msg_type=msg_type,
@@ -7502,6 +7719,21 @@ class FeishuAdapter(BasePlatformAdapter):
                     exc,
                 )
                 await asyncio.sleep(wait_seconds)
+        if retry_in_topic:
+            # Retried here rather than by the caller: send() does not stop at
+            # a failed chunk, so a failure returned from the middle of a
+            # message would simply be lost.  Outside the loop so an error in
+            # the retry is not counted as one of this call's attempts.
+            # Bounded: the retry lands, finds the topic established, or takes
+            # the second strike and goes flat.
+            await asyncio.sleep(1)
+            return await self._feishu_send_with_retry(
+                chat_id=chat_id,
+                msg_type=msg_type,
+                payload=payload,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
         raise last_error or RuntimeError("Feishu send failed")
 
     async def _release_app_lock(self) -> None:

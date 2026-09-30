@@ -3143,6 +3143,224 @@ class TestFeishuAutoThreadSending(unittest.TestCase):
         )
         self.assertFalse(adapter._client.im.v1.message.list.called)
 
+    # -- failures that do not rule a topic out -------------------------------
+
+    _CARD_PAYLOAD = json.dumps({"type": "card", "data": {"card_id": "card_1"}})
+
+    def _send_pending(self, adapter, *, msg_type="text", payload="payload"):
+        # The in-topic retry backs off; the tests do not need to wait for it.
+        with patch("plugins.platforms.feishu.adapter.asyncio.sleep", new=AsyncMock()):
+            return asyncio.run(
+                adapter._feishu_send_with_retry(
+                    chat_id="oc_chat",
+                    msg_type=msg_type,
+                    payload=payload,
+                    reply_to="om_root_1",
+                    metadata={"thread_id": "om_root_1"},
+                )
+            )
+
+    def _assert_all_sends_in_topic(self, adapter):
+        for call in adapter._send_raw_message.await_args_list:
+            self.assertEqual(call.kwargs["metadata"], {"thread_id": "om_root_1"})
+
+    def test_internal_error_is_retried_in_the_topic_once_it_exists(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_pending("om_root_1")
+        failed = SimpleNamespace(success=lambda: False, code=2200, msg="internal error")
+        succeeded = SimpleNamespace(success=lambda: True, code=0)
+        adapter._send_raw_message = AsyncMock(side_effect=[failed, succeeded])
+        adapter._auto_thread_topic_exists = AsyncMock(return_value=True)
+
+        result = self._send_pending(adapter)
+
+        self.assertIs(result, succeeded)
+        self.assertEqual(adapter._send_raw_message.await_count, 2)
+        self._assert_all_sends_in_topic(adapter)
+        self.assertNotIn("om_root_1", adapter._pending_auto_thread_roots)
+        self.assertNotIn("om_root_1", adapter._failed_auto_thread_roots)
+
+    def test_one_failure_without_a_topic_is_retried_in_the_topic(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_pending("om_root_1")
+        failed = SimpleNamespace(success=lambda: False, code=230020, msg="rate limited")
+        succeeded = SimpleNamespace(success=lambda: True, code=0)
+        adapter._send_raw_message = AsyncMock(side_effect=[failed, succeeded])
+        adapter._auto_thread_topic_exists = AsyncMock(return_value=False)
+
+        result = self._send_pending(adapter)
+
+        self.assertIs(result, succeeded)
+        self.assertEqual(adapter._send_raw_message.await_count, 2)
+        self._assert_all_sends_in_topic(adapter)
+        self.assertNotIn("om_root_1", adapter._pending_auto_thread_roots)
+        self.assertNotIn("om_root_1", adapter._failed_auto_thread_roots)
+
+    def test_second_failure_without_a_topic_falls_back_flat_once(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_pending("om_root_1")
+        failed = SimpleNamespace(success=lambda: False, code=2200, msg="internal error")
+        succeeded = SimpleNamespace(success=lambda: True, code=0)
+        adapter._send_raw_message = AsyncMock(side_effect=[failed, failed, succeeded])
+        adapter._auto_thread_topic_exists = AsyncMock(return_value=False)
+
+        result = self._send_pending(adapter)
+
+        self.assertIs(result, succeeded)
+        calls = adapter._send_raw_message.await_args_list
+        self.assertEqual(len(calls), 3)
+        for call in calls[:2]:
+            self.assertEqual(call.kwargs["metadata"], {"thread_id": "om_root_1"})
+        self.assertIsNone(calls[2].kwargs["reply_to"])
+        self.assertIsNone(calls[2].kwargs["metadata"])
+        self.assertIn("om_root_1", adapter._failed_auto_thread_roots)
+
+    def test_errors_in_the_topic_retry_are_not_counted_twice(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_pending("om_root_1")
+        failed = SimpleNamespace(success=lambda: False, code=2200, msg="internal error")
+        succeeded = SimpleNamespace(success=lambda: True, code=0)
+        timeout = RuntimeError("timed out")
+        adapter._send_raw_message = AsyncMock(
+            side_effect=[failed, timeout, timeout, timeout, succeeded]
+        )
+        adapter._auto_thread_topic_exists = AsyncMock(return_value=False)
+
+        result = self._send_pending(adapter)
+
+        # One failed reply, one retry that exhausts its own attempts, then the
+        # single flat message — not a second round of attempts on top.
+        self.assertIs(result, succeeded)
+        calls = adapter._send_raw_message.await_args_list
+        self.assertEqual(len(calls), 5)
+        self.assertIsNone(calls[-1].kwargs["metadata"])
+        self.assertIn("om_root_1", adapter._failed_auto_thread_roots)
+
+    def test_group_without_topic_support_falls_back_flat_at_once(self):
+        for code in (230071, 230072):
+            with self.subTest(code=code):
+                adapter = self._build_adapter()
+                adapter._mark_auto_thread_pending("om_root_1")
+                failed = SimpleNamespace(success=lambda: False, code=code)
+                succeeded = SimpleNamespace(success=lambda: True, code=0)
+                adapter._send_raw_message = AsyncMock(side_effect=[failed, succeeded])
+                adapter._auto_thread_topic_exists = AsyncMock(return_value=False)
+
+                result = self._send_pending(adapter)
+
+                self.assertIs(result, succeeded)
+                self.assertIsNone(adapter._send_raw_message.await_args_list[1].kwargs["metadata"])
+                self.assertIn("om_root_1", adapter._failed_auto_thread_roots)
+                adapter._auto_thread_topic_exists.assert_not_awaited()
+
+    def test_card_entity_is_never_resent_by_the_flat_fallback(self):
+        cases = (
+            SimpleNamespace(success=lambda: False, code=230071),
+            SimpleNamespace(success=lambda: False, code=2200, msg="internal error"),
+        )
+        for failed in cases:
+            with self.subTest(code=failed.code):
+                adapter = self._build_adapter()
+                adapter._mark_auto_thread_pending("om_root_1")
+                adapter._send_raw_message = AsyncMock(return_value=failed)
+                adapter._auto_thread_topic_exists = AsyncMock(return_value=False)
+
+                for _ in range(3):
+                    result = self._send_pending(
+                        adapter, msg_type="interactive", payload=self._CARD_PAYLOAD
+                    )
+
+                self.assertIs(result, failed)
+                # One attempt per call — the entity is never sent a second time.
+                self.assertEqual(adapter._send_raw_message.await_count, 3)
+
+    def test_card_entity_raising_after_retries_is_not_resent_flat(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_pending("om_root_1")
+        adapter._send_raw_message = AsyncMock(side_effect=RuntimeError("timed out"))
+        adapter._auto_thread_topic_exists = AsyncMock(return_value=False)
+
+        with self.assertRaises(RuntimeError):
+            self._send_pending(adapter, msg_type="interactive", payload=self._CARD_PAYLOAD)
+
+        for call in adapter._send_raw_message.await_args_list:
+            self.assertEqual(call.kwargs["metadata"], {"thread_id": "om_root_1"})
+        self.assertIn("om_root_1", adapter._pending_auto_thread_roots)
+
+    def test_failure_log_names_the_code_message_and_log_id(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_pending("om_root_1")
+        failed = SimpleNamespace(
+            success=lambda: False,
+            code=2200,
+            msg="internal error",
+            get_log_id=lambda: "log_abc",
+        )
+        succeeded = SimpleNamespace(success=lambda: True, code=0)
+        adapter._send_raw_message = AsyncMock(side_effect=[failed, succeeded])
+        adapter._auto_thread_topic_exists = AsyncMock(return_value=False)
+
+        with self.assertLogs(level="WARNING") as logs:
+            self._send_pending(adapter)
+
+        line = "\n".join(logs.output)
+        self.assertIn("code=2200", line)
+        self.assertIn("internal error", line)
+        self.assertIn("log_id=log_abc", line)
+        self.assertIn("reply_to=om_root_1", line)
+
+    def test_card_block_handle_is_never_a_reply_target(self):
+        adapter = self._build_adapter()
+        succeeded = SimpleNamespace(success=lambda: True, code=0)
+        adapter._send_raw_message = AsyncMock(return_value=succeeded)
+
+        asyncio.run(
+            adapter._feishu_send_with_retry(
+                chat_id="oc_chat",
+                msg_type="text",
+                payload="payload",
+                reply_to="hermes-card:card_1:0:abcd1234",
+                metadata={"thread_id": "omt_real_thread"},
+            )
+        )
+
+        call = adapter._send_raw_message.await_args.kwargs
+        self.assertIsNone(call["reply_to"])
+        self.assertEqual(call["metadata"], {"thread_id": "omt_real_thread"})
+
+    def test_topic_probe_reads_the_root_messages_thread_id(self):
+        adapter = self._build_adapter()
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        def _client_returning(response):
+            return SimpleNamespace(
+                im=SimpleNamespace(
+                    v1=SimpleNamespace(message=SimpleNamespace(get=lambda request: response))
+                )
+            )
+
+        def _root(thread_id):
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(items=[SimpleNamespace(thread_id=thread_id)]),
+            )
+
+        cases = (
+            (_root("omt_new_topic"), True),
+            (_root(None), False),
+            (SimpleNamespace(success=lambda: False, code=231003), False),
+        )
+        for response, expected in cases:
+            with self.subTest(expected=expected):
+                adapter._client = _client_returning(response)
+                with patch.object(adapter, "_run_blocking", side_effect=_direct):
+                    self.assertIs(
+                        asyncio.run(adapter._auto_thread_topic_exists("om_root_1")),
+                        expected,
+                    )
+
 
 class TestFeishuFetchMessageText(unittest.TestCase):
     def _build_adapter(self):

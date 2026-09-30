@@ -1704,3 +1704,189 @@ async def test_files_still_ship_when_the_card_declines_the_text(
     payload = media_adapter._feishu_send_with_retry.await_args.kwargs["payload"]
     assert "MEDIA:" not in payload
     assert "report.md" in payload
+
+
+# ---------------------------------------------------------------------------
+# Delivering the card that opens the turn's topic
+# ---------------------------------------------------------------------------
+
+ROOT_ID = "om_root"
+
+
+def _begin_topic_turn(adapter, *, pending=True):
+    """A turn whose first card is the reply that creates the topic."""
+    if pending:
+        adapter._mark_auto_thread_pending(ROOT_ID)
+    adapter._card_manager.begin_turn(
+        chat_id=CHAT_ID,
+        thread_id=ROOT_ID,
+        reply_to=ROOT_ID,
+        metadata={"thread_id": ROOT_ID},
+    )
+
+
+def _delivered_card_ids(adapter):
+    return [
+        json.loads(call.kwargs["payload"])["data"]["card_id"]
+        for call in adapter._feishu_send_with_retry.await_args_list
+        if call.kwargs["msg_type"] == "interactive"
+    ]
+
+
+def _streamed_card_ids(adapter):
+    return [req["card_id"] for req in adapter._cardkit.element_contents]
+
+
+@pytest.mark.asyncio
+async def test_internal_error_is_adopted_when_the_topic_exists_afterwards(card_adapter):
+    _begin_topic_turn(card_adapter)
+
+    async def _internal_error_but_topic_created(**kwargs):
+        await asyncio.sleep(0)
+        # What the adapter concludes once Feishu reports a topic under the root.
+        card_adapter._mark_auto_thread_established(ROOT_ID)
+        return _Resp(ok=False, code=2200, msg="internal error")
+
+    card_adapter._feishu_send_with_retry.side_effect = _internal_error_but_topic_created
+
+    result = await card_adapter.send(
+        CHAT_ID, "Here is the answer.", metadata={"thread_id": ROOT_ID}
+    )
+    await _settle()
+
+    assert result.success is True
+    # The card already in the topic is the one that gets the answer; a second
+    # card would sit next to it forever showing "running".
+    assert len(card_adapter._cardkit.creates) == 1
+    assert _delivered_card_ids(card_adapter) == ["card_1"]
+    assert set(_streamed_card_ids(card_adapter)) == {"card_1"}
+    assert "Here is the answer." in card_adapter._cardkit.body_texts()[-1]
+
+
+@pytest.mark.asyncio
+async def test_rejected_card_is_retried_with_a_fresh_entity_not_resent(card_adapter):
+    _begin_topic_turn(card_adapter)
+    responses = [
+        _Resp(ok=False, code=2200, msg="internal error"),
+        _Resp(message_id="om_card"),
+    ]
+
+    async def _deliver(**kwargs):
+        await asyncio.sleep(0)
+        return responses.pop(0)
+
+    card_adapter._feishu_send_with_retry.side_effect = _deliver
+
+    result = await card_adapter.send(
+        CHAT_ID, "Here is the answer.", metadata={"thread_id": ROOT_ID}
+    )
+    await _settle()
+
+    assert result.success is True
+    assert _delivered_card_ids(card_adapter) == ["card_1", "card_2"]
+    assert set(_streamed_card_ids(card_adapter)) == {"card_2"}
+    # Both attempts stay addressed to the topic.
+    for call in card_adapter._feishu_send_with_retry.await_args_list:
+        assert call.kwargs["metadata"] == {"thread_id": ROOT_ID}
+
+
+@pytest.mark.asyncio
+async def test_an_already_bound_entity_counts_as_delivered(card_adapter):
+    _begin_topic_turn(card_adapter, pending=False)
+
+    async def _already_bound(**kwargs):
+        await asyncio.sleep(0)
+        return _Resp(
+            ok=False,
+            code=230099,
+            msg="Failed to create card content, ext=ErrCode: 200780; "
+            "ErrMsg: card binding biz count over limit; ",
+        )
+
+    card_adapter._feishu_send_with_retry.side_effect = _already_bound
+
+    result = await card_adapter.send(
+        CHAT_ID, "Here is the answer.", metadata={"thread_id": ROOT_ID}
+    )
+    await _settle()
+
+    assert result.success is True
+    assert _delivered_card_ids(card_adapter) == ["card_1"]
+    assert set(_streamed_card_ids(card_adapter)) == {"card_1"}
+
+
+@pytest.mark.asyncio
+async def test_internal_error_without_a_topic_is_not_adopted(card_adapter):
+    _begin_topic_turn(card_adapter)
+
+    async def _deliver(**kwargs):
+        await asyncio.sleep(0)
+        if kwargs["msg_type"] == "interactive":
+            # The root stays pending: no topic appeared under it.
+            return _Resp(ok=False, code=2200, msg="internal error")
+        return _Resp(message_id="om_text")
+
+    card_adapter._feishu_send_with_retry.side_effect = _deliver
+
+    result = await card_adapter.send(
+        CHAT_ID, "Here is the answer.", metadata={"thread_id": ROOT_ID}
+    )
+
+    assert result.success is True
+    assert _delivered_card_ids(card_adapter) == ["card_1", "card_2"]
+    # Both entities failed, so the answer goes out on the legacy path —
+    # still addressed to the topic.
+    last = card_adapter._feishu_send_with_retry.await_args.kwargs
+    assert last["msg_type"] in {"text", "post"}
+    assert last["metadata"] == {"thread_id": ROOT_ID}
+
+
+@pytest.mark.asyncio
+async def test_a_block_handle_reply_to_falls_back_to_the_turns_anchor(card_adapter):
+    card_adapter._card_manager.begin_turn(
+        chat_id=CHAT_ID,
+        thread_id="omt_topic",
+        reply_to="om_user",
+        metadata={"thread_id": "omt_topic"},
+    )
+
+    await card_adapter.send(
+        CHAT_ID,
+        "Second chunk.",
+        # Streaming chains chunks by the id the previous send returned.
+        reply_to=f"{feishu_cardkit.BLOCK_ID_PREFIX}card_0:0:deadbeef",
+        metadata={"thread_id": "omt_topic"},
+    )
+
+    delivery = card_adapter._feishu_send_with_retry.await_args.kwargs
+    assert delivery["msg_type"] == "interactive"
+    assert delivery["reply_to"] == "om_user"
+
+
+@pytest.mark.asyncio
+async def test_a_topic_appearing_after_the_second_card_fails_sends_text(card_adapter):
+    _begin_topic_turn(card_adapter)
+    interactive_calls = []
+
+    async def _deliver(**kwargs):
+        await asyncio.sleep(0)
+        if kwargs["msg_type"] != "interactive":
+            return _Resp(message_id="om_text")
+        interactive_calls.append(kwargs)
+        if len(interactive_calls) == 2:
+            # Either card could be the one that made this topic, so neither
+            # may be trusted with the answer.
+            card_adapter._mark_auto_thread_established(ROOT_ID)
+        return _Resp(ok=False, code=2200, msg="internal error")
+
+    card_adapter._feishu_send_with_retry.side_effect = _deliver
+
+    result = await card_adapter.send(
+        CHAT_ID, "Here is the answer.", metadata={"thread_id": ROOT_ID}
+    )
+
+    assert result.success is True
+    assert _delivered_card_ids(card_adapter) == ["card_1", "card_2"]
+    last = card_adapter._feishu_send_with_retry.await_args.kwargs
+    assert last["msg_type"] in {"text", "post"}
+    assert last["metadata"] == {"thread_id": ROOT_ID}
