@@ -933,7 +933,7 @@ def test_remote_loop_reuses_session_and_routes_foreground_input(monkeypatch, is_
     ]
 
 
-def test_remote_non_loop_disables_all_output_events(monkeypatch):
+def test_remote_non_loop_without_output_binds_adapter_in_interaction_only_mode(monkeypatch):
     import tools.a2a_delegate_tool as a2a_delegate_tool
     from tools.a2a_delegate_tool import A2A_REGISTRY, a2a_delegate
 
@@ -950,35 +950,33 @@ def test_remote_non_loop_disables_all_output_events(monkeypatch):
     sessions = []
 
     class FakeSession:
-        def __init__(self, base_url, *, output=None, session_id=None, headers=None, **kwargs):
+        def __init__(self, base_url, *, output=None, session_id=None, headers=None, interaction_only=False, **kwargs):
             del base_url, headers, kwargs
             self.output = output
+            self.interaction_only = interaction_only
             self.context_id = session_id
+            self.bound = False
+            self.unbound = False
             sessions.append(self)
+
+        def bind_output_adapter(self):
+            self.bound = True
+
+        def unbind_output_adapter(self):
+            self.unbound = True
 
         async def send_turn(self, text, *, is_delegate_output=True):
             del text
             assert is_delegate_output is False
             self.context_id = "ctx-remote"
-            if self.output:
-                for event_type, content in (
-                    ("status", "working"),
-                    ("ai_delta", "partial"),
-                    ("tool_call", "terminal {}"),
-                    ("ai", "done"),
-                    ("error", "failed"),
-                ):
-                    self.output.emit("delegate", event_type, content, session_id=self.context_id)
-            return {
-                "final_response": "done",
-                "state": "completed",
-                "state_name": "completed",
-                "context_id": self.context_id,
-                "task_id": "task-1",
-            }
+            raise RuntimeError("remote failed")
 
         async def close(self):
             return None
+
+        def should_suppress_stop_exception(self, exc):
+            del exc
+            return False
 
     monkeypatch.setattr(a2a_delegate_tool, "_A2ADelegateSession", FakeSession)
     sink = _OutputSink()
@@ -994,10 +992,87 @@ def test_remote_non_loop_disables_all_output_events(monkeypatch):
         )
     )
 
-    assert result["success"] is True
-    assert result["final_response"] == "done"
-    assert sessions[0].output is None
+    assert result["success"] is False
+    assert result["error"] == "remote failed"
+    assert sessions[0].output is sink
+    assert sessions[0].interaction_only is True
+    assert sessions[0].bound is True
+    assert sessions[0].unbound is True
+    # The run-level error event is not an interaction, so it stays silent.
     assert sink.events == []
+
+
+@pytest.mark.parametrize(
+    ("interaction_only", "expected_event_types"),
+    [
+        (True, ["approval_request", "approval_resolved"]),
+        (False, ["tool_call", "approval_request", "ai_delta", "approval_resolved", "ai_delta", "ai"]),
+    ],
+)
+def test_remote_session_interaction_only_forwards_only_interaction_events(interaction_only, expected_event_types):
+    from a2a.types import Message, Part, Role
+    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+
+    def hermes_message(message_id, kind, **extra):
+        return Message(
+            message_id=message_id,
+            role=Role.ROLE_AGENT,
+            context_id="ctx-1",
+            task_id="task-1",
+            parts=[Part(text="")],
+            metadata={"hermes": {"kind": kind, **extra}},
+        )
+
+    def agent_text(text):
+        return Message(
+            message_id=f"text-{text}",
+            role=Role.ROLE_AGENT,
+            context_id="ctx-1",
+            task_id="task-1",
+            parts=[Part(text=text)],
+        )
+
+    working_task = SimpleNamespace(
+        id="task-1",
+        context_id="ctx-1",
+        history=[
+            hermes_message("tool-message", "tool_call", tool_call_id="call-1", name="terminal", arguments={"command": "ls"}),
+            hermes_message("approval-message", "approval_request", interaction_id="approval-1", command="rm -rf ./tmp"),
+        ],
+        status=SimpleNamespace(state="working", message=agent_text("thinking")),
+    )
+    completed_task = SimpleNamespace(
+        id="task-1",
+        context_id="ctx-1",
+        history=[hermes_message("resolved-message", "approval_resolved", interaction_id="approval-1")],
+        status=SimpleNamespace(state="completed", message=agent_text("thinking done")),
+    )
+
+    class FakeClient:
+        async def send_message(self, request):
+            del request
+            yield SimpleNamespace(task=working_task)
+
+        async def get_task(self, request):
+            assert request.id == "task-1"
+            return completed_task
+
+    output = _OutputSink()
+    session = _A2ADelegateSession(
+        "http://agent.local/a2a",
+        output=output,
+        poll_interval=0,
+        session_id="ctx-1",
+        interaction_supported=True,
+        interaction_only=interaction_only,
+    )
+    session._client = FakeClient()
+
+    result = _run_coro_sync(session.send_turn("go", is_delegate_output=True))
+
+    assert result["final_response"] == "thinking done"
+    assert session.latest_assistant_text() == "thinking done"
+    assert [event[1] for event in output.events] == expected_event_types
 
 
 def test_remote_loop_timeout_returns_clear_payload(monkeypatch):

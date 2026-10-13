@@ -305,8 +305,30 @@ def a2a_list(otype: str = "xml") -> str:
     )
 
 
-def _emit(output, event_type: str, content: Any, session_id: str | None) -> None:
+_A2A_INTERACTION_EVENT_TYPES = frozenset(
+    {
+        "approval_request",
+        "clarify_request",
+        "approval_resolved",
+        "clarify_resolved",
+    }
+)
+
+
+def _emit(
+    output,
+    event_type: str,
+    content: Any,
+    session_id: str | None,
+    *,
+    interaction_only: bool = False,
+) -> None:
     if output is None:
+        return
+    # Interaction-only delegations stay silent except for approval/clarify
+    # prompts, which must reach the user or the remote worker blocks until
+    # its own approval timeout fails closed.
+    if interaction_only and event_type not in _A2A_INTERACTION_EVENT_TYPES:
         return
     emit = getattr(output, "emit", None)
     if callable(emit):
@@ -746,10 +768,14 @@ class _A2ADelegateSession:
         headers: dict[str, str] | None = None,
         response_path: str | None = None,
         interaction_supported: bool = False,
+        interaction_only: bool = False,
         agent_name: str | None = None,
     ):
         self.base_url = base_url
         self.output = output
+        # When true, only approval/clarify events reach ``output``; status,
+        # tool calls, AI deltas, and final AI text are tracked but not emitted.
+        self._interaction_only = bool(interaction_only)
         # Presentation only: platform output adapters that render a
         # delegation as its own surface (e.g. the Feishu card) title it
         # with this.  Never used for routing or authorization.
@@ -813,6 +839,9 @@ class _A2ADelegateSession:
     def latest_assistant_text(self) -> str:
         with self._state_lock:
             return self._last_assistant_text
+
+    def _emit_event(self, event_type: str, content: Any, session_id: str | None) -> None:
+        _emit(self.output, event_type, content, session_id, interaction_only=self._interaction_only)
 
     def bind_output_adapter(self) -> None:
         binder = getattr(self.output, "bind_a2a_interaction_session", None)
@@ -972,7 +1001,7 @@ class _A2ADelegateSession:
         if final_response:
             self._set_last_assistant_text(final_response)
         if is_delegate_output and final_response:
-            _emit(self.output, "ai", final_response, self.context_id)
+            self._emit_event("ai", final_response, self.context_id)
         state = _a2a_field(getattr(finished, "status", None), "state", None)
         return {
             "task": finished,
@@ -1140,7 +1169,7 @@ class _A2ADelegateSession:
                     continue
                 self._rendered_tool_entries.add(key)
                 content = f"{tool_name} {arguments}" if arguments else tool_name
-                _emit(self.output, "tool_call", content, session_id)
+                self._emit_event("tool_call", content, session_id)
 
             if _a2a_is_tool_message(message):
                 continue
@@ -1148,12 +1177,7 @@ class _A2ADelegateSession:
     def _emit_interaction_message(self, message, *, session_id: str | None) -> None:
         metadata = _a2a_hermes_metadata(message)
         kind = str(metadata.get("kind") or "")
-        if kind not in {
-            "approval_request",
-            "clarify_request",
-            "approval_resolved",
-            "clarify_resolved",
-        }:
+        if kind not in _A2A_INTERACTION_EVENT_TYPES:
             return
         if kind.endswith("_request") and not self._interaction_supported:
             # A legacy remote card has no authenticated response channel.
@@ -1172,7 +1196,7 @@ class _A2ADelegateSession:
         payload.setdefault("task_id", self.task_id)
         payload.setdefault("context_id", self.context_id)
         self._update_interaction_wait_state(kind, interaction_id)
-        _emit(self.output, event_type, _compact_json_text(payload), session_id)
+        self._emit_event(event_type, _compact_json_text(payload), session_id)
 
     def _emit_text_deltas(self, task, *, session_id: str | None) -> None:
         text = _a2a_task_text(task)
@@ -1185,7 +1209,7 @@ class _A2ADelegateSession:
         self._streamed_assistant_text = text
         self._set_last_assistant_text(text)
         if delta:
-            _emit(self.output, "ai_delta", delta, session_id)
+            self._emit_event("ai_delta", delta, session_id)
 
     async def close(self) -> None:
         self._bind_owner_runtime()
@@ -1393,11 +1417,13 @@ def _run_remote_delegate(
             "error": "A2A SDK is not installed. Install the configured a2a SDK package to use remote delegation.",
         }
 
-    # When output is disabled for a non-looping delegation, suppress the
-    # adapter at the session boundary so every event type (including status,
-    # tool calls, deltas, and errors) follows the same policy.
-    if not is_delegate_output:
-        output = None
+    # Disabling delegate output keeps the adapter bound in interaction-only
+    # mode: status, tool calls, deltas, AI text, and errors are dropped, but
+    # remote approval/clarify prompts still reach the user and can be answered.
+    interaction_only = not is_delegate_output
+
+    def _emit_run_event(event_type: str, content: Any, event_session_id: str | None) -> None:
+        _emit(output, event_type, content, event_session_id, interaction_only=interaction_only)
 
     remote_session_id = _resolve_delegate_session_id(session_id)
     interaction_supported, response_path = _a2a_interaction_config(entry)
@@ -1409,6 +1435,7 @@ def _run_remote_delegate(
         headers=entry.get("headers") or {},
         response_path=response_path,
         interaction_supported=interaction_supported,
+        interaction_only=interaction_only,
         agent_name=agent_name,
     )
     bind_output = getattr(session, "bind_output_adapter", None)
@@ -1435,7 +1462,7 @@ def _run_remote_delegate(
                         completed=False,
                         error_message="a2a_delegate could not enter foreground mode.",
                     )
-                _emit(output, "status", "entered foreground loop", getattr(session, "context_id", None))
+                _emit_run_event("status", "entered foreground loop", getattr(session, "context_id", None))
 
             last_result = await session.send_turn(
                 _decorate_a2a_user_message(goal, parent_agent, context=context),
@@ -1443,7 +1470,7 @@ def _run_remote_delegate(
             )
             if _state_equals(last_result.get("state"), _a2a_canceled_state):
                 if is_loop:
-                    _emit(output, "status", "interrupted", getattr(session, "context_id", None))
+                    _emit_run_event("status", "interrupted", getattr(session, "context_id", None))
                 return _build_interrupted_a2a_payload(
                     goal=goal,
                     agent_name=agent_name,
@@ -1477,7 +1504,7 @@ def _run_remote_delegate(
                     _DELEGATE_FOREGROUND_INPUT_TIMEOUT_SECONDS,
                 )
                 if next_message is _DELEGATE_INPUT_TIMEOUT:
-                    _emit(output, "status", "input timeout", getattr(session, "context_id", None))
+                    _emit_run_event("status", "input timeout", getattr(session, "context_id", None))
                     return _build_a2a_payload(
                         success=True,
                         goal=goal,
@@ -1503,7 +1530,7 @@ def _run_remote_delegate(
                     )
                 stripped = str(next_message).strip()
                 if stripped in {"/main", "/exit"}:
-                    _emit(output, "status", "return to main", getattr(session, "context_id", None))
+                    _emit_run_event("status", "return to main", getattr(session, "context_id", None))
                     return _build_a2a_payload(
                         success=True,
                         goal=goal,
@@ -1522,7 +1549,7 @@ def _run_remote_delegate(
                     is_delegate_output=is_delegate_output,
                 )
                 if _state_equals(last_result.get("state"), _a2a_canceled_state):
-                    _emit(output, "status", "interrupted", getattr(session, "context_id", None))
+                    _emit_run_event("status", "interrupted", getattr(session, "context_id", None))
                     return _build_interrupted_a2a_payload(
                         goal=goal,
                         agent_name=agent_name,
@@ -1537,8 +1564,7 @@ def _run_remote_delegate(
             if callable(should_suppress):
                 suppress = bool(should_suppress(exc))
             if suppress:
-                if is_delegate_output:
-                    _emit(output, "status", "interrupted", getattr(session, "context_id", None))
+                _emit_run_event("status", "interrupted", getattr(session, "context_id", None))
                 return _build_interrupted_a2a_payload(
                     goal=goal,
                     agent_name=agent_name,
@@ -1547,8 +1573,7 @@ def _run_remote_delegate(
                     duration_seconds=time.monotonic() - start,
                     last_result=last_result,
                 )
-            if is_delegate_output:
-                _emit(output, "error", str(exc), getattr(session, "context_id", None) or remote_session_id)
+            _emit_run_event("error", str(exc), getattr(session, "context_id", None) or remote_session_id)
             return _build_a2a_payload(
                 success=False,
                 goal=goal,
@@ -1646,7 +1671,7 @@ A2A_DELEGATE_SCHEMA = {
             "context": {"type": "string", "description": "Optional context for the delegate."},
             "agent_name": {"type": "string", "description": "Remote A2A agent name."},
             "session_id": {"type": "string", "description": "Optional delegate session/context id."},
-            "is_delegate_output": {"type": "boolean", "description": "Whether to forward delegate output for non-looping delegation; loop mode always forwards output. Default: true."},
+            "is_delegate_output": {"type": "boolean", "description": "Whether to forward delegate output for non-looping delegation; when false, only remote approval/clarify prompts are forwarded. Loop mode always forwards output. Default: true."},
             "is_loop": {"type": "boolean", "description": "Whether to keep foreground input loop active."},
         },
         "required": ["goal", "agent_name"],

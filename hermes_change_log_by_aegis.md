@@ -59,6 +59,9 @@ Intent: Prefix every remote A2A turn with a compact source envelope rebuilt from
 Feature: Hermes A2A interaction client bridge.
 Intent: Read the optional `hermes.interaction.v1` Agent Card extension, parse approval/clarify metadata from both streaming and polling task updates, de-duplicate interaction events, and schedule authenticated responses with task/context/interaction IDs on the session owner loop. Preserve fail-closed behavior when the remote service does not declare or cannot serve the response channel.
 
+Feature: Interaction-only delegate output.
+Intent: When `is_delegate_output` is false, keep the platform output adapter bound and mark the delegate session interaction-only instead of discarding the adapter, so status, tool calls, AI deltas, final AI text, and errors are filtered at a single event-level gate while remote `approval_request`/`clarify_request` and their `_resolved` events still reach the user. Without this, a silent non-loop delegation swallowed the remote worker's approval card and left no responder bound, so the remote approval could only time out and fail closed.
+
 Feature: Interaction-aware A2A task deadline.
 Intent: Pause the caller-side polling deadline while a supported approval or clarification is pending, restore the remaining deadline after the matching resolved event, and clear stale pending markers when the remote task reaches a terminal state without adding a new interaction event protocol.
 
