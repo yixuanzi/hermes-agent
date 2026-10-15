@@ -159,11 +159,26 @@ _ADDRESSED_QUESTION = (
     "to a different named assistant."
 )
 
+# The AND term: whether anything was asked at all, whoever it is for.
+#
+# It names `agent` so its "directed at a specific named person" clause can
+# exclude this assistant. Blind to who the assistant is, the clause vetoed the
+# very messages `addressed` exists to admit: "Aegis, 你来简单说下…进度" scored
+# addressed 0.93 / wants_answer 0.50 — read as an errand for a named someone,
+# halfway to "老王，你来…" at 0.19 — while "Aegis, 帮忙…" without the "你"
+# passed at 0.81. Measured with this wording, the three phrasings score
+# 0.87 / 0.94 / 0.95, and requests aimed at a human ("老王，你来…告警进度" 0.15)
+# and named non-requests ("aegis 先别回答" 0.13, "谢谢 aegis" 0.05) stay low.
+#
+# Only the exclusion moves; this is not `addressed` folded into this question.
+# Letting `addressed` admit on its own instead was rejected: "aegis 先别回答，
+# 等我补充一下" scores addressed 0.87, and only this question vetoes it.
 _WANTS_ANSWER_QUESTION = (
     "`message` was posted in a group chat. Is it asking for help, information, or "
-    "action from whoever can provide it? Answer false for statements, "
-    "acknowledgements, status updates, small talk, and messages clearly directed "
-    "at a specific named person."
+    "action from whoever can provide it, including the assistant described in "
+    "`agent`? Answer false for statements, acknowledgements, status updates, small "
+    "talk, and messages clearly directed at a specific named person other than "
+    "that assistant."
 )
 
 # The band definitions live in the `criteria` of the ``choice`` question, not

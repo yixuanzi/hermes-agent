@@ -283,7 +283,7 @@ single forward pass, so the extra ones cost no extra round trip.
     },
     "wants_answer": {
       "type": "noul",
-      "instructions": "`message` was posted in a group chat. Is it asking for help, information, or action from whoever can provide it? Answer false for statements, acknowledgements, status updates, small talk, and messages clearly directed at a specific named person."
+      "instructions": "`message` was posted in a group chat. Is it asking for help, information, or action from whoever can provide it, including the assistant described in `agent`? Answer false for statements, acknowledgements, status updates, small talk, and messages clearly directed at a specific named person other than that assistant."
     }
   }
 }
@@ -299,9 +299,11 @@ single forward pass, so the extra ones cost no extra round trip.
 | `channel` | no — omitted when empty | Feishu: chat display name, falling back to `chat_id`. A2A: `<source>.channel` | Lets the model read the room. "有人看一下吗" in `安全运营大群` reads differently than in a random group. |
 | `sender` | no — omitted when empty | Feishu: resolved display name. A2A: `<source>.uname` | Supports the "directed at a specific named person" clause. |
 
-`agent` carries three jobs at once, which is why its wording is the real tuning
+`agent` carries four jobs at once, which is why its wording is the real tuning
 surface: `in_scope` is judged against it, `addressed` reads the assistant's name
-out of it, and the complexity question rates work as this agent would do it.
+out of it, `wants_answer` uses it to tell a request made to this assistant from
+one aimed at someone else, and the complexity question rates work as this agent
+would do it.
 
 Note what is **not** here: anything about how the request will be *executed*.
 Admission asks only whether the request is this agent's business; how much work
@@ -401,6 +403,67 @@ this proposition sits near zero — the other disjuncts still decide, but the
 feature does nothing. If you want it, make sure the description starts with the
 name.
 
+### `wants_answer` knows who the assistant is
+
+`wants_answer` answers `false` for "messages clearly directed at a specific named
+person". Until the question named `agent`, it could not tell *this assistant*
+from anyone else, so a request that addressed it by name **and** as "你" read as
+an errand for some named person — and the AND term vetoed exactly the messages
+`addressed` exists to admit. The three phrasings below are the same request;
+`addressed` recognised all of them at 0.93 while `wants_answer` split them by
+grammar:
+
+- "Aegis, 帮忙…" has no second person and read as a request to the room.
+- "Aegis, 你可以帮忙…" landed right on the 0.80 line.
+- "Aegis, 你来…" is the strongest way to assign a task to someone, and scored
+  halfway to the same sentence aimed at a colleague ("老王，你来…" 0.19).
+
+The question now positively includes the assistant described in `agent` and
+excludes only people *other than* it. Measured live, threshold 0.80, mean of
+three calls (repeats agreed within 0.1):
+
+| message | `in_scope` | `addressed` | `wants_answer` before → after | verdict after |
+|---|---|---|---|---|
+| Aegis, 你来简单说下当前chatai v1优化和v2的进度 | 0.41 | 0.93 | **0.50 → 0.87** | **ANSWER** — was quiet |
+| Aegis, 你可以帮忙简单说下当前chatai v1优化和v2的进度 | 0.38 | 0.93 | **0.79 → 0.94** | **ANSWER** — was quiet |
+| Aegis, 帮忙简单说下当前chatai v1优化和v2的进度 | 0.42 | 0.93 | 0.81 → 0.95 | ANSWER |
+| 老王，你来简单说下当前chatai v1优化和v2的进度 | 0.35 | 0.06 | 0.19 → 0.16 | STAY QUIET |
+| 老王，你来简单说下这批 WAF 告警的研判进度 | 0.89 | 0.05 | 0.15 → 0.15 | STAY QUIET — on topic, aimed at a human |
+| 老王你帮我看下这个 WAF 告警 | 0.91 | 0.07 | 0.28 → 0.35 | STAY QUIET — on topic, aimed at a human |
+| aegis 先别回答，等我补充一下 | 0.29 | 0.89 | 0.17 → 0.13 | STAY QUIET — named, asks nothing |
+| aegis 在吗 | 0.35 | 0.78 | 0.38 → 0.38 | STAY QUIET |
+| 谢谢 aegis | 0.32 | 0.55 | 0.06 → 0.05 | STAY QUIET |
+| 这个 WAF 告警谁看一下 | 0.92 | 0.08 | 0.96 → 0.96 | ANSWER |
+| AISOC 帮我跑个应急响应 | 0.92 | 0.22 | 0.90 → 0.91 | ANSWER — on `delegatable` 0.97 |
+
+The rest of the regression set did not change verdict either: statements
+("刚才那批告警我已经处理完了", "我觉得 aegis 这个项目做得不错"), acknowledgements,
+"@李四 你昨天那个 PPT 发我一下", "今晚吃什么？" and "帮我把这份周报排版一下".
+The named non-requests in the middle of the table are the evidence that this did
+not fold `addressed` into the question: naming the assistant without asking for
+anything still scores low.
+
+Measured and rejected on the same set:
+
+| alternative | why not |
+|---|---|
+| exclusion only ("…other than the assistant in `agent`"), no positive inclusion | "Aegis, 你来…" reached only 0.62 |
+| exclude "a named human or a different named assistant" | "Aegis, 你来…" 0.70, and "AISOC 帮我跑个应急响应" fell 0.90 → 0.74 — cuts off delegation |
+| exclude named humans only; any assistant counts | fixes the three rows (0.90 / 0.95 / 0.95), but "AISOC，你来简单说下这批 WAF 告警的研判进度" jumps 0.34 → 0.86, so this agent starts answering messages addressed to another assistant — a double reply when that bot is in the room |
+| spell out that asking *for* a status update is still asking | lowered the rows it was meant to raise ("Aegis, 你来…" 0.39, "Aegis, 帮忙…" 0.57) |
+| drop "from whoever can provide it" | no measurable change |
+| let `addressed` admit on its own, no AND | "aegis 先别回答，等我补充一下" has `addressed` 0.87; only `wants_answer` vetoes it |
+
+Two other suspects were ruled out under the old wording: adding "吗"
+("…进度吗？") left 0.79 at 0.79, so "你可以" was not being read as a statement,
+and "进度" → "情况" moved "Aegis, 你来…" only 0.50 → 0.54, so the "status updates"
+clause was not the cause.
+
+Still open: another assistant addressed with "你来" stays quiet ("AISOC，你来…告警进度"
+0.41) while "AISOC 帮我…" is admitted on `delegatable`. That is the same grammar
+effect for remote agents, left as is because answering a message aimed at
+another bot is a behaviour decision rather than a calibration fix.
+
 ### Delegation is its own question
 
 Adding `remote_agents` by widening the scope question — "something the assistant
@@ -496,9 +559,10 @@ be answered.
 ### Tuning
 
 `agent_description` is the highest-leverage knob. It is pasted verbatim into the
-state, `in_scope` resolves against it, and `addressed` looks for the assistant's
-name in it. Write it as a **named** inventory of responsibilities, not an
-anonymous mission statement:
+state, `in_scope` resolves against it, `addressed` looks for the assistant's
+name in it, and `wants_answer` uses that name to keep a request made to the
+assistant from reading as one aimed at somebody else. Write it as a **named**
+inventory of responsibilities, not an anonymous mission statement:
 
 > ✅ `Aegis, a security-operations assistant: alert triage, vulnerability and asset management, incident response procedure, security policy and compliance questions.`
 >
@@ -506,7 +570,8 @@ anonymous mission statement:
 
 The name matters as much as the list — drop it and `addressed` has nothing to
 match, so the "asks for us by name" disjunct silently stops working while the
-other two carry on.
+other two carry on, and `wants_answer` is back to reading "Aegis，你来…" as an
+errand for some named person.
 
 `relevance_threshold` (default `0.7`) is a single bar that every proposition is
 measured against, disjuncts and `wants_answer` alike. Raise it toward 0.9 to
