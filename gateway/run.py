@@ -2693,10 +2693,10 @@ def _apply_jev_complexity_route(
     *,
     model_pinned: bool = False,
 ) -> None:
-    """Re-point ``route`` at the model configured for this turn's difficulty.
+    """Re-point ``route`` at the model and effort configured for this turn's difficulty.
 
     Off unless ``HERMES_JEV_COMPLEXITY_ROUTING`` is on AND at least one band
-    model is configured AND the session has not pinned its own model with
+    model or effort is configured AND the session has not pinned its own model with
     ``/model`` — an explicit human choice outranks the classifier, and a
     session that pins a model never pays for a decision it would discard.  Jev rates the request low / medium / high in a
     single typed call (sub-second, but it is on the critical path of every
@@ -2718,6 +2718,13 @@ def _apply_jev_complexity_route(
     band, so a ``/new`` mints a new id and the next turn is rated fresh.
     Callers with no session of their own — the one-shot background-task path —
     pass nothing and are rated per turn, which is what a single-turn task means.
+
+    A band's reasoning effort is handed back as ``route["band_reasoning_config"]``
+    rather than applied here: a session ``/reasoning`` override still outranks
+    it, and only the caller knows about that (see
+    ``GatewayRunner._resolve_session_reasoning_config``). It is set even when the
+    band's model cannot be reached, and it never touches ``signature`` — effort
+    is applied per turn on the cached agent, so changing it rebuilds nothing.
     """
     if model_pinned:
         # The user picked this model with /model. An automatic classifier does
@@ -2747,9 +2754,20 @@ def _apply_jev_complexity_route(
         logger.warning("Jev complexity routing failed; keeping the session model", exc_info=True)
         return
 
-    if tier_model is None or not tier_model.model:
+    if tier_model is None:
         return
-    if tier_model.model == route["model"] and not tier_model.provider:
+    band_reasoning = tier_model.reasoning_config
+    if band_reasoning is not None:
+        route["band_reasoning_config"] = band_reasoning
+    if not tier_model.model or (
+        tier_model.model == route["model"] and not tier_model.provider
+    ):
+        if band_reasoning is not None:
+            logger.info(
+                "Jev complexity routing: keeping %s, reasoning_effort=%s",
+                route["model"] or "(default)",
+                tier_model.reasoning_effort,
+            )
         return
 
     runtime = route["runtime"]
@@ -2792,10 +2810,9 @@ def _apply_jev_complexity_route(
             )
 
     logger.info(
-        "Jev complexity routing: %s -> %s%s",
+        "Jev complexity routing: %s -> %s",
         route["model"] or "(default)",
-        tier_model.model,
-        f" via {tier_model.provider}" if tier_model.provider else "",
+        jev_policy.describe_tier(tier_model),
     )
     route["model"] = tier_model.model
     route["signature"] = (
@@ -4767,12 +4784,6 @@ class TurnRunner:
             }
 
         pr = self._runner._provider_routing
-        reasoning_config = self._runner._resolve_session_reasoning_config(
-            source=ctx.source,
-            session_key=ctx.session_key,
-            model=model,
-        )
-        self._runner._reasoning_config = reasoning_config
         self._runner._service_tier = self._runner._resolve_session_service_tier(
             source=ctx.source, session_key=ctx.session_key
         )
@@ -4874,6 +4885,16 @@ class TurnRunner:
         turn_route = self._runner._resolve_turn_agent_config(
             ctx.message, model, runtime_kwargs, session_id=ctx.session_id,
         )
+        # Resolved after the turn route so a Jev band's model gets its own
+        # per-model override and a band's effort applies (session /reasoning
+        # still wins over both).
+        reasoning_config = self._runner._resolve_session_reasoning_config(
+            source=ctx.source,
+            session_key=ctx.session_key,
+            model=turn_route["model"],
+            band_reasoning=turn_route.get("band_reasoning_config"),
+        )
+        self._runner._reasoning_config = reasoning_config
 
         # Per-platform skip_context_files — messaging platforms can opt out
         # of filesystem-heavy context-file discovery (SOUL.md, AGENTS.md,
@@ -7379,7 +7400,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         Uses the session's primary model/provider, unless Jev complexity
         routing is enabled and rates this turn into a band with its own
-        configured model.  If `/fast` is enabled and the model supports
+        configured model.  A band's reasoning effort comes back as
+        ``band_reasoning_config`` for the caller to rank against the session's
+        ``/reasoning`` override.  If `/fast` is enabled and the model supports
         Priority Processing / Anthropic fast mode, attach `request_overrides`
         so the API call is marked accordingly.
         """
@@ -8545,15 +8568,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         source: Optional[SessionSource] = None,
         session_key: Optional[str] = None,
         model: str = "",
+        band_reasoning: Optional[dict] = None,
     ) -> dict | None:
         """Resolve reasoning effort for a session, honoring session overrides.
 
         Priority: session-scoped ``/reasoning --session`` override >
-        per-model override (``agent.reasoning_overrides``) > global
-        ``agent.reasoning_effort``. ``model`` should be the session's
-        *effective* model (session ``/model`` override included) so
-        per-model overrides track what the session actually runs — when
-        empty, the config's ``model.default`` is used.
+        Jev band effort (``band_reasoning``) > per-model override
+        (``agent.reasoning_overrides``) > global ``agent.reasoning_effort``.
+        ``model`` should be the model this turn actually runs — the session's
+        effective model (``/model`` override included), or the Jev band's
+        model when complexity routing moved it — so per-model overrides track
+        what is really answering. When empty, the config's ``model.default``
+        is used.
+
+        The band outranks the per-model override because it is the more
+        specific decision: "this request is hard" rather than "this model
+        usually runs at". A session override outranks the band for the same
+        reason ``/model`` does — an explicit human choice beats a classifier.
         """
         resolved_session_key = session_key
         if not resolved_session_key and source is not None:
@@ -8565,7 +8596,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if resolved_session_key:
             _r_state = self._peek_session_state(resolved_session_key)
             if _r_state is not None and _r_state.conversation.reasoning_override is not None:
+                if band_reasoning is not None:
+                    logger.debug(
+                        "Jev band reasoning %s outranked by the session /reasoning override",
+                        band_reasoning,
+                    )
                 return _r_state.conversation.reasoning_override
+        if band_reasoning is not None:
+            return dict(band_reasoning)
         return self._load_reasoning_config(model)
 
     def _set_session_reasoning_override(
@@ -20507,12 +20545,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             pr = self._provider_routing
             max_iterations = _current_max_iterations()
-            reasoning_config = self._resolve_session_reasoning_config(
-                source=source, model=model
-            )
-            self._reasoning_config = reasoning_config
             self._service_tier = self._resolve_session_service_tier(source=source)
             turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
+            reasoning_config = self._resolve_session_reasoning_config(
+                source=source,
+                model=turn_route["model"],
+                band_reasoning=turn_route.get("band_reasoning_config"),
+            )
+            self._reasoning_config = reasoning_config
 
             # Enrich the prompt with image descriptions so the background
             # agent can see user-attached images (same as the main flow).

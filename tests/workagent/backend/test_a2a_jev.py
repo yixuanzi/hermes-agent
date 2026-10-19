@@ -225,3 +225,17 @@ def test_the_autoreply_master_switch_does_not_reach_this_surface(monkeypatch):
     monkeypatch.setattr(jev_policy, "channel_autoreply_active", lambda _s, **_kw: False)
 
     assert asyncio.run(executor._jev_channel_request_in_scope("anything", {})) is True
+
+
+def test_the_band_effort_reaches_the_cached_agent(monkeypatch):
+    executor = _executor()
+    agent = SimpleNamespace(model="profile-model", provider="openai", reasoning_config=None)
+
+    _stub_routing(monkeypatch, tier_model=TierModel(reasoning_effort="xhigh"))
+    asyncio.run(executor._apply_jev_complexity_route(agent, "design the migration"))
+    assert agent.model == "profile-model"
+    assert agent.reasoning_config == {"enabled": True, "effort": "xhigh"}
+
+    _stub_routing(monkeypatch, tier_model=None)
+    asyncio.run(executor._apply_jev_complexity_route(agent, "hi"))
+    assert agent.reasoning_config is None

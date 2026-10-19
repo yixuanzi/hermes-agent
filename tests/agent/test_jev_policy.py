@@ -18,6 +18,7 @@ _JEV_ENV = [
     "HERMES_JEV_RELEVANCE_THRESHOLD",
     "HERMES_JEV_MODEL_LOW", "HERMES_JEV_MODEL_MEDIUM", "HERMES_JEV_MODEL_HIGH",
     "HERMES_JEV_PROVIDER_LOW", "HERMES_JEV_PROVIDER_MEDIUM", "HERMES_JEV_PROVIDER_HIGH",
+    "HERMES_JEV_REASONING_LOW", "HERMES_JEV_REASONING_MEDIUM", "HERMES_JEV_REASONING_HIGH",
     "HERMES_JEV_AGENT_DESCRIPTION", "HERMES_JEV_REMOTE_AGENTS",
     "HERMES_JEV_AUTOREPLY", "HERMES_JEV_THREAD_AUTOREPLY",
     "HERMES_JEV_CRITERIA_LOW", "HERMES_JEV_CRITERIA_MEDIUM", "HERMES_JEV_CRITERIA_HIGH",
@@ -1166,13 +1167,15 @@ def test_an_empty_provider_env_var_is_not_a_provider(jev_env, monkeypatch):
 @pytest.mark.parametrize(
     "raw, expected",
     [
-        ("plain-model", ("plain-model", None)),
-        ({"model": "m", "provider": "p"}, ("m", "p")),
-        ({"model": "m"}, ("m", None)),
-        ({"provider": "p"}, ("", "p")),
-        ({}, ("", None)),
-        (None, ("", None)),
-        (123, ("", None)),
+        ("plain-model", ("plain-model", None, None)),
+        ({"model": "m", "provider": "p"}, ("m", "p", None)),
+        ({"model": "m"}, ("m", None, None)),
+        ({"provider": "p"}, ("", "p", None)),
+        ({"model": "m", "reasoning_effort": "high"}, ("m", None, "high")),
+        ({"reasoning_effort": False}, ("", None, False)),  # raw: YAML false survives
+        ({}, ("", None, None)),
+        (None, ("", None, None)),
+        (123, ("", None, None)),
     ],
 )
 def test_a_yaml_band_entry_is_read_in_both_forms(raw, expected):
@@ -1615,3 +1618,256 @@ def test_the_master_switch_is_read_from_env_and_config(jev_env, monkeypatch):
     assert jev_policy.load_jev_settings().autoreply_gate is True
     monkeypatch.setenv("HERMES_JEV_AUTOREPLY", "false")
     assert jev_policy.load_jev_settings().autoreply_gate is False
+
+
+# --- per-band reasoning effort ----------------------------------------------
+#
+# jev.models.<band>.reasoning_effort / HERMES_JEV_REASONING_<BAND> use the same
+# vocabulary as agent.reasoning_effort and merge per field like model/provider.
+# A band may carry an effort and no model: same model, different depth.
+
+
+def test_a_band_effort_comes_from_config_yaml(jev_env):
+    jev_env["models"] = {"high": {"model": "big", "reasoning_effort": "xhigh"}}
+    assert jev_policy.load_jev_settings().tier_models["high"] == TierModel(
+        model="big", reasoning_effort="xhigh"
+    )
+
+
+def test_a_band_effort_comes_from_the_environment(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_MODEL_LOW", "small")
+    monkeypatch.setenv("HERMES_JEV_REASONING_LOW", "minimal")
+    assert jev_policy.load_jev_settings().tier_models["low"] == TierModel(
+        model="small", reasoning_effort="minimal"
+    )
+
+
+def test_an_effort_env_var_keeps_the_model_and_provider_from_yaml(jev_env, monkeypatch):
+    jev_env["models"] = {
+        "high": {"model": "big", "provider": "anthropic", "reasoning_effort": "high"},
+    }
+    monkeypatch.setenv("HERMES_JEV_REASONING_HIGH", "max")
+    assert jev_policy.load_jev_settings().tier_models["high"] == TierModel(
+        model="big", provider="anthropic", reasoning_effort="max"
+    )
+
+
+def test_a_model_env_var_keeps_the_effort_from_yaml(jev_env, monkeypatch):
+    jev_env["models"] = {"high": {"model": "big", "reasoning_effort": "high"}}
+    monkeypatch.setenv("HERMES_JEV_MODEL_HIGH", "bigger")
+    assert jev_policy.load_jev_settings().tier_models["high"] == TierModel(
+        model="bigger", reasoning_effort="high"
+    )
+
+
+def test_an_effort_only_band_is_a_band(jev_env):
+    jev_env["models"] = {"medium": {"reasoning_effort": "medium"}}
+    band = jev_policy.load_jev_settings().tier_models["medium"]
+    assert band == TierModel(model="", reasoning_effort="medium")
+    assert band.reasoning_config == {"enabled": True, "effort": "medium"}
+
+
+def test_an_effort_alone_switches_routing_on(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_COMPLEXITY_ROUTING", "true")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    assert jev_policy.complexity_routing_active() is False
+    monkeypatch.setenv("HERMES_JEV_REASONING_HIGH", "xhigh")
+    assert jev_policy.complexity_routing_active() is True
+
+
+@pytest.mark.parametrize("raw", [False, "none", "false", "disabled", "NONE"])
+def test_a_band_can_turn_thinking_off(jev_env, raw):
+    jev_env["models"] = {"low": {"model": "small", "reasoning_effort": raw}}
+    band = jev_policy.load_jev_settings().tier_models["low"]
+    assert band.reasoning_effort == "none"
+    assert band.reasoning_config == {"enabled": False}
+
+
+def test_a_band_effort_is_normalized(jev_env):
+    jev_env["models"] = {"high": {"model": "big", "reasoning_effort": "  XHigh "}}
+    assert jev_policy.load_jev_settings().tier_models["high"].reasoning_effort == "xhigh"
+
+
+@pytest.mark.parametrize("raw", ["", "   ", None])
+def test_a_blank_effort_is_unset(jev_env, raw):
+    jev_env["models"] = {"high": {"model": "big", "reasoning_effort": raw}}
+    band = jev_policy.load_jev_settings().tier_models["high"]
+    assert band.reasoning_effort is None
+    assert band.reasoning_config is None
+
+
+def test_an_unknown_effort_is_ignored_with_a_warning(jev_env, caplog):
+    caplog.set_level("WARNING")
+    jev_env["models"] = {"high": {"model": "big", "reasoning_effort": "hihg"}}
+    assert jev_policy.load_jev_settings().tier_models["high"].reasoning_effort is None
+    assert any("hihg" in r.getMessage() for r in caplog.records)
+
+
+def test_an_unknown_effort_with_no_model_is_no_band(jev_env, caplog):
+    caplog.set_level("WARNING")
+    jev_env["models"] = {"high": {"reasoning_effort": "turbo"}}
+    assert "high" not in jev_policy.load_jev_settings().tier_models
+
+
+def test_an_unknown_effort_env_var_falls_back_to_yaml(jev_env, monkeypatch, caplog):
+    caplog.set_level("WARNING")
+    jev_env["models"] = {"high": {"model": "big", "reasoning_effort": "high"}}
+    monkeypatch.setenv("HERMES_JEV_REASONING_HIGH", "hihg")
+    assert jev_policy.load_jev_settings().tier_models["high"].reasoning_effort == "high"
+    assert any("HERMES_JEV_REASONING_HIGH" in r.getMessage() for r in caplog.records)
+
+
+def test_a_provider_without_a_model_is_dropped_from_an_effort_band(
+    jev_env, monkeypatch, caplog,
+):
+    caplog.set_level("WARNING")
+    jev_env["models"] = {"high": {"provider": "anthropic", "reasoning_effort": "high"}}
+    band = jev_policy.load_jev_settings().tier_models["high"]
+    assert band == TierModel(model="", provider=None, reasoning_effort="high")
+    assert any("no model" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "tier_model, expected",
+    [
+        (None, "default model"),
+        (TierModel(model="big"), "big"),
+        (TierModel(model="big", provider="anthropic"), "big via anthropic"),
+        (TierModel(model="big", reasoning_effort="high"), "big (reasoning_effort=high)"),
+        (TierModel(reasoning_effort="none"), "default model (reasoning_effort=none)"),
+    ],
+)
+def test_describe_tier(tier_model, expected):
+    assert jev_policy.describe_tier(tier_model) == expected
+
+
+def test_a_reused_band_names_its_effort(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    settings = jev_policy.JevSettings(
+        api_key="k", complexity_routing=True, complexity_scope="session",
+        tier_models={"high": TierModel(model="big", reasoning_effort="xhigh")},
+    )
+    jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s")
+    caplog.clear()
+    result = jev_policy.route_model_for_request(
+        "b", settings=settings, client=client, session_key="s",
+    )
+    assert result.reasoning_effort == "xhigh"
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "reused" in line and "reasoning_effort=xhigh" in line
+
+
+# --- per-band effort on a long-lived agent (A2A) -----------------------------
+
+
+def _reasoning_agent(reasoning_config=None):
+    return SimpleNamespace(
+        model="default-model", provider="openai", reasoning_config=reasoning_config,
+    )
+
+
+def test_a_band_effort_is_applied_with_the_band_model():
+    agent = _reasoning_agent()
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", reasoning_effort="high"))
+    assert agent.model == "big"
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+
+def test_an_effort_only_band_keeps_the_profile_model():
+    agent = _reasoning_agent()
+    assert jev_policy.apply_tier_to_agent(
+        agent, TierModel(reasoning_effort="xhigh")
+    ) == "default-model"
+    assert agent.model == "default-model"
+    assert agent.reasoning_config == {"enabled": True, "effort": "xhigh"}
+
+
+def test_an_effort_only_band_after_a_model_band_restores_the_profile_model():
+    agent = _reasoning_agent()
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big"))
+    jev_policy.apply_tier_to_agent(agent, TierModel(reasoning_effort="low"))
+    assert agent.model == "default-model"
+    assert agent.reasoning_config == {"enabled": True, "effort": "low"}
+
+
+def test_no_band_restores_the_profile_reasoning():
+    profile = {"enabled": True, "effort": "medium"}
+    agent = _reasoning_agent(profile)
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", reasoning_effort="max"))
+    jev_policy.apply_tier_to_agent(agent, None)
+    assert agent.model == "default-model"
+    assert agent.reasoning_config == profile
+
+
+def test_no_band_restores_a_profile_with_no_reasoning_config():
+    agent = _reasoning_agent(None)
+    jev_policy.apply_tier_to_agent(agent, TierModel(reasoning_effort="high"))
+    jev_policy.apply_tier_to_agent(agent, None)
+    assert agent.reasoning_config is None
+
+
+def test_a_band_without_an_effort_keeps_the_profile_reasoning():
+    profile = {"enabled": True, "effort": "medium"}
+    agent = _reasoning_agent(profile)
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", reasoning_effort="max"))
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="other-big"))
+    assert agent.reasoning_config == profile
+
+
+def test_a_cross_provider_switch_does_not_leak_its_own_reasoning(monkeypatch):
+    # switch_model re-resolves reasoning for the new model on its own; without
+    # a band effort, the agent must still run on its profile reasoning.
+    agent = _switchable(model="default-model", requested_provider="openai")
+    agent.reasoning_config = {"enabled": True, "effort": "medium"}
+    original_switch = agent.switch_model
+
+    def _switch_and_reresolve(**kwargs):
+        original_switch(**kwargs)
+        agent.reasoning_config = {"enabled": True, "effort": "ultra"}
+
+    agent.switch_model = _switch_and_reresolve
+    _stub_credentials(monkeypatch, {"anthropic": "https://anthropic.test"})
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", provider="anthropic"))
+    assert agent.model == "big"
+    assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
+
+
+def test_a_band_effort_applies_even_when_its_provider_is_unreachable(monkeypatch):
+    import hermes_cli.runtime_provider as rp
+
+    def _boom(**_kwargs):
+        raise RuntimeError("no credentials for anthropic")
+
+    monkeypatch.setattr(rp, "resolve_runtime_provider", _boom)
+    agent = _switchable(model="default-model", requested_provider="openai")
+    agent.reasoning_config = None
+    jev_policy.apply_tier_to_agent(
+        agent, TierModel(model="big", provider="anthropic", reasoning_effort="high"),
+    )
+    assert agent.model == "default-model"
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+
+def test_a_band_can_turn_thinking_off_on_the_agent():
+    agent = _reasoning_agent({"enabled": True, "effort": "medium"})
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="small", reasoning_effort="none"))
+    assert agent.reasoning_config == {"enabled": False}
+
+
+def test_the_profile_reasoning_baseline_is_captured_once():
+    agent = _reasoning_agent({"enabled": True, "effort": "medium"})
+    jev_policy.apply_tier_to_agent(agent, TierModel(reasoning_effort="high"))
+    jev_policy.apply_tier_to_agent(agent, TierModel(reasoning_effort="low"))
+    jev_policy.apply_tier_to_agent(agent, None)
+    assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
+
+
+def test_the_profile_reasoning_baseline_is_a_copy():
+    profile = {"enabled": True, "effort": "medium"}
+    agent = _reasoning_agent(profile)
+    jev_policy.apply_tier_to_agent(agent, None)
+    profile["effort"] = "ultra"  # mutated in place after capture
+    jev_policy.apply_tier_to_agent(agent, TierModel(reasoning_effort="high"))
+    jev_policy.apply_tier_to_agent(agent, None)
+    assert agent.reasoning_config == {"enabled": True, "effort": "medium"}

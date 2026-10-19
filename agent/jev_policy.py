@@ -8,10 +8,10 @@ Two independent, independently-gated decisions sit in front of the agent loop:
    then is the message admitted (and answered in a topic/thread under it).
 2. **Complexity routing** — with ``HERMES_JEV_COMPLEXITY_ROUTING`` on, Jev picks
    one of low / medium / high / ``other`` for the request and the turn is routed
-   to the model configured for that band.  Each band's criteria are configurable
-   (``HERMES_JEV_CRITERIA_<BAND>`` / ``jev.criteria.<band>``); ``other`` means
-   none of them matched.  ``other``, or an unconfigured band → the agent's
-   default model.
+   to the model and/or reasoning effort configured for that band.  Each band's
+   criteria are configurable (``HERMES_JEV_CRITERIA_<BAND>`` /
+   ``jev.criteria.<band>``); ``other`` means none of them matched.  ``other``,
+   or an unconfigured band → the agent's default model and effort.
 
 Both are OFF by default and both fail *safe*: with no API key, no configured
 scope, no configured band model, an unreadable answer, or any transport error,
@@ -327,10 +327,40 @@ def _as_scope(raw: Any) -> str:
 
 @dataclass(frozen=True)
 class TierModel:
-    """The model a complexity band routes to."""
+    """What a complexity band routes to: a model, a reasoning effort, or both.
 
-    model: str
+    ``model`` empty means the band keeps the session's own model and only sets
+    the effort — "the same model, but think harder on the hard ones".
+    """
+
+    model: str = ""
     provider: Optional[str] = None
+    #: Normalized effort (``none`` / ``minimal`` … ``ultra``), or ``None`` to
+    #: leave reasoning to the usual per-model / global resolution. Stored as the
+    #: string rather than the parsed dict so the band stays hashable and reads
+    #: the way it was configured.
+    reasoning_effort: Optional[str] = None
+
+    @property
+    def reasoning_config(self) -> Optional[Dict[str, Any]]:
+        """The band's effort as a ``reasoning_config`` dict, or ``None`` if unset."""
+        if self.reasoning_effort is None:
+            return None
+        from hermes_constants import parse_reasoning_effort
+
+        return parse_reasoning_effort(self.reasoning_effort)
+
+
+def describe_tier(tier_model: Optional[TierModel]) -> str:
+    """One log-friendly phrase for what a band routes to."""
+    if tier_model is None:
+        return "default model"
+    text = tier_model.model or "default model"
+    if tier_model.provider:
+        text += f" via {tier_model.provider}"
+    if tier_model.reasoning_effort is not None:
+        text += f" (reasoning_effort={tier_model.reasoning_effort})"
+    return text
 
 
 @dataclass(frozen=True)
@@ -394,35 +424,72 @@ def _complexity_criteria(settings: JevSettings) -> Dict[str, str]:
     return criteria
 
 
-def _configured_tier(raw: Any) -> Tuple[str, Optional[str]]:
-    """Read one ``jev.models.<band>`` entry as ``(model, provider)``.
+def _configured_tier(raw: Any) -> Tuple[str, Optional[str], Any]:
+    """Read one ``jev.models.<band>`` entry as ``(model, provider, effort)``.
 
     Accepts the shorthand ``"model-name"`` and the full
-    ``{model: ..., provider: ...}`` form.
+    ``{model: ..., provider: ..., reasoning_effort: ...}`` form. The effort is
+    returned raw — a YAML ``false`` must survive to mean "thinking off" — and is
+    normalized by ``_band_effort``.
     """
     if isinstance(raw, str):
-        return raw.strip(), None
+        return raw.strip(), None, None
     if isinstance(raw, dict):
         model = str(raw.get("model") or "").strip()
         provider = str(raw.get("provider") or "").strip() or None
-        return model, provider
-    return "", None
+        return model, provider, raw.get("reasoning_effort")
+    return "", None, None
+
+
+def _band_effort(raw: Any, tier: str, source: str) -> Optional[str]:
+    """Normalize one band's configured effort, or ``None`` when it is unset.
+
+    Uses the same vocabulary as ``agent.reasoning_effort`` and ``/reasoning``
+    (``hermes_constants.parse_reasoning_effort``), so ``none`` / ``false`` /
+    YAML ``false`` turn thinking off. An unrecognized value is warned about and
+    treated as unset: the band falls back to the usual resolution rather than
+    guessing a level.
+    """
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    from hermes_constants import VALID_REASONING_EFFORTS, parse_reasoning_effort
+
+    parsed = parse_reasoning_effort(raw)
+    if parsed is None:
+        logger.warning(
+            "[Jev] band %r has an unknown reasoning effort %r (from %s); ignored — "
+            "expected none, %s",
+            tier,
+            raw,
+            source,
+            ", ".join(VALID_REASONING_EFFORTS),
+        )
+        return None
+    if parsed.get("enabled") is False:
+        return "none"
+    return parsed["effort"]
 
 
 def _resolve_tier_models(config: Mapping[str, Any]) -> Dict[str, TierModel]:
-    """Resolve each band's model and provider, env overriding config per FIELD.
+    """Resolve each band's model, provider and effort, env overriding config per FIELD.
 
-    ``HERMES_JEV_MODEL_<BAND>`` and ``HERMES_JEV_PROVIDER_<BAND>`` each override
-    only the field they name.  Setting just the model env var therefore keeps a
-    provider configured in ``config.yaml`` instead of silently discarding it —
-    the two surfaces express the same thing, so neither should erase the other.
+    ``HERMES_JEV_MODEL_<BAND>``, ``HERMES_JEV_PROVIDER_<BAND>`` and
+    ``HERMES_JEV_REASONING_<BAND>`` each override only the field they name.
+    Setting just the model env var therefore keeps a provider configured in
+    ``config.yaml`` instead of silently discarding it — the two surfaces express
+    the same thing, so neither should erase the other.
+
+    A band needs a model or an effort to exist. One with an effort and no model
+    keeps the session's model and only changes how hard it thinks. A provider
+    without a model cannot route on its own and is dropped with a warning.
     """
     raw_models = config.get("models")
     raw_models = raw_models if isinstance(raw_models, dict) else {}
     resolved: Dict[str, TierModel] = {}
 
     for tier in COMPLEXITY_TIERS:
-        model, provider = _configured_tier(raw_models.get(tier))
+        model, provider, raw_effort = _configured_tier(raw_models.get(tier))
+        effort = _band_effort(raw_effort, tier, f"jev.models.{tier}.reasoning_effort")
 
         env_model = _env(f"HERMES_JEV_MODEL_{tier.upper()}")
         if env_model:
@@ -430,17 +497,25 @@ def _resolve_tier_models(config: Mapping[str, Any]) -> Dict[str, TierModel]:
         env_provider = _env(f"HERMES_JEV_PROVIDER_{tier.upper()}")
         if env_provider:
             provider = env_provider
+        env_effort_name = f"HERMES_JEV_REASONING_{tier.upper()}"
+        env_effort = _band_effort(_env(env_effort_name), tier, env_effort_name)
+        if env_effort is not None:
+            effort = env_effort
 
-        if model:
-            resolved[tier] = TierModel(model=model, provider=provider)
-        elif provider:
+        if provider and not model:
             logger.warning(
-                "[Jev] band %r has a provider (%s) but no model; the band is "
+                "[Jev] band %r has a provider (%s) but no model; the provider is "
                 "ignored — set HERMES_JEV_MODEL_%s or jev.models.%s",
                 tier,
                 provider,
                 tier.upper(),
                 tier,
+            )
+            provider = None
+
+        if model or effort is not None:
+            resolved[tier] = TierModel(
+                model=model, provider=provider, reasoning_effort=effort,
             )
     return resolved
 
@@ -596,8 +671,9 @@ def complexity_routing_active(settings: Optional[JevSettings] = None) -> bool:
         return False
     if not settings.tier_models:
         logger.debug(
-            "[Jev] complexity routing is on but no HERMES_JEV_MODEL_{LOW,MEDIUM,HIGH} "
-            "is configured — every band keeps the agent's default model"
+            "[Jev] complexity routing is on but no band has a model or reasoning "
+            "effort (HERMES_JEV_MODEL_<BAND> / HERMES_JEV_REASONING_<BAND>) — every "
+            "band keeps the agent's default"
         )
         return False
     return True
@@ -873,7 +949,7 @@ async def judge_complexity_async(
 def resolve_tier_model(
     tier: Optional[str], settings: Optional[JevSettings] = None
 ) -> Optional[TierModel]:
-    """The model configured for ``tier``, or ``None`` to keep the default.
+    """What ``tier`` routes to (model and/or effort), or ``None`` to keep the default.
 
     ``other`` is rejected explicitly rather than by falling off the end of the
     lookup: it must keep meaning "the default model" even if a deployment ever
@@ -945,7 +1021,7 @@ def route_model_for_request(
     client: Optional[JevClient] = None,
     session_key: Optional[str] = None,
 ) -> Optional[TierModel]:
-    """Classify ``text`` and return the band's model, or ``None`` for default.
+    """Classify ``text`` and return the band's route, or ``None`` for default.
 
     The single entry point for complexity routing: it re-checks the feature gate
     itself, so callers only need one guarded call.
@@ -976,7 +1052,7 @@ def route_model_for_request(
             logger.info(
                 "[Jev] complexity: %s reused for this session (scope=session) -> %s",
                 remembered,
-                model.model if model else "default model",
+                describe_tier(model),
             )
             return model
 
@@ -1094,14 +1170,22 @@ def apply_tier_to_agent(agent: Any, tier_model: Optional[TierModel]) -> Optional
     """Point a long-lived agent at ``tier_model`` for the coming turn.
 
     Used by surfaces that reuse one cached ``AIAgent`` across turns (the
-    WORKAGENT A2A executor). The agent's own runtime is captured the first time
-    this runs and restored whenever a turn resolves to no band, so turning the
-    feature off — or a single ``other`` turn — never leaves the agent stranded
-    on the previous band.
+    WORKAGENT A2A executor). The agent's own runtime and reasoning config are
+    captured the first time this runs and restored whenever a turn resolves to
+    no band, so turning the feature off — or a single ``other`` turn — never
+    leaves the agent stranded on the previous band.
 
     A band pinned to a *different provider* is honored: its credentials are
     resolved and the agent is swapped onto them in place. A band with no
-    provider swaps only the model and keeps the session's own credentials.
+    provider swaps only the model and keeps the session's own credentials. A
+    band with only an effort keeps the profile's runtime.
+
+    The band's effort, when it has one, is applied even if its model could not
+    be reached: it says how hard this request is, which still holds on the
+    model the turn ends up on. A band without an effort runs on the reasoning
+    config the agent was built with — including after a cross-provider swap,
+    whose own per-model re-resolution would otherwise make the effort depend on
+    which kind of band this happened to be.
     Returns the model now in effect, or ``None`` when the agent was untouched.
     """
     if agent is None:
@@ -1112,10 +1196,45 @@ def apply_tier_to_agent(agent: Any, tier_model: Optional[TierModel]) -> Optional
         baseline = _agent_runtime_snapshot(agent)
         try:
             agent._jev_baseline_runtime = baseline
+            reasoning = getattr(agent, "reasoning_config", None)
+            agent._jev_baseline_reasoning = (
+                dict(reasoning) if isinstance(reasoning, dict) else reasoning
+            )
         except Exception:
             return None
 
-    # ── Decide the runtime this turn should run on ──
+    runtime_band = tier_model if tier_model is not None and tier_model.model else None
+    model = _apply_tier_runtime(agent, runtime_band, baseline)
+    _apply_tier_reasoning(agent, tier_model)
+    return model
+
+
+def _apply_tier_reasoning(agent: Any, tier_model: Optional[TierModel]) -> None:
+    """Set the agent's reasoning config for this turn: the band's, or the baseline."""
+    band_reasoning = tier_model.reasoning_config if tier_model is not None else None
+    if band_reasoning is not None:
+        target = band_reasoning
+    else:
+        target = getattr(agent, "_jev_baseline_reasoning", None)
+    if getattr(agent, "reasoning_config", None) == target:
+        return
+    try:
+        agent.reasoning_config = None if target is None else dict(target)
+    except Exception:
+        logger.debug("[Jev] could not set agent.reasoning_config", exc_info=True)
+        return
+    if band_reasoning is not None:
+        logger.info(
+            "[Jev] reasoning_effort for this turn: %s", tier_model.reasoning_effort,
+        )
+    else:
+        logger.info("[Jev] restoring the profile reasoning config %s", target)
+
+
+def _apply_tier_runtime(
+    agent: Any, tier_model: Optional[TierModel], baseline: Dict[str, Any],
+) -> Optional[str]:
+    """Move the agent onto ``tier_model``'s runtime, or back to ``baseline``."""
     target: Optional[Dict[str, Any]] = None
     if tier_model is not None and tier_model.model:
         if not tier_model.provider or _provider_ids_match(

@@ -2027,11 +2027,18 @@ DEFAULT_CONFIG = {
             "medium": "",
             "high": "",
         },
-        # Per-band model. A band left empty keeps the agent's default model.
-        # Either "model-name" or {model: ..., provider: ...}. The matching
-        # HERMES_JEV_MODEL_<BAND> / HERMES_JEV_PROVIDER_<BAND> env vars override
-        # these per FIELD, so setting only the model env var keeps a provider
-        # configured here.
+        # Per-band model and reasoning effort. A band left empty keeps the
+        # agent's default model and effort. Either "model-name" or
+        # {model: ..., provider: ..., reasoning_effort: ...}; every field is
+        # optional, and a band with only reasoning_effort keeps the session's
+        # model and changes only how hard it thinks. reasoning_effort takes the
+        # agent.reasoning_effort vocabulary (none|minimal|low|medium|high|xhigh|
+        # max|ultra); it outranks agent.reasoning_overrides, a session
+        # /reasoning still outranks it, and each provider clamps a level its
+        # model does not accept. The matching HERMES_JEV_MODEL_<BAND> /
+        # HERMES_JEV_PROVIDER_<BAND> / HERMES_JEV_REASONING_<BAND> env vars
+        # override these per FIELD, so setting only the model env var keeps a
+        # provider or effort configured here.
         "models": {
             "low": "",
             "medium": "",

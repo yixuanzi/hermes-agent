@@ -8,7 +8,7 @@ forward pass and returns *calibrated* probabilities instead of prose.
 | # | Feature | Flag | Surfaces |
 |---|---------|------|----------|
 | 1 | **Channel admission** — answer a group message that did not `@`-mention the bot, when it is the agent's business, delegatable, or asks for the agent by name | `HERMES_JEV_CHANNEL_AUTOREPLY` (+ `HERMES_JEV_THREAD_AUTOREPLY` inside topics; `HERMES_JEV_AUTOREPLY` is the master switch for the stage — **gateway only**) | Feishu/Lark gateway, WORKAGENT A2A service |
-| 2 | **Complexity routing** — classify each turn low/medium/high/`other` against configurable criteria and run it on that band's model (`other` → the default model) | `HERMES_JEV_COMPLEXITY_ROUTING` (+ `HERMES_JEV_CRITERIA_{LOW,MEDIUM,HIGH}` to define the bands) | Gateway (all platforms), WORKAGENT A2A service |
+| 2 | **Complexity routing** — classify each turn low/medium/high/`other` against configurable criteria and run it on that band's model and/or reasoning effort (`other` → the default model and effort) | `HERMES_JEV_COMPLEXITY_ROUTING` (+ `HERMES_JEV_CRITERIA_{LOW,MEDIUM,HIGH}` to define the bands) | Gateway (all platforms), WORKAGENT A2A service |
 
 Both are **off by default** and independent — enabling one does not enable the
 other. Both **fail safe**: with no API key, no agent description, no band model,
@@ -52,6 +52,8 @@ HERMES_JEV_MODEL_LOW=gpt-5-mini
 HERMES_JEV_MODEL_MEDIUM=gpt-5
 HERMES_JEV_MODEL_HIGH=claude-opus-5
 HERMES_JEV_PROVIDER_HIGH=anthropic        # optional, per band
+HERMES_JEV_REASONING_LOW=minimal          # optional, per band: none|minimal|low|medium|high|xhigh|max|ultra
+HERMES_JEV_REASONING_HIGH=xhigh
 ```
 
 ```yaml
@@ -74,8 +76,8 @@ jev:
     high: ""
   models:
     low: ""
-    medium: ""
-    high: { model: big-model, provider: anthropic }   # provider is optional
+    medium: { reasoning_effort: high }                 # effort only: keep the session's model
+    high: { model: big-model, provider: anthropic, reasoning_effort: xhigh }   # every field optional
 ```
 
 These keys are **profile-scoped**, not global: a multiplexing gateway can serve
@@ -84,9 +86,10 @@ two agent descriptions and two sets of band models from one process.
 ### Band configuration
 
 The two surfaces express the same thing, so they merge **per field** rather than
-one replacing the other. Each band takes its `model` and `provider` from
-`jev.models.<band>`, and `HERMES_JEV_MODEL_<BAND>` / `HERMES_JEV_PROVIDER_<BAND>`
-override only the field they name:
+one replacing the other. Each band takes its `model`, `provider` and
+`reasoning_effort` from `jev.models.<band>`, and `HERMES_JEV_MODEL_<BAND>` /
+`HERMES_JEV_PROVIDER_<BAND>` / `HERMES_JEV_REASONING_<BAND>` override only the
+field they name:
 
 | `jev.models.low` | `HERMES_JEV_MODEL_LOW` | `HERMES_JEV_PROVIDER_LOW` | result |
 |---|---|---|---|
@@ -98,10 +101,20 @@ override only the field they name:
 | — | — | `openai` | **ignored**, with a warning — a provider without a model cannot route |
 
 The second row is the one that matters: setting only the model env var keeps the
-provider from `config.yaml` instead of silently discarding it.
+provider from `config.yaml` instead of silently discarding it. The effort merges
+the same way — `HERMES_JEV_REASONING_HIGH=max` over
+`{model: big, reasoning_effort: high}` is `big` at `max`, and
+`HERMES_JEV_MODEL_HIGH=bigger` over the same entry keeps `high`.
+
+A band needs a **model or an effort** to exist. One with only an effort keeps the
+session's model — see *Reasoning effort per band*. A provider with no model is
+still dropped with a warning; if the band also has an effort, the band survives
+as effort-only and only the provider is discarded.
 
 `provider` is optional everywhere. Leave it unset for the common case — a band
-that runs on the session's own provider and only swaps the model.
+that runs on the session's own provider and only swaps the model. So is
+`reasoning_effort`: leave it unset and the band runs at whatever effort that
+model would normally get.
 
 ## Feature 1 — channel admission
 
@@ -617,7 +630,8 @@ unreadable answer all keep the agent's default model.
 ### `/model` wins
 
 A session that pinned its own model with `/model` is **not** classified at all — no
-Jev call is made, and the turn runs on the model the user chose. An automatic
+Jev call is made, and the turn runs on the model the user chose (so no band
+effort applies either). An automatic
 classifier does not overrule an explicit human choice, and silently doing so
 would make `/model` look broken.
 
@@ -844,11 +858,12 @@ Two steps, in `agent/jev_client.py::_parse_answer` then `judge_complexity`:
 1. **the returned `choice`**, or the argmax of `probabilities` when the service
    sends no explicit pick. An answer that is not one of the four options is
    treated as undecided rather than guessed at.
-2. **band → model**: `HERMES_JEV_MODEL_{LOW,MEDIUM,HIGH}` plus the optional
-   `HERMES_JEV_PROVIDER_{LOW,MEDIUM,HIGH}` (or `jev.models.*`) — see
+2. **band → model and effort**: `HERMES_JEV_MODEL_{LOW,MEDIUM,HIGH}` plus the
+   optional `HERMES_JEV_PROVIDER_{LOW,MEDIUM,HIGH}` and
+   `HERMES_JEV_REASONING_{LOW,MEDIUM,HIGH}` (or `jev.models.*`) — see
    *Band configuration* above. An unconfigured band is also `None` → default
-   model. So you can configure `HIGH` alone and leave everything else on the
-   session model.
+   model and effort. So you can configure `HIGH` alone and leave everything
+   else on the session model.
 
 `other` returns the string `"other"`, not `None`. The routing result is the same
 — the default model — but the distinction matters for the session memo: `other`
@@ -877,6 +892,106 @@ threshold needed re-tuning each time.
 
 The confidence is still on every log line. It is diagnostic now, not a gate:
 a band that keeps coming back thin is a band whose criterion needs rewriting.
+
+### Reasoning effort per band
+
+A band can set the reasoning effort its turns run at, with or without a model of
+its own: `jev.models.<band>.reasoning_effort` / `HERMES_JEV_REASONING_<BAND>`.
+
+#### Levels
+
+The same vocabulary as `agent.reasoning_effort` and `/reasoning`, parsed by the
+same function (`hermes_constants.parse_reasoning_effort`):
+
+| value | meaning |
+|---|---|
+| `none` (also `false`, `disabled`, YAML `false`) | thinking off |
+| `minimal` · `low` · `medium` · `high` · `xhigh` · `max` · `ultra` | ascending effort |
+| empty / unset | the band does not decide effort — see the precedence below |
+
+Values are case- and space-insensitive. An unrecognized value (`hihg`) is
+warned about and treated as unset rather than guessed at; an unrecognized env
+value falls back to the `config.yaml` one.
+
+#### Which effort a turn runs at
+
+| rank | source | why it ranks there |
+|---|---|---|
+| 1 | session `/reasoning` override | an explicit human choice beats a classifier — the same rule as `/model` |
+| 2 | **band `reasoning_effort`** | the most specific automatic decision: "this request is hard" |
+| 3 | `agent.reasoning_overrides[<model the turn runs on>]` | what this model usually runs at |
+| 4 | `agent.reasoning_effort` | the global default |
+
+Rank 3 is looked up against the model the turn **actually runs on** — the band's
+model when the band moved it. Before per-band effort existed the gateway resolved
+it against the session's model and then routed, so a band model never got its
+own per-model override; that is fixed as part of this change.
+
+#### Effort-only bands
+
+```yaml
+jev:
+  models:
+    low:  { reasoning_effort: low }
+    high: { reasoning_effort: xhigh }
+```
+
+Every turn runs on the session's model; only how hard it thinks changes. The
+route's `signature` does not move, so the cached agent is reused — effort is set
+on it per turn anyway. An effort-only band also switches routing on by itself:
+`complexity_routing_active()` asks for at least one band with a model **or** an
+effort.
+
+#### When the band's model cannot be reached
+
+The effort is applied anyway. A band pinned to a provider whose credentials do
+not resolve keeps the session's model, as before, but runs it at the band's
+effort: "this request is hard" is still true on the model the turn ends up on.
+
+#### Levels a model does not accept
+
+Jev does **not** validate effort against the model. The band's effort becomes the
+turn's `reasoning_config`, and the provider layer clamps it to what the model
+accepts, exactly as it does for `/reasoning` or `agent.reasoning_effort`:
+
+| path | clamping |
+|---|---|
+| Anthropic adaptive thinking (Claude 4.6+, Kimi) | `minimal→low`, `ultra→max`; `xhigh→max` on the 4.6 family |
+| Anthropic manual thinking (Claude ≤4.5, MiniMax …) | budget tokens: low 4k / medium 8k / high 16k / xhigh 32k; `minimal`/`max`/`ultra` fall to the 8k default |
+| Codex / Responses | `minimal→low`; gpt-5.6 `ultra→max`; xAI caps at `high` |
+| Gemini 3 | Flash low/medium/high, Pro low/high; 2.5 sends no level |
+| Copilot / GitHub Models | levels the model catalog lists pass through; otherwise `xhigh→high`, `minimal→low`, else `medium` |
+| LM Studio | probes the model's `allowed_options` |
+| DeepSeek V4+, Ollama Cloud, Z.AI GLM-5.2 | provider-specific maps (`xhigh`/`max`/`ultra → max`; GLM-5.2 only high/max) |
+| **`custom:` providers** | **forwarded verbatim** as top-level `reasoning_effort` |
+
+The last row is the gap to watch: a `custom:` endpoint receives the level as
+written, so pick one the model behind it documents — e.g. GLM-5.2 documents
+only `high` and `max`. Nothing retries with a lower level on an HTTP 400.
+
+#### Surfaces
+
+- **Gateway** — `_apply_jev_complexity_route` puts the band's effort on the route
+  as `band_reasoning_config`; the caller ranks it in
+  `_resolve_session_reasoning_config`, which is the only place that knows about
+  the session `/reasoning` override.
+- **WORKAGENT A2A** — `apply_tier_to_agent` sets `agent.reasoning_config` for
+  the turn and captures the agent's own reasoning config next to its runtime
+  baseline. A band **without** an effort runs on that baseline — including after
+  a cross-provider swap, whose own per-model re-resolution would otherwise make
+  the effort depend on which kind of band it was. An unbanded or `other` turn
+  restores it. This surface has no `/reasoning` command, and the A2A runtime does
+  not apply `agent.reasoning_effort` when it builds the agent, so the baseline is
+  usually `None` (provider default).
+
+#### Prompt caching
+
+Under the default `complexity_scope: session` the band — and therefore the
+effort — is decided once per conversation. Under `turn`, an effort-only band
+can change effort between turns without changing model. OpenAI-style prefix
+caching does not mind; on Anthropic a change of thinking parameters can
+invalidate message-level cache breakpoints (system prompt and tools stay
+cached). Prefer `session` scope if that matters.
 
 ### What each band means
 
@@ -1025,6 +1140,8 @@ the log line look less settled.
 In the gateway, the route's signature feeds the agent-cache key, so switching
 band rebuilds the `AIAgent` — the same cache boundary a `/model` switch crosses.
 That is intentional: a cached agent must not be reused against a different model.
+A band's reasoning effort is not part of the signature; it is set on the cached
+agent per turn, like `/reasoning`.
 
 Under the default `complexity_scope: session` a conversation crosses that
 boundary **at most once** — the band is decided on the first turn and reused, so
@@ -1082,6 +1199,9 @@ INFO  [Jev] channel admission: ANSWER in 962ms (api) — in_scope=0.21 delegatab
 INFO  [Jev] channel admission: STAY QUIET in 816ms (api) — in_scope=0.72 delegatable=0.27 addressed=0.24 wants_answer=0.05 threshold=0.80 chat=CISO team
 INFO  [Jev] complexity: high in 1077ms (api) — confidence=1.00
 INFO  [Jev] complexity: high reused for this session (scope=session) -> claude-opus-5
+INFO  [Jev] complexity: high reused for this session (scope=session) -> claude-opus-5 via anthropic (reasoning_effort=xhigh)
+INFO  Jev complexity routing: keeping gpt-5, reasoning_effort=high
+INFO  [Jev] reasoning_effort for this turn: xhigh
 INFO  [Jev] complexity: high in 871ms (api) — confidence=0.27
 INFO  [Jev] complexity: OTHER in 964ms (api) — confidence=0.88, no band's criteria matched; keeping the default model
 WARN  [Jev] channel admission: UNDECIDED in 15ms (api) — ConnectError; caller keeps its default
@@ -1130,8 +1250,8 @@ silence, a timed-out complexity call means the default model.
 | File | Role |
 |---|---|
 | `agent/jev_client.py` | transport + the `noul` / `choice` / `score` primitives (`choice` carries a per-option criterion), `_parse_answer` (legend/argmax normalization), TTL+LRU decision memo |
-| `agent/jev_policy.py` | `_SCOPE_QUESTION`, `_DELEGATABLE_QUESTION`, `_ADDRESSED_QUESTION`, `_WANTS_ANSWER_QUESTION`, `_COMPLEXITY_QUESTION`, `DEFAULT_COMPLEXITY_CRITERIA`, `_complexity_criteria`, `_relevance_request`, settings resolution, feature gates, band → model |
-| `gateway/run.py` | `_apply_jev_complexity_route` on the turn route |
+| `agent/jev_policy.py` | `_SCOPE_QUESTION`, `_DELEGATABLE_QUESTION`, `_ADDRESSED_QUESTION`, `_WANTS_ANSWER_QUESTION`, `_COMPLEXITY_QUESTION`, `DEFAULT_COMPLEXITY_CRITERIA`, `_complexity_criteria`, `_relevance_request`, settings resolution (`_resolve_tier_models`, `_band_effort`), feature gates, band → model and effort, `apply_tier_to_agent` |
+| `gateway/run.py` | `_apply_jev_complexity_route` on the turn route; `_resolve_session_reasoning_config` ranks the band's effort |
 | `plugins/platforms/feishu/adapter.py` | `_admit` → `group_mention_missing`, the gate, the forced topic reply |
 | `workagent/backend/a2a_service/executor.py` | both gates on the A2A turn |
 
