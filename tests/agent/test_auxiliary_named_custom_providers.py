@@ -110,6 +110,27 @@ class TestResolveProviderClientNamedCustom:
         assert "beans.local" in str(client.base_url)
 
 
+    def test_codex_responses_entry_raw_codex_returns_bare_client(self, tmp_path):
+        """The main loop (raw_codex=True) calls responses.create() on the client."""
+        _write_config(tmp_path, {
+            "model": {"default": "test-model"},
+            "custom_providers": [
+                {
+                    "name": "glm",
+                    "base_url": "https://glm.example/api/v1",
+                    "api_key": "k",
+                    "api_mode": "codex_responses",
+                },
+            ],
+        })
+        from agent.auxiliary_client import CodexAuxiliaryClient, resolve_provider_client
+
+        raw, _ = resolve_provider_client("custom:glm", "glm-x", raw_codex=True)
+        wrapped, _ = resolve_provider_client("custom:glm", "glm-x")
+        assert not isinstance(raw, CodexAuxiliaryClient)
+        assert hasattr(raw, "responses")
+        assert isinstance(wrapped, CodexAuxiliaryClient)
+
     def test_named_custom_no_api_key_uses_fallback(self, tmp_path):
         _write_config(tmp_path, {
             "model": {"default": "test"},

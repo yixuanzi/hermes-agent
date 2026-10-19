@@ -231,6 +231,46 @@ class TestFallbackChainAdvancement:
         assert agent.api_mode == "chat_completions"
         assert agent.client is not None
 
+    def _activate_named_custom(self, entry):
+        fbs = [{"provider": "custom:glm", "model": "glm-x"}]
+        agent = _make_agent(fallback_model=fbs)
+        with (
+            patch(
+                "hermes_cli.runtime_provider._get_named_custom_provider",
+                return_value=entry,
+            ),
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(
+                    _mock_client(base_url="https://glm.example/api/v1", api_key="glm-key"),
+                    "glm-x",
+                ),
+            ),
+            patch(
+                "hermes_cli.model_normalize.normalize_model_for_provider",
+                side_effect=lambda m, p: m,
+            ),
+        ):
+            assert agent._try_activate_fallback() is True
+        return agent
+
+    def test_named_custom_fallback_honors_declared_codex_responses(self):
+        """A Responses-only custom endpoint must not fail over onto /chat/completions."""
+        agent = self._activate_named_custom({
+            "name": "glm",
+            "base_url": "https://glm.example/api/v1",
+            "api_mode": "codex_responses",
+        })
+        assert agent.provider == "custom:glm"
+        assert agent.api_mode == "codex_responses"
+
+    def test_named_custom_fallback_without_api_mode_stays_on_chat_completions(self):
+        agent = self._activate_named_custom({
+            "name": "glm",
+            "base_url": "https://glm.example/api/v1",
+        })
+        assert agent.api_mode == "chat_completions"
+
 
 # ── Pool-rotation vs fallback gating (#11314) ────────────────────────────
 

@@ -1899,6 +1899,24 @@ def _fallback_entry_key(fb: dict) -> tuple[str, str, str]:
     )
 
 
+def _named_custom_provider_api_mode(fb_provider: str) -> Optional[str]:
+    """Return the api_mode a named custom provider entry declares, if any.
+
+    The primary runtime (``_resolve_named_custom_runtime``) honors the
+    ``api_mode`` declared on a ``custom_providers:`` / ``providers:`` entry;
+    fallback activation must too, or a ``codex_responses``-only endpoint is
+    sent to /chat/completions after failover and rejected.
+    """
+    try:
+        from hermes_cli.runtime_provider import _get_named_custom_provider
+
+        entry = _get_named_custom_provider(fb_provider)
+    except Exception as exc:
+        logger.debug("Fallback %s: could not read custom provider entry: %s", fb_provider, exc)
+        return None
+    return (entry or {}).get("api_mode") or None
+
+
 def _fallback_entry_unavailable_without_network(agent, fb: dict) -> Optional[str]:
     """Return a skip reason for fallback entries known to be unusable locally."""
     fb_provider = (fb.get("provider") or "").strip().lower()
@@ -2065,7 +2083,13 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         fb_api_mode = "chat_completions"
         fb_base_url = str(fb_client.base_url)
         _fb_is_azure = agent._is_azure_openai_url(fb_base_url)
-        if fb_provider == "openai-codex":
+        _fb_declared_mode = _named_custom_provider_api_mode(fb_provider)
+        if _fb_declared_mode:
+            # Explicit api_mode on a named custom provider wins, mirroring
+            # the primary path — the heuristics below can't infer it for
+            # third-party Responses-only endpoints.
+            fb_api_mode = _fb_declared_mode
+        elif fb_provider == "openai-codex":
             fb_api_mode = "codex_responses"
         elif fb_provider in {"nous", "nous-portal", "nousresearch"}:
             # Portal is dual-wire: anthropic/* must land on /v1/messages.

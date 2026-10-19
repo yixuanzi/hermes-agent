@@ -434,3 +434,13 @@ Intent: `CodexAppServerSession(thread_start_params=...)` merges caller-supplied 
 
 Feature: Codex-reported effective sandbox/approval policy.
 Intent: Hermes does not send permissions on `thread/start`; codex resolves them from ~/.codex/config.toml and the cwd's project trust. `ensure_started()` now records the policy codex reports in the thread/start response (permission profile, approval policy, sandbox type, network access, writable roots, /tmp and $TMPDIR writability) as `effective_policy` and logs those real values. The thread-started log previously printed Hermes' own `HERMES_TERMINAL_SECURITY_MODE` mapping as `profile=`, which was never applied and could claim workspace-write for a read-only thread. The mapping is kept only as the documented requested profile.
+
+## File: `agent/chat_completion_helpers.py`
+
+Feature: Fallback activation honors a named custom provider's declared `api_mode`.
+Intent: `try_activate_fallback` re-derives `api_mode` from built-in heuristics (openai-codex, Nous, Anthropic host/suffix, Azure, direct OpenAI, GPT-5 model names, Bedrock), which cannot recognise a third-party Responses-only endpoint. A `custom:<name>` fallback whose `custom_providers:` / `providers:` entry declares `api_mode: codex_responses` (e.g. a Zhipu GLM Coding Plan key that is only entitled on `/responses`) was therefore sent to `/chat/completions` after failover and rejected with `403 model_access_denied`, while the same entry worked as the primary. The fallback now reads the declared `api_mode` from the named custom provider entry first, the same field `_resolve_named_custom_runtime` honors on the primary path, and only falls back to the heuristics when nothing is declared. Built-in providers are unaffected because `_get_named_custom_provider` returns nothing for canonical provider names.
+
+## File: `agent/auxiliary_client.py`
+
+Feature: Named custom providers honor `raw_codex` in `resolve_provider_client`.
+Intent: For a named custom provider declaring `api_mode: codex_responses`, the router always wrapped the client in `CodexAuxiliaryClient`, even when the caller passed `raw_codex=True`. The main agent loop (fallback activation and init-time routing) passes `raw_codex=True` because it calls `responses.create()` directly; the wrapper has no `.responses` and also drops the SDK's `_custom_headers`, so `extra_headers` were lost on the swapped client. The wrap is now skipped when `raw_codex` is set, matching `_needs_codex_wrap` and the `openai-codex` branch; auxiliary callers that don't pass `raw_codex` still get the wrapper.
