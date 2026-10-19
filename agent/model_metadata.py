@@ -451,15 +451,18 @@ DEFAULT_CONTEXT_LENGTHS = {
     "gemma-4-31b": 256000,
     "gemma-3": 131072,
     "gemma": 8192,  # fallback for older gemma models
-    # DeepSeek — V4 family ships with a 1M context window. The legacy
+    # DeepSeek — V4 family ships with a 1M context window. ``deepseek-v4``
+    # is a family key: substring matching covers ``deepseek-v4-pro``,
+    # ``deepseek-v4-flash``, point releases such as ``deepseek-v4.1-flash``
+    # and dated snapshots, so custom endpoints serving a new V4 slug don't
+    # fall through to the 128K ``deepseek`` catch-all. The legacy
     # aliases ``deepseek-chat`` / ``deepseek-reasoner`` are server-side
     # mapped to the non-thinking / thinking modes of ``deepseek-v4-flash``
     # and inherit the same 1M window. The ``deepseek`` substring entry
     # below remains as a 128K fallback for older / unknown DeepSeek model
     # ids (e.g. via custom endpoints).
     # https://api-docs.deepseek.com/zh-cn/quick_start/pricing
-    "deepseek-v4-pro": 1_000_000,
-    "deepseek-v4-flash": 1_000_000,
+    "deepseek-v4": 1_000_000,
     "deepseek-chat": 1_000_000,
     "deepseek-reasoner": 1_000_000,
     "deepseek": 128000,
@@ -487,6 +490,7 @@ DEFAULT_CONTEXT_LENGTHS = {
     # (5, 5.1, 5-turbo) are ~202K.  Longest-key-first substring matching
     # ensures "glm-5.2" resolves to 1M while older variants still hit the
     # generic 202K fallback.
+    "glm-5.3": 1_048_576,
     "glm-5.2": 1_048_576,
     "glm": 202752,
     # xAI Grok — xAI /v1/models does not return context_length metadata,

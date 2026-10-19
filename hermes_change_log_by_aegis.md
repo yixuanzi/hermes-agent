@@ -444,3 +444,8 @@ Intent: `try_activate_fallback` re-derives `api_mode` from built-in heuristics (
 
 Feature: Named custom providers honor `raw_codex` in `resolve_provider_client`.
 Intent: For a named custom provider declaring `api_mode: codex_responses`, the router always wrapped the client in `CodexAuxiliaryClient`, even when the caller passed `raw_codex=True`. The main agent loop (fallback activation and init-time routing) passes `raw_codex=True` because it calls `responses.create()` directly; the wrapper has no `.responses` and also drops the SDK's `_custom_headers`, so `extra_headers` were lost on the swapped client. The wrap is now skipped when `raw_codex` is set, matching `_needs_codex_wrap` and the `openai-codex` branch; auxiliary callers that don't pass `raw_codex` still get the wrapper.
+
+## File: `agent/model_metadata.py`
+
+Feature: DeepSeek V4 family hardcoded context fallback.
+Intent: `DEFAULT_CONTEXT_LENGTHS` listed only the exact `deepseek-v4-pro` / `deepseek-v4-flash` slugs at 1M, so any other V4 id (e.g. `deepseek-v4.1-flash` served by a custom endpoint whose `/models` carries no context field) fell through the longest-substring match to the generic `deepseek` catch-all and was capped at 128K. Those two keys are replaced by a single `deepseek-v4` family key at 1M, so every V4 slug — point releases, dated snapshots, vendor-prefixed and mixed-case forms — resolves to 1M on both the custom-endpoint catalog path and the final hardcoded-defaults step. Older DeepSeek ids keep the 128K `deepseek` fallback, the legacy `deepseek-chat` / `deepseek-reasoner` aliases stay at 1M, and endpoint-scoped overrides (NVIDIA NIM's 262,144 window for `deepseek-ai/deepseek-v4-pro`) and live/cached metadata still take precedence over this table.

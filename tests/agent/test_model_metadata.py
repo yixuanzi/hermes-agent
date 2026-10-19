@@ -317,8 +317,7 @@ class TestDefaultContextLengths:
         from unittest.mock import patch as mock_patch
 
         expected_keys = {
-            "deepseek-v4-pro": 1_000_000,
-            "deepseek-v4-flash": 1_000_000,
+            "deepseek-v4": 1_000_000,
             "deepseek-chat": 1_000_000,
             "deepseek-reasoner": 1_000_000,
         }
@@ -328,20 +327,27 @@ class TestDefaultContextLengths:
                 f"{key} should be {value}, got {DEFAULT_CONTEXT_LENGTHS[key]}"
             )
 
-        # Longest-first substring matching must resolve both the bare V4
-        # ids (native DeepSeek) and the vendor-prefixed forms (OpenRouter
-        # / Nous Portal) to 1M without probing down to the legacy 128K
-        # ``deepseek`` substring fallback.
+        # Longest-first substring matching must resolve every V4 id — bare
+        # (native DeepSeek), vendor-prefixed (OpenRouter / Nous Portal),
+        # point releases, dated snapshots and mixed case — to 1M without
+        # probing down to the legacy 128K ``deepseek`` substring fallback,
+        # which still applies to pre-V4 ids.
         with mock_patch("agent.model_metadata.fetch_model_metadata", return_value={}), \
              mock_patch("agent.model_metadata.fetch_endpoint_model_metadata", return_value={}), \
              mock_patch("agent.model_metadata.get_cached_context_length", return_value=None):
             cases = [
                 ("deepseek-v4-pro", 1_000_000),
                 ("deepseek-v4-flash", 1_000_000),
+                ("deepseek-v4.1-flash", 1_000_000),
+                ("deepseek-v4.1-pro", 1_000_000),
+                ("deepseek-v4-flash-0731", 1_000_000),
+                ("DeepSeek-V4.1-Flash", 1_000_000),
                 ("deepseek/deepseek-v4-pro", 1_000_000),
                 ("deepseek/deepseek-v4-flash", 1_000_000),
+                ("deepseek/deepseek-v4.1-flash", 1_000_000),
                 ("deepseek-chat", 1_000_000),
                 ("deepseek-reasoner", 1_000_000),
+                ("deepseek-v3.2", 128_000),
             ]
             for model_id, expected_ctx in cases:
                 actual = get_model_context_length(model_id)
@@ -733,6 +739,29 @@ class TestGetModelContextLength:
             api_key="test-key",
         )
         assert result == 202752  # "glm" entry in DEFAULT_CONTEXT_LENGTHS
+
+    @patch("agent.model_metadata.fetch_model_metadata")
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_custom_endpoint_deepseek_v4_point_release_uses_family_window(
+        self, mock_endpoint_fetch, mock_fetch,
+    ):
+        """A custom endpoint listing a V4 point release without context
+        metadata must resolve via the ``deepseek-v4`` family entry (1M),
+        not the generic ``deepseek`` catch-all (128K)."""
+        mock_fetch.return_value = {}
+        mock_endpoint_fetch.return_value = {"deepseek-v4.1-flash": {}}
+
+        with patch("agent.model_metadata.get_cached_context_length", return_value=None), \
+             patch("agent.model_metadata._query_ollama_api_show", return_value=None), \
+             patch("agent.model_metadata._query_local_context_length", return_value=None), \
+             patch("agent.model_metadata.is_local_endpoint", return_value=False):
+            result = get_model_context_length(
+                "deepseek-v4.1-flash",
+                base_url="https://llm-gateway.example.com/v1",
+                api_key="test-key",
+                provider="custom",
+            )
+        assert result == 1_000_000
 
 
 
