@@ -37,6 +37,10 @@ the first bot reply. Progress, prompts, media, and the final answer remain in
 that topic, and later topic replies continue the same Hermes session. Existing
 topics keep their normal routing; topic-mode groups are not changed.
 
+A quote reply in the main chat is treated the same way: its topic opens under
+the quote reply itself, not under the quoted message, and the quoted text is
+passed along as context.
+
 ```bash
 FEISHU_REPLY_THREAD=true   # default
 FEISHU_REPLY_THREAD=false  # reply in the original chat instead

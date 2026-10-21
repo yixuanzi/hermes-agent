@@ -3003,6 +3003,87 @@ class TestFeishuAutoThreading(unittest.TestCase):
         )
         self.assertEqual(event.source.thread_id, "omt_human_thread")
 
+    def test_quote_reply_and_its_topic_follow_up_share_one_session(self):
+        # A main-timeline quote reply carries root_id (the quoted message) but
+        # no thread_id. The bot's reply roots the topic on the quote reply
+        # itself, so later topic messages arrive with root_id = the quote reply.
+        from gateway.session import build_session_key
+
+        adapter = self._build_adapter(resolved_chat_type="group")
+        with patch.dict(os.environ, {}, clear=True):
+            first = self._dispatch(
+                adapter, self._message("om_quote_reply", root_id="om_quoted")
+            )
+        first_key = build_session_key(first.source)
+        self.assertEqual(first.source.thread_id, "om_quote_reply")
+        self.assertIn("om_quote_reply", adapter._pending_auto_thread_roots)
+        self.assertEqual(first.reply_to_message_id, "om_quoted")
+
+        follow_up_adapter = self._build_adapter(resolved_chat_type="group")
+        follow_up_adapter._session_store = SimpleNamespace(
+            peek_session_id=Mock(side_effect=lambda key: "session-1" if key == first_key else None)
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            follow_up = self._dispatch(
+                follow_up_adapter,
+                self._message("om_in_topic", thread_id="omt_topic", root_id="om_quote_reply"),
+            )
+        self.assertEqual(build_session_key(follow_up.source), first_key)
+
+    def test_quote_reply_with_reply_thread_disabled_keeps_quoted_root(self):
+        adapter = self._build_adapter(resolved_chat_type="group")
+        with patch.dict(os.environ, {"FEISHU_REPLY_THREAD": "false"}, clear=True):
+            event = self._dispatch(
+                adapter, self._message("om_quote_reply", root_id="om_quoted")
+            )
+        self.assertEqual(event.source.thread_id, "om_quoted")
+        self.assertNotIn("om_quoted", adapter._pending_auto_thread_roots)
+
+    def test_quote_reply_approval_card_lands_under_the_quote_reply(self):
+        # Approval cards anchor on the session thread_id rather than on the
+        # triggering message, so a session keyed on the quoted message would
+        # open a second topic under it.
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        router = self._build_adapter(resolved_chat_type="group")
+        with patch.dict(os.environ, {}, clear=True):
+            event = self._dispatch(
+                router, self._message("om_quote_reply", root_id="om_quoted")
+            )
+
+        captured = {}
+
+        class _MessageAPI:
+            def reply(self, request):
+                captured["request"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id="om_card"),
+                )
+
+        sender = FeishuAdapter(PlatformConfig())
+        sender._client = SimpleNamespace(
+            im=SimpleNamespace(v1=SimpleNamespace(message=_MessageAPI()))
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch.object(sender, "_run_blocking", side_effect=_direct):
+            result = asyncio.run(
+                sender.send_exec_approval(
+                    chat_id="oc_chat",
+                    command="rm -rf /tmp/x",
+                    session_key="session-key",
+                    metadata={"thread_id": event.source.thread_id},
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured["request"].message_id, "om_quote_reply")
+        self.assertTrue(captured["request"].request_body.reply_in_thread)
+
 
 class TestFeishuAutoThreadSending(unittest.TestCase):
     def _build_adapter(self):

@@ -422,12 +422,25 @@ def test_a_top_level_message_is_never_busy_checked(monkeypatch):
     assert adapter._dispatch_inbound_event.await_count == 1
 
 
-@pytest.mark.parametrize("markers", [{"thread_id": "omt_1"}, {"root_id": "om_root"}])
-def test_both_kinds_of_topic_marker_trigger_the_check(monkeypatch, markers):
+@pytest.mark.parametrize(
+    "markers", [{"thread_id": "omt_1"}, {"thread_id": "omt_1", "root_id": "om_root"}]
+)
+def test_a_live_topic_triggers_the_check(monkeypatch, markers):
     adapter, run = _inbound_adapter(monkeypatch, verdict=True, busy=True)
     run(**markers)
     assert len(adapter._busy_checked) == 1
     assert adapter._dispatch_inbound_event.await_count == 0
+
+
+def test_a_quote_reply_is_never_busy_checked(monkeypatch):
+    # A main-timeline quote reply (root_id, no thread_id) opens its own topic
+    # under itself, so the quoted message's session is not the one it enters.
+    adapter, run = _inbound_adapter(monkeypatch, verdict=True, busy=True)
+    run(root_id="om_root")
+    assert adapter._busy_checked == []
+    assert adapter._dispatch_inbound_event.await_count == 1
+    event = adapter._dispatch_inbound_event.call_args.args[0]
+    assert event.source.thread_id == "om_trigger"
 
 
 def test_the_root_id_is_handed_to_the_resolver(monkeypatch):

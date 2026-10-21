@@ -36,6 +36,9 @@ group_sessions_per_user: true
 澄清、媒体和最终回复都会留在该话题中，后续话题消息继续使用同一个 Hermes
 session。已有话题保持正常路由，话题群不受此开关影响。
 
+在主聊天中引用回复一条消息也按同样方式处理：话题建在这条引用回复下面，
+而不是被引用的消息下面，被引用的内容会作为上下文一并带上。
+
 ```bash
 FEISHU_REPLY_THREAD=true   # 默认值
 FEISHU_REPLY_THREAD=false  # 直接在原聊天中回复

@@ -5535,7 +5535,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     "[Feishu] dropping unmentioned group command id=%s", message_id,
                 )
                 return
-            if (actual_thread_id or root_message_id) and self._thread_session_is_busy(
+            if actual_thread_id and self._thread_session_is_busy(
                 source, root_message_id=root_message_id,
             ):
                 # A turn is already running in this topic. An @-mention would be
@@ -5543,7 +5543,9 @@ class FeishuAdapter(BasePlatformAdapter):
                 # claim, so it is dropped instead — the alternative is barging
                 # into work someone actually asked for. Dropped BEFORE the Jev
                 # call, because a verdict that cannot change the outcome is a
-                # second of latency spent on nothing.
+                # second of latency spent on nothing. A quote reply without a
+                # ``thread_id`` is not checked: an admitted one opens its own
+                # topic below, so no running turn can be in its session.
                 logger.info(
                     "[Feishu] dropping inbound event: thread_session_busy id=%s chat_id=%s",
                     message_id,
@@ -5568,13 +5570,19 @@ class FeishuAdapter(BasePlatformAdapter):
             (self._reply_thread_enabled() or force_reply_thread)
             and source_chat_type in {"dm", "group"}
             and not actual_thread_id
-            and not root_message_id
             and message_id
         ):
             # Feishu creates the real ``omt_*`` thread only after the first
             # reply. Key the initiating turn on its stable ``om_*`` root now;
             # the send path treats this value as a reply anchor, not a receive
             # id, and therefore creates the topic with reply_in_thread=true.
+            #
+            # A main-timeline quote reply (``root_id`` set, no ``thread_id``)
+            # is keyed on ITSELF, not on the message it quotes: the reply
+            # anchors on this message, so Feishu roots the topic here and every
+            # follow-up arrives with ``root_id`` = this id. Keying on the quoted
+            # root split one conversation into two sessions — the first turn
+            # under the quoted id, the rest under the topic's ``omt_*``.
             thread_id = str(message_id)
             source.thread_id = thread_id
             self._mark_auto_thread_pending(thread_id)
