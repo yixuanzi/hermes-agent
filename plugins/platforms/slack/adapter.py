@@ -329,6 +329,7 @@ class _SlackDelegateInputAdapter:
         self._closed = False
         self._waiting_for_input = False
         self._last_read_timed_out = False
+        self._a2a_session = None
 
     def enter_foreground(self) -> bool:
         self._adapter._register_delegate_route(self._route)
@@ -336,6 +337,22 @@ class _SlackDelegateInputAdapter:
 
     def exit_foreground(self) -> None:
         self._adapter._unregister_delegate_route(self._route)
+
+    def bind_a2a_session(self, session) -> None:
+        with self._condition:
+            self._a2a_session = session
+
+    def unbind_a2a_session(self, session) -> None:
+        with self._condition:
+            if self._a2a_session is session:
+                self._a2a_session = None
+
+    def schedule_steer(self, text: str):
+        """Steer the remote turn in flight; ``None`` means queue as next turn."""
+        with self._condition:
+            session = self._a2a_session
+        schedule = getattr(session, "schedule_steer", None)
+        return schedule(text) if callable(schedule) else None
 
     def push_line(self, text: str) -> bool:
         with self._condition:
@@ -1783,12 +1800,13 @@ class SlackAdapter(BasePlatformAdapter):
         push_line = getattr(input_adapter, "push_line", None)
         if not callable(push_line):
             return False
+        metadata = {"thread_id": thread_ts} if thread_ts else None
+        await self.handle_delegate_stream_segment_break(
+            route_key=route.key, chat_id=channel_id, metadata=metadata,
+        )
+        if await self._steer_delegate_turn(input_adapter, text, chat_id=channel_id, metadata=metadata):
+            return True
         if push_line(text):
-            await self.handle_delegate_stream_segment_break(
-                route_key=route.key,
-                chat_id=channel_id,
-                metadata={"thread_id": thread_ts} if thread_ts else None,
-            )
             return True
         self._unregister_delegate_route(route)
         return False

@@ -2417,6 +2417,15 @@ class MessageEvent:
 # The a2a_delegate foreground loop's own controls; they stay with the loop.
 _DELEGATE_LOOP_CONTROLS = frozenset({"main", "exit"})
 
+# Upper bound on waiting for a remote steer acknowledgement before the
+# follow-up falls back to the loop's next-turn queue.  Longer than the steer
+# request's own HTTP timeout, so the request settles before this fires.
+DELEGATE_STEER_WAIT_SECONDS = 15.0
+DELEGATE_STEER_ACK = (
+    "⏩ Steered the remote agent's current task. "
+    "Your message arrives after its next tool call."
+)
+
 
 def is_gateway_command_during_delegate_loop(text: Optional[str]) -> bool:
     """Return True when *text* must reach the gateway, not a delegate loop.
@@ -5214,6 +5223,44 @@ class BasePlatformAdapter(ABC):
     def resume_typing_for_chat(self, chat_id: str) -> None:
         """Resume typing indicator for a chat after approval resolves."""
         self._typing_paused.discard(chat_id)
+
+    async def _steer_delegate_turn(
+        self,
+        input_adapter: Any,
+        text: str,
+        *,
+        chat_id: str,
+        metadata: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Fold a delegate-loop follow-up into the remote turn still running.
+
+        Mirrors gateway steer for the main agent: no interrupt and no new
+        turn.  ``input_adapter`` is the loop's foreground input, bound to its
+        A2A session.  Commands (``/main``, ``/exit``, ...) are never steering
+        text, and any refusal or failure returns False so the caller keeps the
+        text for the loop's next-turn queue.
+        """
+        cleaned = str(text or "").strip()
+        if not cleaned or cleaned.startswith("/"):
+            return False
+        schedule = getattr(input_adapter, "schedule_steer", None)
+        future = schedule(cleaned) if callable(schedule) else None
+        if future is None:
+            return False
+        try:
+            accepted = bool(
+                await asyncio.wait_for(asyncio.wrap_future(future), DELEGATE_STEER_WAIT_SECONDS)
+            )
+        except Exception:
+            logger.warning("[%s] Delegate steer failed; queueing as next turn", self.name, exc_info=True)
+            return False
+        if not accepted:
+            return False
+        try:
+            await self.send(chat_id, DELEGATE_STEER_ACK, metadata=metadata)
+        except Exception:
+            logger.debug("[%s] Failed to send delegate steer acknowledgement", self.name, exc_info=True)
+        return True
 
     async def interrupt_session_activity(self, session_key: str, chat_id: str, metadata=None) -> None:
         """Signal the active session loop to stop and clear typing immediately."""

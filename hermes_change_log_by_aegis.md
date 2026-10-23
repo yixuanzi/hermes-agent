@@ -129,6 +129,9 @@ Intent: Track delegate output per route, edit AI deltas, split long Slack messag
 Feature: Slack foreground message routing.
 Intent: Capture follow-up messages for active delegate loops before normal message dispatch so delegate conversations do not leak into the main Slack session, while routing mentioned `/main` and `/exit` commands from the original Slack text so thread context or attachment prefixes do not turn loop-exit commands into remote prompts. Every other resolvable gateway command such as `/stop` or `/new` skips the loop and reaches normal dispatch, so it is handled by the gateway instead of being sent to the remote agent as text.
 
+Feature: Slack delegate loop steering.
+Intent: Same behavior as Feishu: while a foreground `a2a_delegate` loop's remote turn is still running, fold a non-command follow-up into that turn through the loop input's bound A2A session and acknowledge it, with no interrupt and no new remote turn. The input adapter gains `bind_a2a_session`/`schedule_steer`, and the stream segment now breaks before routing so the acknowledgement lands after the streamed text. `/main`, `/exit` and other slash text, remotes that do not declare steering, and refused or failed steers keep the next-turn queue, so follow-up input is never dropped.
+
 Feature: Slack slash-command source identity.
 Intent: Preserve the invoking Slack display name when constructing slash-command events, including legacy `/hermes` free-form turns, so downstream source envelopes retain the same user identity fields as normal Slack messages.
 
@@ -156,7 +159,7 @@ Feature: Feishu delegate foreground I/O.
 Intent: Provide isolated per-runtime blocking input adapters and adapter-loop output routing for `a2a_delegate(is_loop=true)`, keyed by Feishu chat, topic, and user dimensions so cached agents, different users, and different topics never share a foreground queue.
 
 Feature: Feishu delegate loop steering.
-Intent: While a foreground `a2a_delegate` loop's remote turn is still running, fold a non-command follow-up into that turn through the bound session's `schedule_steer` and acknowledge it, matching how gateway steer treats the main agent: no interrupt and no new turn. Slash-prefixed text such as `/main` or `/exit`, remotes that do not declare steering, and refused or failed steers keep the existing next-turn queue, so follow-up input is never dropped.
+Intent: While a foreground `a2a_delegate` loop's remote turn is still running, fold a non-command follow-up into that turn through the bound session's `schedule_steer` (via the shared `BasePlatformAdapter._steer_delegate_turn`) and acknowledge it, matching how gateway steer treats the main agent: no interrupt and no new turn. Slash-prefixed text such as `/main` or `/exit`, remotes that do not declare steering, and refused or failed steers keep the existing next-turn queue, so follow-up input is never dropped.
 
 Feature: Feishu delegate stream state.
 Intent: Send the first AI delta immediately, throttle edits of the same Feishu message to at most once every three seconds, force-flush at final/tool/user-input segment boundaries, split oversized output, fall back to appended messages after edit failure, and cancel delayed flushes when a route exits or the adapter stops.
@@ -246,6 +249,9 @@ Intent: Declare `FEISHU_GROUP_HISTORY`, `FEISHU_GROUP_HISTORY_LIMIT`, `FEISHU_GR
 
 Feature: Gateway commands during a delegate foreground loop.
 Intent: `is_gateway_command_during_delegate_loop(text)` gives adapters that hand a chat to an `a2a_delegate` foreground loop one rule for which text the loop must not swallow: any resolvable gateway command except the loop's own `/main` and `/exit`. Parsing matches `MessageEvent.get_command`, so the loop and the gateway agree on what counts as a command, and Feishu and Slack share it instead of keeping separate lists.
+
+Feature: Shared delegate-loop steering.
+Intent: `BasePlatformAdapter._steer_delegate_turn` holds the platform-neutral part of steering a loop's running remote turn: skip slash text, ask the loop input's bound session to `schedule_steer`, wait at most `DELEGATE_STEER_WAIT_SECONDS`, and send `DELEGATE_STEER_ACK` on acceptance. It returns False on any refusal or failure so the adapter keeps its next-turn queue. Feishu and Slack both use it, so the two platforms cannot drift on timeout, acknowledgement text, or which input is steerable.
 
 Feature: Public per-session busy predicate.
 Intent: `session_has_running_task()` answers the question an adapter has to ask *before* deciding to start a turn nobody requested: would this message land on top of work already in flight? The normal inbound path never needed it because `handle_message` queues a follow-up instead of asking, but a turn nobody asked for should not be queued either, and not-queueing requires knowing beforehand. It heals a stale lock first, so a split-brain guard whose owner task already exited reads as idle — without that, one leaked guard would silence a topic permanently rather than for the length of one turn. It reads `_active_sessions` through `getattr` and returns False for a missing map or an empty key, so a partially-constructed adapter cannot turn a bookkeeping gap into silence.

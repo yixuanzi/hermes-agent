@@ -26,7 +26,7 @@ def _ensure_feishu_mocks():
 _ensure_feishu_mocks()
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import SendResult
+from gateway.platforms.base import DELEGATE_STEER_ACK, SendResult
 from gateway.run import GatewayRunner
 import plugins.platforms.feishu.adapter as feishu_module
 from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -281,7 +281,7 @@ async def test_feishu_delegate_input_steers_the_remote_turn_in_flight():
     assert session.steers == ["focus on X"]
     assert input_adapter.read_line(timeout=0) is None
     adapter.send.assert_awaited_once_with(
-        "oc_123", feishu_module._DELEGATE_STEER_ACK, metadata={"thread_id": "th_1"}
+        "oc_123", DELEGATE_STEER_ACK, metadata={"thread_id": "th_1"}
     )
     input_adapter.close()
 

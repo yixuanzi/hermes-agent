@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import importlib
 import sys
 import threading
@@ -11,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, SendResult
+from gateway.platforms.base import DELEGATE_STEER_ACK, BasePlatformAdapter, SendResult
 from gateway.session import SessionSource
 from plugins.platforms.slack.adapter import SlackAdapter
 
@@ -514,3 +515,96 @@ async def test_slack_delegate_delta_edits_same_message_at_most_once_per_three_se
     )
 
     assert edited == [("C123", "msg-1", "hello world!")]
+
+
+class _SteerSession:
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.steers = []
+
+    def schedule_steer(self, text):
+        self.steers.append(text)
+        if self.outcome is None:
+            return None
+        future = concurrent.futures.Future()
+        future.set_result(self.outcome)
+        return future
+
+
+def _slack_foreground_input(adapter):
+    runtime = adapter.build_delegate_foreground_runtime(
+        channel_id="C123", thread_ts="1717171717.730000", user_id="U123", chat_type="group"
+    )
+    input_adapter = runtime["input_factory"]()
+    assert input_adapter.enter_foreground() is True
+    return input_adapter
+
+
+async def _route_slack(adapter, text):
+    return await adapter._maybe_route_delegate_foreground_message(
+        text=text,
+        channel_id="C123",
+        thread_ts="1717171717.730000",
+        user_id="U123",
+        chat_type="group",
+    )
+
+
+def _recording_send(adapter):
+    sent = []
+
+    async def _send(chat_id, content, metadata=None, **kwargs):
+        del kwargs
+        sent.append((chat_id, content, metadata))
+        return SendResult(success=True, message_id="ack")
+
+    adapter.send = _send
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_slack_delegate_input_steers_the_remote_turn_in_flight():
+    adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-test"))
+    sent = _recording_send(adapter)
+    input_adapter = _slack_foreground_input(adapter)
+    session = _SteerSession(True)
+    input_adapter.bind_a2a_session(session)
+
+    assert await _route_slack(adapter, "focus on X")
+
+    assert session.steers == ["focus on X"]
+    assert input_adapter.read_line(timeout=0) is None
+    assert sent == [("C123", DELEGATE_STEER_ACK, {"thread_id": "1717171717.730000"})]
+    input_adapter.exit_foreground()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", [None, False])
+async def test_slack_delegate_input_queues_when_steer_is_unavailable_or_refused(outcome):
+    adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-test"))
+    sent = _recording_send(adapter)
+    input_adapter = _slack_foreground_input(adapter)
+    input_adapter.bind_a2a_session(_SteerSession(outcome))
+
+    assert await _route_slack(adapter, "next question")
+
+    assert input_adapter.read_line(timeout=0) == "next question"
+    assert sent == []
+    input_adapter.exit_foreground()
+
+
+@pytest.mark.asyncio
+async def test_slack_delegate_loop_commands_are_never_steered():
+    adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-test"))
+    _recording_send(adapter)
+    input_adapter = _slack_foreground_input(adapter)
+    session = _SteerSession(True)
+    input_adapter.bind_a2a_session(session)
+
+    assert await _route_slack(adapter, "/main")
+
+    assert session.steers == []
+    assert input_adapter.read_line(timeout=0) == "/main"
+    input_adapter.unbind_a2a_session(session)
+    assert input_adapter.schedule_steer("later") is None
+    input_adapter.exit_foreground()

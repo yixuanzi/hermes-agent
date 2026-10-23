@@ -202,7 +202,7 @@ POST /a2a/hermes/steer
 - 成功返回 `{"ok": true, "task_id": ...}`；字段缺失 422；task 不在运行、已取消、context 不匹配或 agent 拒绝时 409。调用方收到非 2xx 必须把文本退回为下一轮输入，不得丢弃。
 - 落在最后一次工具批次之后的 steer 会作为 `run_conversation` 结果的 `pending_steer` 返回。Executor 在同一个 `execute()` 内把它作为下一条用户消息继续运行（最多 3 次），task 的最终回复是最后一次运行的回复，调用方不需要新开一轮。结束前 executor 在 steer 端点使用的同一把锁下检查 agent 上是否还有未消费的 steer 并关闭该 task 的 steer 窗口：与结束竞争的 steer 要么被取出继续运行，要么收到 409 由调用方排队，不会滞留到缓存 agent 的下一轮。超过 3 次的遗留 steer 记录 warning 后丢弃。
 
-调用方（`a2a_delegate`）只在 Card 声明了 `steer_path`、且本轮 `send_turn` 正在进行并已拿到本轮 task ID 时才发送 steer；上一轮循环的 task ID 不会被复用。飞书循环模式下，远端任务进行中的非命令输入走 steer 并回复确认；`/main`、`/exit` 等以 `/` 开头的文本、远端未声明、或 steer 被拒绝时，保持原有的下一轮排队。
+调用方（`a2a_delegate`）只在 Card 声明了 `steer_path`、且本轮 `send_turn` 正在进行并已拿到本轮 task ID 时才发送 steer；上一轮循环的 task ID 不会被复用。飞书和 Slack 循环模式下（共用 `BasePlatformAdapter._steer_delegate_turn`），远端任务进行中的非命令输入走 steer 并回复确认；`/main`、`/exit` 等以 `/` 开头的文本、远端未声明、或 steer 被拒绝时，保持原有的下一轮排队。
 
 ## 8. 验证
 

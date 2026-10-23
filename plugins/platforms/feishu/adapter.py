@@ -165,14 +165,6 @@ def _get_scoped_secret(name, default=None):
 
 logger = logging.getLogger(__name__)
 DEFAULT_DELEGATE_STREAM_EDIT_INTERVAL = 3.0
-# Upper bound on waiting for a remote steer acknowledgement before the
-# follow-up falls back to the loop's next-turn queue.  Longer than the steer
-# request's own HTTP timeout, so the request settles before this fires.
-_DELEGATE_STEER_WAIT_SECONDS = 15.0
-_DELEGATE_STEER_ACK = (
-    "⏩ Steered the remote agent's current task. "
-    "Your message arrives after its next tool call."
-)
 
 # Card output (see feishu_cardkit.py).  One CardKit card per speaker per
 # turn: header title, collapsible execution trace, streamed rich-text body.
@@ -2794,48 +2786,12 @@ class FeishuAdapter(BasePlatformAdapter):
         await self.handle_delegate_stream_segment_break(
             route_key=route.key, chat_id=chat_id, metadata=metadata,
         )
-        if await self._steer_delegate_turn(route, text, chat_id=chat_id, metadata=metadata):
+        if await self._steer_delegate_turn(route.input_adapter, text, chat_id=chat_id, metadata=metadata):
             return True
         if route.input_adapter.push_line(text):
             return True
         self._unregister_delegate_route(route)
         return False
-
-    async def _steer_delegate_turn(
-        self,
-        route: _FeishuDelegateRoute,
-        text: str,
-        *,
-        chat_id: str,
-        metadata: Optional[Dict[str, Any]],
-    ) -> bool:
-        """Fold a follow-up into the remote turn still running, if possible.
-
-        Mirrors gateway steer for the main agent: no interrupt and no new
-        turn.  Commands (``/main``, ``/exit``, ...) are never steering text,
-        and any refusal or failure leaves the text for the next-turn queue.
-        """
-        cleaned = str(text or "").strip()
-        if not cleaned or cleaned.startswith("/"):
-            return False
-        schedule = getattr(route.input_adapter, "schedule_steer", None)
-        future = schedule(cleaned) if callable(schedule) else None
-        if future is None:
-            return False
-        try:
-            accepted = bool(
-                await asyncio.wait_for(asyncio.wrap_future(future), _DELEGATE_STEER_WAIT_SECONDS)
-            )
-        except Exception:
-            logger.warning("[Feishu] Delegate steer failed; queueing as next turn", exc_info=True)
-            return False
-        if not accepted:
-            return False
-        try:
-            await self.send(chat_id, _DELEGATE_STEER_ACK, metadata=metadata)
-        except Exception:
-            logger.debug("[Feishu] Failed to send delegate steer acknowledgement", exc_info=True)
-        return True
 
     async def _maybe_route_delegate_interaction_message(
         self,
