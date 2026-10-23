@@ -42,13 +42,31 @@ from tools.approval import (
 from tools import clarify_gateway
 
 from .converter import a2a_to_text, history_to_a2a, text_to_message
-from .interactions import InteractionRecord, InteractionRegistry
+from .interactions import InteractionError, InteractionRecord, InteractionRegistry
 
 
 AgentFactory = Callable[[str], object]
 
 
 logger = logging.getLogger(__name__)
+
+
+# Bounds how many times one A2A task re-runs the agent for a steer that
+# landed after its final tool batch.
+_MAX_STEER_CONTINUATIONS = 3
+
+
+def _leftover_steer(result: object) -> str:
+    if not isinstance(result, dict):
+        return ""
+    return str(result.get("pending_steer") or "").strip()
+
+
+def _drain_agent_steer(agent: object) -> str:
+    drain = getattr(agent, "_drain_pending_steer", None)
+    if not callable(drain):
+        return ""
+    return str(drain() or "").strip()
 
 
 def _default_agent_factory(session_id: str):
@@ -445,6 +463,42 @@ class HermesA2AExecutor(AgentExecutor):
                 agent_session_id,
                 _clarify_callback,
             )
+            # A steer that arrived after the agent's last tool batch has no
+            # tool result to ride on and comes back as ``pending_steer``.
+            # Continue the same A2A task with it so the caller's guidance is
+            # applied without a new caller turn.
+            continuations = 0
+            while not cancel_event.is_set():
+                leftover_steer = _leftover_steer(result) or await self._close_steer_window(
+                    task.id, agent
+                )
+                if not leftover_steer:
+                    break
+                if continuations >= _MAX_STEER_CONTINUATIONS:
+                    await self._close_steer_window(task.id, agent, force=True)
+                    logger.warning(
+                        "Dropping steer for A2A task %s after %d continuations",
+                        task.id,
+                        continuations,
+                    )
+                    break
+                continuations += 1
+                history = load_conversation_history(
+                    agent,
+                    getattr(agent, "session_id", None) or task.context_id,
+                )
+                result = await asyncio.to_thread(
+                    self._run_agent_conversation,
+                    agent,
+                    leftover_steer,
+                    history,
+                    task.id,
+                    stream_callback,
+                    tool_start_callback,
+                    tool_complete_callback,
+                    agent_session_id,
+                    _clarify_callback,
+                )
         except Exception as exc:
             await self._finish_stream_consumer(loop, delta_queue, stream_task)
             await updater.failed(
@@ -499,6 +553,55 @@ class HermesA2AExecutor(AgentExecutor):
         await updater.cancel(
             updater.new_agent_message([text_to_message("Canceled by user.").parts[0]])
         )
+
+    async def steer(self, payload: dict[str, object]) -> dict[str, object]:
+        """Deliver mid-turn user guidance to the agent running ``task_id``.
+
+        Mirrors gateway busy input: ``redirect`` retries an in-flight model
+        request with the correction and degrades to ``steer`` while tools run,
+        so the current tool finishes first.  It never starts a new A2A request.
+        """
+        task_id = str(payload.get("task_id") or "").strip()
+        context_id = str(payload.get("context_id") or "").strip()
+        text = str(payload.get("text") or "").strip()
+        if not task_id or not context_id or not text:
+            raise InteractionError(422, "task_id, context_id and text are required")
+        # Held across delivery so _close_steer_window either sees this steer
+        # or has already closed the task and this request gets a 409.
+        async with self._lock:
+            agent_key = self._task_agent_keys.get(task_id)
+            cancel_event = self._cancel_events.get(task_id)
+            agent = self._agents.peek(agent_key) if agent_key else None
+            if agent is None or (cancel_event is not None and cancel_event.is_set()):
+                raise InteractionError(409, "task has no running turn")
+            if agent_key != context_id:
+                raise InteractionError(409, "task and context do not match")
+            accepted = False
+            redirect = getattr(agent, "redirect", None)
+            if getattr(agent, "_supports_active_turn_redirect", False) is True and callable(redirect):
+                accepted = bool(redirect(text))
+            if not accepted:
+                steer = getattr(agent, "steer", None)
+                if not callable(steer):
+                    raise InteractionError(409, "agent does not support steering")
+                accepted = bool(steer(text))
+        if not accepted:
+            raise InteractionError(409, "steer was not accepted")
+        return {"ok": True, "task_id": task_id}
+
+    async def _close_steer_window(self, task_id: str, agent: object, *, force: bool = False) -> str:
+        """Stop accepting steers for ``task_id`` unless one is still pending.
+
+        Runs under the lock ``steer`` delivers under, so a steer racing the
+        end of a turn either is returned here for another run or is refused,
+        and is never left on the cached agent for its next turn.  ``force``
+        closes the window and discards anything pending.
+        """
+        async with self._lock:
+            leftover = _drain_agent_steer(agent)
+            if not leftover or force:
+                self._task_agent_keys.pop(task_id, None)
+            return "" if force else leftover
 
     async def publish_interaction_resolved(self, record: InteractionRecord) -> None:
         """Publish a resolved interaction on the still-working A2A task."""

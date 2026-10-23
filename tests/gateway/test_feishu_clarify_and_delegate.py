@@ -1,6 +1,7 @@
 """Feishu clarify-card and foreground A2A delegate adapter coverage."""
 
 import asyncio
+import concurrent.futures
 import importlib.util
 import json
 import sys
@@ -236,6 +237,85 @@ async def test_feishu_delegate_foreground_route_and_stream_are_isolated():
     first.close()
     assert route_key not in adapter._delegate_routes
     assert route_key not in adapter._delegate_stream_states
+
+
+class _SteerSession:
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.steers = []
+
+    def schedule_steer(self, text):
+        self.steers.append(text)
+        if self.outcome is None:
+            return None
+        future = concurrent.futures.Future()
+        future.set_result(self.outcome)
+        return future
+
+
+def _foreground_input(adapter):
+    runtime = adapter.build_delegate_foreground_runtime(
+        channel_id="oc_123", thread_ts="th_1", user_id="ou_owner", chat_type="group"
+    )
+    input_adapter = runtime["input_factory"]()
+    input_adapter.enter_foreground()
+    return input_adapter
+
+
+async def _route(adapter, text):
+    return await adapter._maybe_route_delegate_foreground_message(
+        text=text, chat_id="oc_123", thread_id="th_1", user_id="ou_owner", chat_type="group"
+    )
+
+
+@pytest.mark.asyncio
+async def test_feishu_delegate_input_steers_the_remote_turn_in_flight():
+    adapter = _make_adapter()
+    adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="om_ack"))
+    input_adapter = _foreground_input(adapter)
+    session = _SteerSession(True)
+    input_adapter.bind_a2a_session(session)
+
+    assert await _route(adapter, "focus on X")
+
+    assert session.steers == ["focus on X"]
+    assert input_adapter.read_line(timeout=0) is None
+    adapter.send.assert_awaited_once_with(
+        "oc_123", feishu_module._DELEGATE_STEER_ACK, metadata={"thread_id": "th_1"}
+    )
+    input_adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", [None, False])
+async def test_feishu_delegate_input_queues_when_steer_is_unavailable_or_refused(outcome):
+    adapter = _make_adapter()
+    adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="om_ack"))
+    input_adapter = _foreground_input(adapter)
+    input_adapter.bind_a2a_session(_SteerSession(outcome))
+
+    assert await _route(adapter, "next question")
+
+    assert input_adapter.read_line(timeout=0) == "next question"
+    adapter.send.assert_not_awaited()
+    input_adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_feishu_delegate_loop_commands_are_never_steered():
+    adapter = _make_adapter()
+    adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="om_ack"))
+    input_adapter = _foreground_input(adapter)
+    session = _SteerSession(True)
+    input_adapter.bind_a2a_session(session)
+
+    assert await _route(adapter, "/main")
+
+    assert session.steers == []
+    assert input_adapter.read_line(timeout=0) == "/main"
+    input_adapter.unbind_a2a_session(session)
+    assert input_adapter.schedule_steer("later") is None
+    input_adapter.close()
 
 
 @pytest.mark.parametrize(

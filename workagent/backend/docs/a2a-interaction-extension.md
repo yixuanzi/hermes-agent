@@ -26,7 +26,8 @@ Workagent 的 Card JSON 在标准 A2A 能力字段之外增加：
       "uri": "https://hermes.dev/extensions/interaction/v1",
       "required": false,
       "params": {
-        "response_path": "/a2a/hermes/interaction/respond"
+        "response_path": "/a2a/hermes/interaction/respond",
+        "steer_path": "/a2a/hermes/steer"
       }
     }
   ]
@@ -41,9 +42,10 @@ Workagent 的 Card JSON 在标准 A2A 能力字段之外增加：
 GET  /.well-known/agent-card.json
 GET  /a2a/.well-known/agent-card.json
 POST /a2a/hermes/interaction/respond
+POST /a2a/hermes/steer
 ```
 
-当 `A2A_BASE_PATH` 改变时，RPC path 和响应 path 由服务配置生成，调用方应优先使用 Card 的 `params.response_path`，不要硬编码服务端前缀。
+当 `A2A_BASE_PATH` 改变时，RPC path、响应 path 和 steer path 由服务配置生成，调用方应优先使用 Card 的 `params.response_path` / `params.steer_path`，不要硬编码服务端前缀。
 
 ## 3. 请求格式与 task 生命周期
 
@@ -187,10 +189,25 @@ agent._user_id           = uid
 
 Slack、Feishu 和 Aegis 的交互状态必须与普通主 Agent approval/clarify 隔离。用户点击后只发送远端 response；`approval_resolved` / `clarify_resolved` 到达后再清理 UI pending state。这样可避免“卡片已经显示但远端线程仍然等待”或重复点击触发第二次授权。
 
-## 7. 验证
+## 7. 中途引导（steer）
+
+A2A 原生 `message/send` 不能把消息送进正在执行的 task：SDK 对同一 task 的请求串行执行，第二条消息只会在当前 `execute()` 结束后再跑一轮。因此中途引导走单独的 HTTP 端点，与交互响应使用同一套 A2A Bearer 鉴权：
+
+```http
+POST /a2a/hermes/steer
+{"task_id": "<task id>", "context_id": "<context id>", "text": "只关注 X"}
+```
+
+- Executor 用 `_task_agent_keys[task_id]` 找到正在运行的 agent，校验 context 一致后调用 `agent.redirect(text)`：模型请求进行中则取消该请求并带上纠正重试；工具执行中退化为 `steer()`，等当前工具完成后附在工具结果上。agent 不支持 redirect 时直接调用 `steer()`。两者都不新开 A2A 请求。
+- 成功返回 `{"ok": true, "task_id": ...}`；字段缺失 422；task 不在运行、已取消、context 不匹配或 agent 拒绝时 409。调用方收到非 2xx 必须把文本退回为下一轮输入，不得丢弃。
+- 落在最后一次工具批次之后的 steer 会作为 `run_conversation` 结果的 `pending_steer` 返回。Executor 在同一个 `execute()` 内把它作为下一条用户消息继续运行（最多 3 次），task 的最终回复是最后一次运行的回复，调用方不需要新开一轮。结束前 executor 在 steer 端点使用的同一把锁下检查 agent 上是否还有未消费的 steer 并关闭该 task 的 steer 窗口：与结束竞争的 steer 要么被取出继续运行，要么收到 409 由调用方排队，不会滞留到缓存 agent 的下一轮。超过 3 次的遗留 steer 记录 warning 后丢弃。
+
+调用方（`a2a_delegate`）只在 Card 声明了 `steer_path`、且本轮 `send_turn` 正在进行并已拿到本轮 task ID 时才发送 steer；上一轮循环的 task ID 不会被复用。飞书循环模式下，远端任务进行中的非命令输入走 steer 并回复确认；`/main`、`/exit` 等以 `/` 开头的文本、远端未声明、或 steer 被拒绝时，保持原有的下一轮排队。
+
+## 8. 验证
 
 ```bash
-venv/bin/python -m pytest tests/workagent/backend/test_a2a_interactions.py tests/workagent/backend/test_a2a_executor.py -q
+venv/bin/python -m pytest tests/workagent/backend/test_a2a_interactions.py tests/workagent/backend/test_a2a_executor.py tests/workagent/backend/test_a2a_steer.py -q
 venv/bin/python -m pytest tests/tools/test_a2a_delegate_tool.py tests/gateway/test_feishu_clarify_and_delegate.py tests/gateway/test_slack_delegate_runtime_wiring.py -q
 venv/bin/python -m pytest tests/aegis/backend/test_chat_ws.py -q
 git diff --check

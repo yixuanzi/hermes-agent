@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import math
@@ -34,6 +35,7 @@ _A2A_POLL_TIMEOUT_ENV = "A2A_POLL_TIMEOUT"
 _A2A_POLL_INTERVAL_ENV = "A2A_POLL_INTERVAL"
 _A2A_POLL_TIMEOUT_DEFAULT = 120.0
 _A2A_POLL_INTERVAL_DEFAULT = 1.0
+_A2A_STEER_REQUEST_TIMEOUT_SECONDS = 10.0
 _A2A_CANCEL_STATUS_NOOP = "noop"
 _A2A_CANCEL_STATUS_SENT = "sent"
 _A2A_CANCEL_STATUS_COMPLETED = "completed"
@@ -421,6 +423,19 @@ def _exit_delegate_foreground(input_adapter) -> None:
         exit_foreground()
 
 
+def _bind_delegate_input_session(input_adapter, session) -> None:
+    """Let a foreground input adapter steer the session's in-flight turn."""
+    binder = getattr(input_adapter, "bind_a2a_session", None)
+    if callable(binder):
+        binder(session)
+
+
+def _unbind_delegate_input_session(input_adapter, session) -> None:
+    unbinder = getattr(input_adapter, "unbind_a2a_session", None)
+    if callable(unbinder):
+        unbinder(session)
+
+
 def _touch_parent_activity_for_delegate_input(parent_agent) -> None:
     touch = getattr(parent_agent, "_touch_activity", None)
     if not callable(touch):
@@ -770,6 +785,7 @@ class _A2ADelegateSession:
         interaction_supported: bool = False,
         interaction_only: bool = False,
         agent_name: str | None = None,
+        steer_path: str | None = None,
     ):
         self.base_url = base_url
         self.output = output
@@ -796,6 +812,7 @@ class _A2ADelegateSession:
         self.headers = headers or {}
         self._response_path = str(response_path or "").strip()
         self._interaction_supported = bool(interaction_supported)
+        self._steer_path = str(steer_path or "").strip()
         self._client = None
         self._http_client = None
         self._rendered_tool_entries: set[str] = set()
@@ -808,6 +825,11 @@ class _A2ADelegateSession:
         self._owner_loop = None
         self._owner_thread_id = None
         self._stop_requested = False
+        # Set only while send_turn runs; _turn_task_id is this turn's remote
+        # task, never a previous loop turn's, so a steer cannot hit a
+        # finished task.
+        self._turn_in_flight = False
+        self._turn_task_id: str | None = None
 
     def _bind_owner_runtime(self) -> None:
         try:
@@ -991,10 +1013,19 @@ class _A2ADelegateSession:
         self._rendered_tool_entries.clear()
         self._tool_names_by_call_id.clear()
         self._streamed_assistant_text = ""
-        task = await self._send_text(text)
-        self.context_id = getattr(task, "context_id", None) or self.context_id
-        self.task_id = getattr(task, "id", None) or self.task_id
-        finished = await self._wait_for_final(task)
+        with self._state_lock:
+            self._turn_in_flight = True
+            self._turn_task_id = None
+        try:
+            task = await self._send_text(text)
+            self.context_id = getattr(task, "context_id", None) or self.context_id
+            self.task_id = getattr(task, "id", None) or self.task_id
+            self._mark_turn_task(self.task_id)
+            finished = await self._wait_for_final(task)
+        finally:
+            with self._state_lock:
+                self._turn_in_flight = False
+                self._turn_task_id = None
         self.context_id = getattr(finished, "context_id", None) or self.context_id
         self.task_id = getattr(finished, "id", None) or self.task_id
         final_response = _a2a_task_text(finished)
@@ -1013,17 +1044,56 @@ class _A2ADelegateSession:
         }
 
     def _interaction_url(self) -> str:
-        response_path = self._response_path or "/hermes/interaction/respond"
-        if response_path.startswith("http://") or response_path.startswith("https://"):
-            return response_path
+        return self._remote_path_url(self._response_path or "/hermes/interaction/respond")
+
+    def _remote_path_url(self, path: str) -> str:
+        if path.startswith("http://") or path.startswith("https://"):
+            return path
         base = self.base_url.rstrip("/")
         base_parts = urlsplit(base)
-        base_path = base_parts.path.rstrip("/")
-        if response_path.startswith("/"):
-            if base_path and response_path.startswith(base_path + "/"):
-                return f"{base_parts.scheme}://{base_parts.netloc}{response_path}"
-            return f"{base_parts.scheme}://{base_parts.netloc}{response_path}"
-        return f"{base}/{response_path.lstrip('/')}"
+        if path.startswith("/"):
+            return f"{base_parts.scheme}://{base_parts.netloc}{path}"
+        return f"{base}/{path.lstrip('/')}"
+
+    def _mark_turn_task(self, task_id: str | None) -> None:
+        with self._state_lock:
+            if self._turn_in_flight and task_id:
+                self._turn_task_id = task_id
+
+    def schedule_steer(self, text: str) -> concurrent.futures.Future | None:
+        """Send mid-turn guidance to the remote task this session is running.
+
+        Returns ``None`` when the remote does not declare steering or no turn
+        is in flight, so the caller keeps queueing the text as the next turn.
+        Otherwise the future resolves to whether the remote accepted it.
+        Callable from any thread.
+        """
+        cleaned = str(text or "").strip()
+        with self._state_lock:
+            loop = self._owner_loop
+            task_id = self._turn_task_id
+            eligible = bool(self._steer_path) and self._turn_in_flight and not self._stop_requested
+        if not cleaned or not eligible or not task_id or loop is None or not loop.is_running():
+            return None
+        return asyncio.run_coroutine_threadsafe(self._post_steer(task_id, cleaned), loop)
+
+    async def _post_steer(self, task_id: str, text: str) -> bool:
+        context_id = self.context_id
+        if not context_id or self._http_client is None:
+            return False
+        try:
+            response = await self._http_client.post(
+                self._remote_path_url(self._steer_path),
+                json={"task_id": task_id, "context_id": context_id, "text": text},
+                timeout=_A2A_STEER_REQUEST_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.warning("A2A steer request for task %r failed", task_id, exc_info=True)
+            return False
+        if response.status_code >= 400:
+            logger.info("Remote A2A agent rejected steer for task %r (%s)", task_id, response.status_code)
+            return False
+        return True
 
     async def respond_interaction(self, interaction_id: str, kind: str, value: Any) -> dict[str, Any]:
         if not self._interaction_supported:
@@ -1083,6 +1153,7 @@ class _A2ADelegateSession:
                     if not self.context_id:
                         self.context_id = getattr(last_task, "context_id", None) or self.context_id
                     self.task_id = getattr(last_task, "id", None) or self.task_id
+                    self._mark_turn_task(getattr(last_task, "id", None))
                     state = _a2a_field(getattr(last_task, "status", None), "state", None)
                     is_final = state in _a2a_final_task_states()
                     self._emit_task_text_delta(
@@ -1265,6 +1336,15 @@ def _a2a_interaction_config(entry: dict[str, Any]) -> tuple[bool, str | None]:
     params = extension.get("params") or {}
     response_path = params.get("response_path") if isinstance(params, dict) else None
     return True, str(response_path).strip() if response_path else None
+
+
+def _a2a_steer_path(entry: dict[str, Any]) -> str | None:
+    """Return the remote's mid-turn steer path, or ``None`` when undeclared."""
+    card = entry.get("agent_card")
+    extension = card.get("interaction_extension") if isinstance(card, dict) else None
+    params = extension.get("params") if isinstance(extension, dict) else None
+    steer_path = str(params.get("steer_path") or "").strip() if isinstance(params, dict) else ""
+    return steer_path or None
 
 
 class _RemoteA2ADelegateCancelHandle:
@@ -1452,6 +1532,7 @@ def _run_remote_delegate(
         interaction_supported=interaction_supported,
         interaction_only=interaction_only,
         agent_name=agent_name,
+        steer_path=_a2a_steer_path(entry),
     )
     bind_output = getattr(session, "bind_output_adapter", None)
     if callable(bind_output):
@@ -1477,6 +1558,7 @@ def _run_remote_delegate(
                         completed=False,
                         error_message="a2a_delegate could not enter foreground mode.",
                     )
+                _bind_delegate_input_session(input, session)
                 _emit_run_event("status", "entered foreground loop", getattr(session, "context_id", None))
 
             last_result = await session.send_turn(
@@ -1604,6 +1686,7 @@ def _run_remote_delegate(
         finally:
             _clear_active_a2a_session(parent_agent, active_handle)
             if entered_foreground:
+                _unbind_delegate_input_session(input, session)
                 _exit_delegate_foreground(input)
             try:
                 await session.close()

@@ -440,6 +440,81 @@ def test_remote_stream_failure_after_stop_is_raised():
         _run_coro_sync(session._send_text("go"))
 
 
+@pytest.mark.parametrize(
+    ("card", "expected"),
+    [
+        ({"interaction_extension": {"params": {"response_path": "/r", "steer_path": "/a2a/hermes/steer"}}}, "/a2a/hermes/steer"),
+        ({"interaction_extension": {"params": {"response_path": "/r"}}}, None),
+        ({"interaction_extension": None}, None),
+        (None, None),
+    ],
+)
+def test_a2a_steer_path_requires_card_declaration(card, expected):
+    from tools.a2a_delegate_tool import _a2a_steer_path
+
+    assert _a2a_steer_path({"agent_card": card}) == expected
+
+
+def test_schedule_steer_only_targets_this_turns_remote_task():
+    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+
+    posted = []
+    observed = {}
+
+    class FakeHttpClient:
+        async def post(self, url, json, timeout=None):
+            del timeout
+            posted.append((url, json))
+            return SimpleNamespace(status_code=200)
+
+    session = _A2ADelegateSession(
+        "http://agent.local/a2a",
+        poll_interval=0,
+        session_id="ctx-1",
+        steer_path="/a2a/hermes/steer",
+    )
+    session._http_client = FakeHttpClient()
+    session.open = MagicMock(side_effect=lambda: asyncio.sleep(0))
+    # A previous loop turn's task must never receive this turn's steer.
+    session.task_id = "previous-task"
+
+    class FakeClient:
+        async def send_message(self, request):
+            del request
+            observed["before_task"] = session.schedule_steer("too early")
+            yield SimpleNamespace(task=_stream_task("working"))
+            future = session.schedule_steer("focus")
+            observed["accepted"] = await asyncio.wrap_future(future)
+            yield SimpleNamespace(task=_stream_task("completed"))
+
+        async def get_task(self, request):
+            raise AssertionError("a completed stream must not poll")
+
+    session._client = FakeClient()
+
+    async def _turn():
+        session._bind_owner_runtime()
+        return await session.send_turn("go", is_delegate_output=False)
+
+    _run_coro_sync(_turn())
+
+    assert observed == {"before_task": None, "accepted": True}
+    assert posted == [
+        ("http://agent.local/a2a/hermes/steer", {"task_id": "task-1", "context_id": "ctx-1", "text": "focus"})
+    ]
+    assert session.schedule_steer("after turn") is None
+
+
+def test_schedule_steer_is_disabled_without_declared_steer_path():
+    from tools.a2a_delegate_tool import _A2ADelegateSession
+
+    session = _A2ADelegateSession("http://agent.local/a2a")
+    session._turn_in_flight = True
+    session._turn_task_id = "task-1"
+
+    assert session.schedule_steer("focus") is None
+
+
 def test_remote_task_deadline_pauses_while_interaction_is_pending():
     from a2a.types import Message, Part, Role
     from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync

@@ -35,6 +35,7 @@ from hermes_self_restart import request_self_restart
 from workagent.backend.a2a_service.interactions import (
     INTERACTION_EXTENSION_URI,
     INTERACTION_RESPONSE_SUFFIX,
+    STEER_REQUEST_SUFFIX,
     InteractionError,
     interaction_extension,
 )
@@ -42,6 +43,7 @@ from workagent.backend.a2a_service.interactions import (
 A2A_RPC_PATH = os.getenv("A2A_BASE_PATH", "/a2a")
 A2A_AGENT_CARD_PATH = f"{A2A_RPC_PATH}/.well-known/agent-card.json"
 A2A_INTERACTION_RESPONSE_PATH = f"{A2A_RPC_PATH}{INTERACTION_RESPONSE_SUFFIX}"
+A2A_STEER_PATH = f"{A2A_RPC_PATH}{STEER_REQUEST_SUFFIX}"
 A2A_PUBLIC_PATHS = frozenset(
     {
         "/health",
@@ -447,7 +449,7 @@ def create_a2a_app(
             for item in extensions
         ):
             extensions.append(
-                interaction_extension(A2A_INTERACTION_RESPONSE_PATH)
+                interaction_extension(A2A_INTERACTION_RESPONSE_PATH, A2A_STEER_PATH)
             )
         return payload
 
@@ -492,6 +494,20 @@ def create_a2a_app(
                 "state": record.state,
             }
         )
+
+    @app.post(A2A_STEER_PATH, include_in_schema=False)
+    async def steer_running_task(request: Request) -> JSONResponse:
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail="request body must be JSON") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail="request body must be an object")
+        try:
+            result = await a2a_executor.steer(payload)
+        except InteractionError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        return JSONResponse(result)
 
     add_a2a_routes_to_fastapi(
         app,

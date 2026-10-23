@@ -71,6 +71,9 @@ Intent: Use a 120-second client polling deadline by default and allow process-le
 Feature: Remote A2A progress heartbeat and stream-to-polling fallback.
 Intent: Refresh the parent Agent's activity timestamp on every streamed SSE event and every successful `get_task` poll, so the gateway inactivity timeout does not kill a turn whose remote delegate is still reporting. When the SSE stream raises after this turn's remote task ID is known, log it and hand the last task snapshot to `_wait_for_final` polling instead of failing the delegation. Errors before any task is known, and stream errors after a user stop, still propagate unchanged so stop handling and genuine send failures stay visible.
 
+Feature: Mid-turn steering of a remote A2A turn.
+Intent: Read the optional `steer_path` from the `hermes.interaction.v1` Agent Card extension and expose `schedule_steer(text)`, which posts guidance for the remote task of the turn currently in flight and resolves to whether the remote accepted it. The turn's own task ID is tracked separately from `task_id` so a loop never steers a previous turn's finished task; `schedule_steer` returns `None` when the remote does not declare steering or no turn is running, so callers keep the next-turn queue. In loop mode the session is bound to the foreground input adapter so platform adapters can reach it. Native A2A messages cannot do this because the SDK serializes requests per task.
+
 Feature: Delegate agent name for platform presentation.
 Intent: Carry the resolved `agent_name` onto the delegate session so a platform output adapter that renders a delegation as its own surface can title it. Presentation only: this attribute must never participate in routing, session identity, or authorization.
 
@@ -148,6 +151,9 @@ Intent: With `HERMES_JEV_THREAD_AUTOREPLY` on, a message inside a topic that nob
 
 Feature: Feishu delegate foreground I/O.
 Intent: Provide isolated per-runtime blocking input adapters and adapter-loop output routing for `a2a_delegate(is_loop=true)`, keyed by Feishu chat, topic, and user dimensions so cached agents, different users, and different topics never share a foreground queue.
+
+Feature: Feishu delegate loop steering.
+Intent: While a foreground `a2a_delegate` loop's remote turn is still running, fold a non-command follow-up into that turn through the bound session's `schedule_steer` and acknowledge it, matching how gateway steer treats the main agent: no interrupt and no new turn. Slash-prefixed text such as `/main` or `/exit`, remotes that do not declare steering, and refused or failed steers keep the existing next-turn queue, so follow-up input is never dropped.
 
 Feature: Feishu delegate stream state.
 Intent: Send the first AI delta immediately, throttle edits of the same Feishu message to at most once every three seconds, force-flush at final/tool/user-input segment boundaries, split oversized output, fall back to appended messages after edit failure, and cancel delayed flushes when a route exits or the adapter stops.

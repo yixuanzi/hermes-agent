@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 INTERACTION_EXTENSION_URI = "https://hermes.dev/extensions/interaction/v1"
 INTERACTION_RESPONSE_SUFFIX = "/hermes/interaction/respond"
+STEER_REQUEST_SUFFIX = "/hermes/steer"
 
 
 class InteractionError(Exception):
@@ -196,10 +197,17 @@ class InteractionRegistry:
             self._records.pop(interaction_id, None)
 
 
-def interaction_extension(response_path: str) -> dict[str, Any]:
-    """Return the non-required AgentCard extension declaration."""
+def interaction_extension(response_path: str, steer_path: str | None = None) -> dict[str, Any]:
+    """Return the non-required AgentCard extension declaration.
+
+    ``steer_path`` advertises mid-turn steering; callers that do not see it
+    must keep queueing follow-up input as a new turn.
+    """
+    params: dict[str, Any] = {"response_path": response_path}
+    if steer_path:
+        params["steer_path"] = steer_path
     return {
         "uri": INTERACTION_EXTENSION_URI,
         "required": False,
-        "params": {"response_path": response_path},
+        "params": params,
     }
