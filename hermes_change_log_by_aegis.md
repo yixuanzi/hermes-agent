@@ -74,6 +74,9 @@ Intent: Refresh the parent Agent's activity timestamp on every streamed SSE even
 Feature: Mid-turn steering of a remote A2A turn.
 Intent: Read the optional `steer_path` from the `hermes.interaction.v1` Agent Card extension and expose `schedule_steer(text)`, which posts guidance for the remote task of the turn currently in flight and resolves to whether the remote accepted it. The turn's own task ID is tracked separately from `task_id` so a loop never steers a previous turn's finished task; `schedule_steer` returns `None` when the remote does not declare steering or no turn is running, so callers keep the next-turn queue. In loop mode the session is bound to the foreground input adapter so platform adapters can reach it. Native A2A messages cannot do this because the SDK serializes requests per task.
 
+Feature: Stopping a delegation in either mode.
+Intent: Let the active-delegate cancel handle stop a delegation whether a remote turn is running or a foreground loop is waiting for its next input. A running turn still gets an A2A `cancel_task` for that turn's task; a loop idle between turns has no remote task, so the handle closes the loop's input adapter instead of cancelling an already-finished task, and the loop returns the interrupted payload rather than waiting out its 25-minute input timeout. `has_live_task` now reports either case, so surfaces such as Aegis `/a2a_stop` and `/stop` can stop a loop that is waiting for input.
+
 Feature: Delegate agent name for platform presentation.
 Intent: Carry the resolved `agent_name` onto the delegate session so a platform output adapter that renders a delegation as its own surface can title it. Presentation only: this attribute must never participate in routing, session identity, or authorization.
 

@@ -424,16 +424,31 @@ def _exit_delegate_foreground(input_adapter) -> None:
 
 
 def _bind_delegate_input_session(input_adapter, session) -> None:
-    """Let a foreground input adapter steer the session's in-flight turn."""
+    """Pair a foreground input adapter with its session in both directions.
+
+    The adapter can then steer the session's in-flight turn, and a stop can
+    close the adapter to end a loop that is waiting for its next input.
+    """
     binder = getattr(input_adapter, "bind_a2a_session", None)
     if callable(binder):
         binder(session)
+    attach = getattr(session, "attach_foreground_input", None)
+    if callable(attach):
+        attach(input_adapter)
 
 
 def _unbind_delegate_input_session(input_adapter, session) -> None:
+    detach = getattr(session, "detach_foreground_input", None)
+    if callable(detach):
+        detach(input_adapter)
     unbinder = getattr(input_adapter, "unbind_a2a_session", None)
     if callable(unbinder):
         unbinder(session)
+
+
+def _delegate_stop_requested(session) -> bool:
+    stop_requested = getattr(session, "stop_requested", None)
+    return bool(stop_requested()) if callable(stop_requested) else False
 
 
 def _touch_parent_activity_for_delegate_input(parent_agent) -> None:
@@ -830,6 +845,8 @@ class _A2ADelegateSession:
         # finished task.
         self._turn_in_flight = False
         self._turn_task_id: str | None = None
+        # Foreground loop input, attached only while a loop is running.
+        self._foreground_input = None
 
     def _bind_owner_runtime(self) -> None:
         try:
@@ -1054,6 +1071,35 @@ class _A2ADelegateSession:
         if path.startswith("/"):
             return f"{base_parts.scheme}://{base_parts.netloc}{path}"
         return f"{base}/{path.lstrip('/')}"
+
+    def attach_foreground_input(self, input_adapter) -> None:
+        with self._state_lock:
+            self._foreground_input = input_adapter
+
+    def detach_foreground_input(self, input_adapter) -> None:
+        with self._state_lock:
+            if self._foreground_input is input_adapter:
+                self._foreground_input = None
+
+    def remote_turn_running(self) -> bool:
+        with self._state_lock:
+            return bool(self._turn_task_id)
+
+    def has_stoppable_work(self) -> bool:
+        """A remote turn is running, or a foreground loop awaits its next input."""
+        with self._state_lock:
+            return bool(self._turn_task_id) or (
+                self._foreground_input is not None and not self._turn_in_flight
+            )
+
+    def close_foreground_input(self) -> bool:
+        with self._state_lock:
+            input_adapter = self._foreground_input
+        close = getattr(input_adapter, "close", None)
+        if not callable(close):
+            return False
+        close()
+        return True
 
     def _mark_turn_task(self, task_id: str | None) -> None:
         with self._state_lock:
@@ -1353,7 +1399,7 @@ class _RemoteA2ADelegateCancelHandle:
         self._lock = threading.Lock()
 
     def has_live_task(self) -> bool:
-        return bool(getattr(self._session, "task_id", None))
+        return self._session.has_stoppable_work()
 
     def _log_async_cancel_outcome(self, future) -> None:
         try:
@@ -1370,6 +1416,12 @@ class _RemoteA2ADelegateCancelHandle:
             return _A2A_CANCEL_STATUS_NOOP
         with self._lock:
             if not self.has_live_task():
+                return _A2A_CANCEL_STATUS_NOOP
+            if not self._session.remote_turn_running():
+                # A foreground loop idle between turns has no remote task to
+                # cancel; closing its input ends the loop as interrupted.
+                if self._session.close_foreground_input():
+                    return _A2A_CANCEL_STATUS_COMPLETED
                 return _A2A_CANCEL_STATUS_NOOP
             owner_loop, owner_thread_id = self._session.owner_runtime()
             current_thread_id = threading.get_ident()
@@ -1595,11 +1647,24 @@ def _run_remote_delegate(
                 )
 
             while True:
-                next_message = await asyncio.to_thread(
-                    _read_delegate_input,
-                    input,
-                    _DELEGATE_FOREGROUND_INPUT_TIMEOUT_SECONDS,
-                )
+                next_message = None
+                if not _delegate_stop_requested(session):
+                    next_message = await asyncio.to_thread(
+                        _read_delegate_input,
+                        input,
+                        _DELEGATE_FOREGROUND_INPUT_TIMEOUT_SECONDS,
+                    )
+                if _delegate_stop_requested(session):
+                    # A stop between turns closes the input to wake this read.
+                    _emit_run_event("status", "interrupted", getattr(session, "context_id", None))
+                    return _build_interrupted_a2a_payload(
+                        goal=goal,
+                        agent_name=agent_name,
+                        session=session,
+                        is_loop=is_loop,
+                        duration_seconds=time.monotonic() - start,
+                        last_result=last_result,
+                    )
                 if next_message is _DELEGATE_INPUT_TIMEOUT:
                     _emit_run_event("status", "input timeout", getattr(session, "context_id", None))
                     return _build_a2a_payload(

@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 import jwt
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -462,6 +463,15 @@ class _FailingRemoteCancelableDelegateAgent(_RemoteCancelableDelegateAgent):
             output.emit("delegate", "status", "interrupted", session_id="remote-delegate-sess")
         input_adapter.exit_foreground()
         return {"final_response": "", "completed": False}
+
+
+class _InterruptAwareRemoteDelegateAgent(_RemoteCancelableDelegateAgent):
+    def __init__(self, session_id: str):
+        super().__init__(session_id)
+        self.interrupt_messages: list[str | None] = []
+
+    def interrupt(self, message: str | None = None) -> None:
+        self.interrupt_messages.append(message)
 
 
 class _InterruptAwareAgent:
@@ -1487,7 +1497,8 @@ def test_chat_ws_help_slash_lists_supported_aegis_commands(
                 "/help - show available Aegis-native slash commands\n"
                 "/model <model_name> - switch the current live session model\n"
                 "/a2a - show the current A2A context XML\n"
-                "/stop - cancel the active remote A2A delegate task"
+                "/a2a_stop - cancel the active remote A2A delegate task (loop or single-shot)\n"
+                "/stop - cancel any active remote A2A delegate task, then stop the current turn"
             )
 
 
@@ -2060,10 +2071,31 @@ def test_chat_ws_stop_slash_reports_real_cancel_failures(
             assert "cancel dispatch failed" in error["message"]
 
 
-def test_chat_ws_stop_slash_without_active_delegate_returns_info_message(
+def _send_text(ws, session_id: str, text: str, client_msg_id: str) -> None:
+    ws.send_json(
+        {
+            "type": "message.send",
+            "session_id": session_id,
+            "text": text,
+            "client_msg_id": client_msg_id,
+        }
+    )
+    _recv_until(ws, "message.accepted")
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("/stop", "No active task to stop."),
+        ("/a2a_stop", "No active remote A2A delegate task."),
+    ],
+)
+def test_chat_ws_stop_commands_without_active_work_return_info_message(
     load_backend,
     monkeypatch,
     hermes_home,
+    command,
+    expected,
 ) -> None:
     monkeypatch.setenv("AEGIS_JWT_SECRET", "test-jwt-secret-1234567890-abcdef")
     server = load_backend("aegis.backend.server")
@@ -2073,22 +2105,103 @@ def test_chat_ws_stop_slash_without_active_delegate_returns_info_message(
 
     with TestClient(app) as client:
         with client.websocket_connect(f"/api/chat/ws?token={AUTH_TOKEN}") as ws:
-            ws.send_json({"type": "session.bind", "title": "No Remote Stop"})
+            ws.send_json({"type": "session.bind", "title": "Idle Stop"})
             session_id = _recv_until(ws, "session.bound")["session_id"]
 
-            ws.send_json(
-                {
-                    "type": "message.send",
-                    "session_id": session_id,
-                    "text": "/stop",
-                    "client_msg_id": "msg-stop",
-                }
-            )
-            _recv_until(ws, "message.accepted")
+            _send_text(ws, session_id, command, "msg-stop")
             reply = _recv_until_one_of(ws, {"message.completed", "error"})
             assert reply["type"] == "message.completed"
-            assert reply["content"] == "No active remote A2A delegate task."
+            assert reply["content"] == expected
             assert agent.interrupt_messages == []
+
+
+def test_chat_ws_a2a_stop_slash_cancels_delegate_without_stopping_main_turn(
+    load_backend,
+    monkeypatch,
+    hermes_home,
+) -> None:
+    monkeypatch.setenv("AEGIS_JWT_SECRET", "test-jwt-secret-1234567890-abcdef")
+    server = load_backend("aegis.backend.server")
+    app = server.create_app()
+    agent = _InterruptAwareRemoteDelegateAgent("remote-a2a-stop")
+    app.state.chat_manager.set_agent_factory(lambda session_id: agent)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/api/chat/ws?token={AUTH_TOKEN}") as ws:
+            ws.send_json({"type": "session.bind", "title": "A2A Stop Slash"})
+            session_id = _recv_until(ws, "session.bound")["session_id"]
+
+            _send_text(ws, session_id, "start remote delegate", "msg-1")
+            _recv_until(ws, "delegate.entered")
+
+            _send_text(ws, session_id, "/a2a_stop", "msg-a2a-stop")
+            exited = _recv_until_one_of(ws, {"delegate.exited", "error"})
+            assert exited["type"] == "delegate.exited"
+            assert exited["reason"] == "interrupted"
+            # The main turn resumes after the delegation and finishes on its
+            # own; it is never reported as interrupted.
+            main_states = []
+            while not main_states or main_states[-1] != "idle":
+                run_state = _recv_until(ws, "run.state")
+                if run_state["source"] == "main":
+                    main_states.append(run_state["state"])
+            assert "interrupted" not in main_states
+            assert agent.remote_handle.cancel_calls == 1
+            assert agent.interrupt_messages == []
+
+
+def test_chat_ws_stop_slash_cancels_delegate_then_stops_main_turn(
+    load_backend,
+    monkeypatch,
+    hermes_home,
+) -> None:
+    monkeypatch.setenv("AEGIS_JWT_SECRET", "test-jwt-secret-1234567890-abcdef")
+    server = load_backend("aegis.backend.server")
+    app = server.create_app()
+    agent = _InterruptAwareRemoteDelegateAgent("remote-stop")
+    app.state.chat_manager.set_agent_factory(lambda session_id: agent)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/api/chat/ws?token={AUTH_TOKEN}") as ws:
+            ws.send_json({"type": "session.bind", "title": "Stop Slash"})
+            session_id = _recv_until(ws, "session.bound")["session_id"]
+
+            _send_text(ws, session_id, "start remote delegate", "msg-1")
+            _recv_until(ws, "delegate.entered")
+
+            _send_text(ws, session_id, "/stop", "msg-stop")
+            first_state = _recv_until(ws, "run.state")
+            assert (first_state["state"], first_state["source"]) == ("interrupted", "delegate")
+            main_state = _recv_until(ws, "run.state")
+            assert (main_state["state"], main_state["source"]) == ("interrupted", "main")
+            assert agent.remote_handle.cancel_calls == 1
+            assert agent.interrupt_messages == ["Stopped by /stop."]
+
+
+def test_chat_ws_stop_slash_stops_main_turn_without_delegate(
+    load_backend,
+    monkeypatch,
+    hermes_home,
+) -> None:
+    monkeypatch.setenv("AEGIS_JWT_SECRET", "test-jwt-secret-1234567890-abcdef")
+    server = load_backend("aegis.backend.server")
+    app = server.create_app()
+    agent = _InterruptAwareAgent("main-stop")
+    app.state.chat_manager.set_agent_factory(lambda session_id: agent)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/api/chat/ws?token={AUTH_TOKEN}") as ws:
+            ws.send_json({"type": "session.bind", "title": "Main Stop"})
+            session_id = _recv_until(ws, "session.bound")["session_id"]
+
+            _send_text(ws, session_id, "run main task", "msg-1")
+            _send_text(ws, session_id, "/stop", "msg-stop")
+            while True:
+                run_state = _recv_until(ws, "run.state")
+                if run_state["state"] == "interrupted":
+                    break
+            assert run_state["source"] == "main"
+            assert agent.interrupt_messages == ["Stopped by /stop."]
 
 
 def test_chat_ws_session_interrupt_keeps_existing_main_agent_interrupt_behavior(

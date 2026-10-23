@@ -515,6 +515,104 @@ def test_schedule_steer_is_disabled_without_declared_steer_path():
     assert session.schedule_steer("focus") is None
 
 
+class _BlockingInput:
+    """Foreground input that blocks until a line arrives or it is closed."""
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._closed = False
+        self.waiting = threading.Event()
+
+    def enter_foreground(self):
+        return True
+
+    def exit_foreground(self):
+        return None
+
+    def read_line(self, timeout=None):
+        with self._condition:
+            self.waiting.set()
+            self._condition.wait_for(lambda: self._closed, timeout=timeout)
+            return None
+
+    def close(self):
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+
+
+def test_stopping_an_idle_foreground_loop_ends_it_as_interrupted(monkeypatch):
+    import tools.a2a_delegate_tool as a2a_delegate_tool
+    from tools.a2a_delegate_tool import A2A_REGISTRY, _A2ADelegateSession, a2a_delegate
+
+    A2A_REGISTRY.clear()
+    A2A_REGISTRY["remote"] = {
+        "name": "remote",
+        "url": "http://agent.local/a2a",
+        "available": True,
+        "agent_card": {"supported_interfaces": [{"url": "http://agent.local/a2a"}]},
+        "error": None,
+    }
+    monkeypatch.setattr("tools.a2a_delegate_tool._a2a_sdk_available", lambda: True)
+
+    class OneTurnSession(_A2ADelegateSession):
+        async def send_turn(self, text, *, is_delegate_output=True):
+            del text, is_delegate_output
+            self.task_id = "task-1"
+            return {"final_response": "first answer", "state": "completed", "state_name": "completed"}
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(a2a_delegate_tool, "_A2ADelegateSession", OneTurnSession)
+    parent = _make_parent()
+    parent._active_a2a_delegate_session = None
+    input_adapter = _BlockingInput()
+    outcome = {}
+
+    def _run():
+        outcome["result"] = json.loads(
+            a2a_delegate(goal="start", agent_name="remote", is_loop=True, input=input_adapter, parent_agent=parent)
+        )
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    try:
+        assert input_adapter.waiting.wait(timeout=3)
+        handle = parent._active_a2a_delegate_session
+        assert handle.has_live_task() is True
+
+        assert handle.cancel() == "completed"
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+    finally:
+        # Release the loop's read even when the stop path regresses, so a
+        # failure surfaces instead of hanging the test process.
+        input_adapter.close()
+        worker.join(timeout=3)
+
+    result = outcome["result"]
+    assert result["loop_exit_reason"] == "interrupted"
+    assert result["success"] is True
+    assert not handle.has_live_task()
+
+
+def test_stopping_a_running_remote_turn_still_cancels_the_remote_task():
+    from tools.a2a_delegate_tool import _A2ADelegateSession, _RemoteA2ADelegateCancelHandle
+
+    session = _A2ADelegateSession("http://agent.local/a2a")
+    session.cancel = MagicMock(side_effect=lambda **kwargs: asyncio.sleep(0))
+    handle = _RemoteA2ADelegateCancelHandle(session)
+    assert handle.cancel() == "noop"
+
+    session._turn_in_flight = True
+    session._turn_task_id = "task-1"
+    session.attach_foreground_input(_BlockingInput())
+
+    assert handle.cancel() == "completed"
+    session.cancel.assert_called_once_with(use_existing_client=False)
+
+
 def test_remote_task_deadline_pauses_while_interaction_is_pending():
     from a2a.types import Message, Part, Role
     from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
