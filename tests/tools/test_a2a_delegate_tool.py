@@ -331,6 +331,115 @@ def test_remote_task_poll_refreshes_parent_activity():
     )
 
 
+def _stream_task(state):
+    return SimpleNamespace(
+        id="task-1",
+        context_id="ctx-1",
+        history=[],
+        status=SimpleNamespace(state=state, message=None),
+    )
+
+
+def test_remote_stream_events_refresh_parent_activity():
+    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+
+    parent = _make_parent()
+    parent._touch_activity = MagicMock()
+
+    class FakeClient:
+        async def send_message(self, request):
+            del request
+            yield SimpleNamespace(task=_stream_task("working"))
+            yield SimpleNamespace(task=_stream_task("completed"))
+
+        async def get_task(self, request):
+            raise AssertionError("a completed stream must not poll")
+
+    session = _A2ADelegateSession("http://agent.local/a2a", parent_agent=parent, poll_interval=0)
+    session._client = FakeClient()
+
+    result = _run_coro_sync(session._send_text("go"))
+
+    assert result.status.state == "completed"
+    assert parent._touch_activity.call_args_list == [
+        (("a2a_delegate: received remote stream event",),),
+        (("a2a_delegate: received remote stream event",),),
+    ]
+
+
+def test_remote_stream_failure_after_task_falls_back_to_polling():
+    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+
+    parent = _make_parent()
+    parent._touch_activity = MagicMock()
+    completed_task = _stream_task("completed")
+    polled = []
+
+    class FakeClient:
+        async def send_message(self, request):
+            del request
+            yield SimpleNamespace(task=_stream_task("working"))
+            raise ConnectionError("stream reset")
+
+        async def get_task(self, request):
+            polled.append(request.id)
+            return completed_task
+
+    session = _A2ADelegateSession("http://agent.local/a2a", parent_agent=parent, poll_interval=0)
+    session._client = FakeClient()
+    session.open = MagicMock(side_effect=lambda: asyncio.sleep(0))
+
+    result = _run_coro_sync(session.send_turn("go", is_delegate_output=False))
+
+    assert polled == ["task-1"]
+    assert result["task"] is completed_task
+    assert result["task_id"] == "task-1"
+    assert parent._touch_activity.call_args_list == [
+        (("a2a_delegate: received remote stream event",),),
+        (("a2a_delegate: received remote task update",),),
+    ]
+
+
+def test_remote_stream_failure_before_task_is_raised():
+    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+
+    class FakeClient:
+        async def send_message(self, request):
+            del request
+            raise ConnectionError("stream reset")
+            yield  # pragma: no cover - makes this an async generator
+
+        async def get_task(self, request):
+            raise AssertionError("no task id to poll")
+
+    session = _A2ADelegateSession("http://agent.local/a2a", poll_interval=0)
+    session._client = FakeClient()
+
+    with pytest.raises(ConnectionError, match="stream reset"):
+        _run_coro_sync(session._send_text("go"))
+
+
+def test_remote_stream_failure_after_stop_is_raised():
+    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+
+    session = _A2ADelegateSession("http://agent.local/a2a", poll_interval=0)
+
+    class FakeClient:
+        async def send_message(self, request):
+            del request
+            yield SimpleNamespace(task=_stream_task("working"))
+            session.mark_stop_requested()
+            raise ConnectionError("stream closed by stop")
+
+        async def get_task(self, request):
+            raise AssertionError("a stopped delegation must not poll")
+
+    session._client = FakeClient()
+
+    with pytest.raises(ConnectionError, match="stream closed by stop"):
+        _run_coro_sync(session._send_text("go"))
+
+
 def test_remote_task_deadline_pauses_while_interaction_is_pending():
     from a2a.types import Message, Part, Role
     from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync

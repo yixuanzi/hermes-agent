@@ -1070,26 +1070,41 @@ class _A2ADelegateSession:
         )
         last_task = None
         got_response = False
-        async for event in self._client.send_message(request):
-            got_response = True
-            self._emit_tool_messages(
-                _a2a_event_messages(event),
-                session_id=getattr(last_task, "context_id", None) or self.context_id,
-            )
-            last_task = _a2a_event_to_task(event) or last_task
-            if last_task is not None:
-                if not self.context_id:
-                    self.context_id = getattr(last_task, "context_id", None) or self.context_id
-                self.task_id = getattr(last_task, "id", None) or self.task_id
-                state = _a2a_field(getattr(last_task, "status", None), "state", None)
-                is_final = state in _a2a_final_task_states()
-                self._emit_task_text_delta(
-                    last_task,
+        try:
+            async for event in self._client.send_message(request):
+                got_response = True
+                self._touch_parent_activity("a2a_delegate: received remote stream event")
+                self._emit_tool_messages(
+                    _a2a_event_messages(event),
                     session_id=getattr(last_task, "context_id", None) or self.context_id,
-                    is_final=is_final,
                 )
-                if is_final:
-                    return last_task
+                last_task = _a2a_event_to_task(event) or last_task
+                if last_task is not None:
+                    if not self.context_id:
+                        self.context_id = getattr(last_task, "context_id", None) or self.context_id
+                    self.task_id = getattr(last_task, "id", None) or self.task_id
+                    state = _a2a_field(getattr(last_task, "status", None), "state", None)
+                    is_final = state in _a2a_final_task_states()
+                    self._emit_task_text_delta(
+                        last_task,
+                        session_id=getattr(last_task, "context_id", None) or self.context_id,
+                        is_final=is_final,
+                    )
+                    if is_final:
+                        return last_task
+        except Exception:
+            # Once this turn's remote task is known, a broken stream is not a
+            # failed task: hand the last snapshot to _wait_for_final, which
+            # polls get_task until the task finishes or the deadline expires.
+            # A user stop must keep surfacing the stream error instead.
+            if last_task is None or getattr(last_task, "id", None) is None or self.stop_requested():
+                raise
+            logger.warning(
+                "A2A stream for task %r ended unexpectedly; falling back to polling",
+                last_task.id,
+                exc_info=True,
+            )
+            return last_task
         if not got_response:
             raise RuntimeError("A2A SDK returned no response events.")
         if last_task is None:
@@ -1132,17 +1147,17 @@ class _A2ADelegateSession:
                 raise TimeoutError(f"Timed out waiting for task {getattr(current_task, 'id', None)!r}.")
             await asyncio.sleep(self.poll_interval)
             current_task = await self._client.get_task(GetTaskRequest(id=current_task.id))
-            self._touch_parent_activity_after_poll()
+            self._touch_parent_activity("a2a_delegate: received remote task update")
 
-    def _touch_parent_activity_after_poll(self) -> None:
-        """Record a successful remote task poll without affecting delegation."""
+    def _touch_parent_activity(self, desc: str) -> None:
+        """Record remote stream or poll progress without affecting delegation."""
         touch = getattr(self.parent_agent, "_touch_activity", None)
         if not callable(touch):
             return
         try:
-            touch("a2a_delegate: received remote task update")
+            touch(desc)
         except Exception:
-            logger.debug("Failed to record A2A remote task polling activity", exc_info=True)
+            logger.debug("Failed to record A2A remote task activity", exc_info=True)
 
     def _emit_task_text_delta(self, task, *, session_id: str | None, is_final: bool) -> None:
         if not is_final:

@@ -68,6 +68,9 @@ Intent: Pause the caller-side polling deadline while a supported approval or cla
 Feature: Configurable A2A polling timing.
 Intent: Use a 120-second client polling deadline by default and allow process-level overrides through `A2A_POLL_TIMEOUT` and `A2A_POLL_INTERVAL`, while preserving explicit session arguments and leaving HTTP and remote approval/clarify timeouts unchanged.
 
+Feature: Remote A2A progress heartbeat and stream-to-polling fallback.
+Intent: Refresh the parent Agent's activity timestamp on every streamed SSE event and every successful `get_task` poll, so the gateway inactivity timeout does not kill a turn whose remote delegate is still reporting. When the SSE stream raises after this turn's remote task ID is known, log it and hand the last task snapshot to `_wait_for_final` polling instead of failing the delegation. Errors before any task is known, and stream errors after a user stop, still propagate unchanged so stop handling and genuine send failures stay visible.
+
 Feature: Delegate agent name for platform presentation.
 Intent: Carry the resolved `agent_name` onto the delegate session so a platform output adapter that renders a delegation as its own surface can title it. Presentation only: this attribute must never participate in routing, session identity, or authorization.
 
