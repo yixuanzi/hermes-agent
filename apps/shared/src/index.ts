@@ -8,7 +8,6 @@ export {
 } from './billing-policy'
 export type {
   BillingAutoReload,
-  BillingBlock,
   BillingCardInfo,
   BillingChargeResponse,
   BillingChargeStatusResponse,
@@ -28,6 +27,9 @@ export type {
   UsageBarData,
   UsageModelData
 } from './billing-types'
+export { groupCatalogPlugins, PLUGIN_CATEGORIES, PLUGIN_CATEGORY_ORDER, sortCatalogPlugins } from './catalog-browse'
+export { type FeaturedCandidate, featuredPicks, isOfficialSkillSource, OFFICIAL_SKILL_SOURCES, pickFeatured } from './catalog-featured'
+export { pluginCatalogInstallUrl, skillCatalogInstallIdentifier, skillCatalogInstallUrl } from './catalog-install'
 export {
   driveChargeSettlement,
   SETTLEMENT_MAX_RETRY_AFTER_MS,
@@ -61,48 +63,7 @@ export {
 } from './data-url-read-max'
 export { compactNumber } from './format'
 export { type FuzzyMatch, fuzzyRank, fuzzyScore, fuzzyScoreMulti, type RankedItem } from './fuzzy'
-export {
-  type ApprovalRequestPayload,
-  BACKEND_EVENT_NAMES,
-  type BackendGatewayEventMap,
-  type BackendGatewayEventName,
-  type ClarifyQuestion,
-  type ClarifyRequestPayload,
-  type ClientLocalGatewayEventMap,
-  type ErrorPayload,
-  type ErrorSurface,
-  type GatewayEvent,
-  type GatewayEventMap,
-  type GatewayEventName,
-  type GatewayReadyPayload,
-  type GatewayTranscriptMessage,
-  type McpSetupRequestPayload,
-  type MessageCompletePayload,
-  type MessageInterimPayload,
-  type ModelCapabilities,
-  type ModelOptionProvider,
-  type ModelOptionsResponse,
-  type ModelPricing,
-  type NotificationShowPayload,
-  type RequestExpirePayload,
-  type SecretRequestPayload,
-  type SessionInflightTurn,
-  type SessionListItem,
-  type SessionListResponse,
-  type SessionReclaimedPayload,
-  type SessionResumeResponse,
-  type SessionUsagePayload,
-  type StatusUpdatePayload,
-  type StreamDeltaPayload,
-  type SubagentEventPayload,
-  type SubagentStatus,
-  type TodoStatePayload,
-  type ToolCompletePayload,
-  type ToolStartPayload,
-  type Usage,
-  type VaultUnlockRequestPayload,
-  type WakeDetectedPayload
-} from './gateway-events'
+export * from './gateway-events'
 export {
   applyDocumentLocale,
   type EndonymLocale,
@@ -116,6 +77,8 @@ export {
   DEFAULT_HEARTBEAT_DEADLINE_MS,
   DEFAULT_HEARTBEAT_INTERVAL_MS,
   type GatewayRequestId,
+  isUndeliveredCorrectionRefusal,
+  JSON_RPC_INTERNAL_ERROR,
   JSON_RPC_METHOD_NOT_FOUND,
   jsonRpcErrorFromFrame,
   type JsonRpcErrorPayload,
@@ -124,9 +87,13 @@ export {
   JsonRpcRequestChannel,
   type JsonRpcRequestChannelOptions,
   type JsonRpcTransport,
+  type ServerRequest,
+  type ServerRequestHandler,
+  type ServerRequestParams,
   wireFrameText
 } from './json-rpc-channel'
 export {
+  APPROVAL_RESPOND_TIMEOUT_MS,
   type ConnectionState,
   type GatewayClientOptions,
   GatewayEventHub,
@@ -136,6 +103,19 @@ export {
 } from './json-rpc-gateway'
 export { modelSearchText } from './model-search-text'
 export {
+  gaugeScope,
+  gaugeTitle,
+  hasTopTier,
+  PAYMENT_PAUSE_REASON,
+  planBlocks,
+  planLimit,
+  sectionAt,
+  splitRecommended,
+  type UsageLevel,
+  usageLevel,
+  usageTag
+} from './plan-usage'
+export {
   DEFAULT_REASONING_EFFORT,
   isReasoningEffort,
   REASONING_EFFORT_VALUES,
@@ -143,7 +123,12 @@ export {
   type ReasoningEffort,
   type ReasoningEffortValue
 } from './reasoning-effort'
-export { reconnectBackoffDelayMs, type ReconnectBackoffOptions } from './reconnect-backoff'
+export {
+  isStableOpen,
+  RECONNECT_STABLE_OPEN_MS,
+  reconnectBackoffDelayMs,
+  type ReconnectBackoffOptions
+} from './reconnect-backoff'
 export { skillInvocationText } from './skill-scaffold'
 export {
   type HermesSkin,
@@ -167,6 +152,7 @@ export {
   type SkillCommandDispatchResponse,
   SLASH_COMMAND_RE
 } from './slash'
+
 export {
   THEME_PRESET_PALETTES,
   type ThemePresetColors,
@@ -205,6 +191,9 @@ export {
   WINDOWS_GLASS_MIN_BUILD,
   type WindowsBackgroundMaterial
 } from './translucency'
+
+export { type UpdateDebt, updateDebt, type UpdateDebtReceipt, type UpdateDebtStep } from './update-debt'
+export { mergeUsage, usageFromTick, type UsageTickPayload } from './usage-tick'
 export {
   buildHermesWebSocketUrl,
   type GatewayAuthMode,
