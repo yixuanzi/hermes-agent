@@ -1492,11 +1492,11 @@ def test_chat_ws_help_slash_lists_supported_aegis_commands(
             _recv_until(ws, "message.accepted")
             completed = _recv_until(ws, "message.completed")
             assert completed["content"] == (
-                "Aegis slash commands:\n"
-                "/help - show available Aegis-native slash commands\n"
-                "/model <model_name> - switch the current live session model\n"
-                "/a2a - show the current A2A context XML\n"
-                "/stop - cancel any active remote A2A delegate task, then stop the current turn"
+                "Aegis slash commands:\n\n"
+                "- `/help` - show available Aegis-native slash commands\n"
+                "- `/model <model_name>` - switch the current live session model\n"
+                "- `/a2a` - show the current A2A context XML\n"
+                "- `/stop` - cancel any active remote A2A delegate task, then stop the current turn"
             )
 
 
@@ -2081,6 +2081,27 @@ def _send_text(ws, session_id: str, text: str, client_msg_id: str) -> None:
     _recv_until(ws, "message.accepted")
 
 
+def _send_stop_and_recv_reply(ws, session_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Send /stop and return its reply plus every event received before it."""
+    ws.send_json(
+        {
+            "type": "message.send",
+            "session_id": session_id,
+            "text": "/stop",
+            "client_msg_id": "msg-stop",
+        }
+    )
+    stop_turn_id = _recv_until(ws, "message.accepted")["turn_id"]
+    seen: list[dict[str, Any]] = []
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        payload = ws.receive_json()
+        if payload.get("type") == "message.completed" and payload.get("turn_id") == stop_turn_id:
+            return payload, seen
+        seen.append(payload)
+    raise AssertionError("Timed out waiting for the /stop reply")
+
+
 def test_chat_ws_stop_slash_without_active_work_returns_info_message(
     load_backend,
     monkeypatch,
@@ -2123,11 +2144,15 @@ def test_chat_ws_stop_slash_cancels_delegate_then_stops_main_turn(
             _send_text(ws, session_id, "start remote delegate", "msg-1")
             _recv_until(ws, "delegate.entered")
 
-            _send_text(ws, session_id, "/stop", "msg-stop")
-            first_state = _recv_until(ws, "run.state")
-            assert (first_state["state"], first_state["source"]) == ("interrupted", "delegate")
-            main_state = _recv_until(ws, "run.state")
-            assert (main_state["state"], main_state["source"]) == ("interrupted", "main")
+            reply, seen = _send_stop_and_recv_reply(ws, session_id)
+            interrupted = [
+                event["source"]
+                for event in seen
+                if event.get("type") == "run.state" and event.get("state") == "interrupted"
+            ]
+            assert interrupted == ["delegate", "main"]
+            assert reply["content"] == "Stopped the current turn."
+            assert reply["source"] == "main"
             assert agent.remote_handle.cancel_calls == 1
             assert agent.interrupt_messages == ["Stopped by /stop."]
 
@@ -2149,12 +2174,9 @@ def test_chat_ws_stop_slash_stops_main_turn_without_delegate(
             session_id = _recv_until(ws, "session.bound")["session_id"]
 
             _send_text(ws, session_id, "run main task", "msg-1")
-            _send_text(ws, session_id, "/stop", "msg-stop")
-            while True:
-                run_state = _recv_until(ws, "run.state")
-                if run_state["state"] == "interrupted":
-                    break
-            assert run_state["source"] == "main"
+            reply, _ = _send_stop_and_recv_reply(ws, session_id)
+            assert reply["content"] == "Stopped the current turn."
+            assert reply["source"] == "main"
             assert agent.interrupt_messages == ["Stopped by /stop."]
 
 

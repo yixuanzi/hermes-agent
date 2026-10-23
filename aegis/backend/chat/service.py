@@ -333,11 +333,13 @@ def build_aegis_ephemeral_system_prompt(
 
 def _aegis_help_text() -> str:
     return (
-        "Aegis slash commands:\n"
-        "/help - show available Aegis-native slash commands\n"
-        "/model <model_name> - switch the current live session model\n"
-        "/a2a - show the current A2A context XML\n"
-        "/stop - cancel any active remote A2A delegate task, then stop the current turn"
+        # Markdown list: the web chat renders replies as Markdown, where
+        # single newlines collapse into one paragraph.
+        "Aegis slash commands:\n\n"
+        "- `/help` - show available Aegis-native slash commands\n"
+        "- `/model <model_name>` - switch the current live session model\n"
+        "- `/a2a` - show the current A2A context XML\n"
+        "- `/stop` - cancel any active remote A2A delegate task, then stop the current turn"
     )
 
 
@@ -724,7 +726,11 @@ class ChatSessionActor:
             turn_id=turn_id, source="delegate"
         )
         stopped_turn = self._interrupt_main_turn("Stopped by /stop.")
-        if not stopped_delegate and not stopped_turn:
+        # The delegate side reports its own outcome ("Canceled by user." or a
+        # cancel error), so only the main turn needs a confirmation here.
+        if stopped_turn:
+            self._emit_main_text_reply("Stopped the current turn.", turn_id)
+        elif not stopped_delegate:
             self._emit_main_text_reply("No active task to stop.", turn_id)
 
     def _interrupt_main_turn(self, message: str) -> bool:
