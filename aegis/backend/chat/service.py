@@ -337,7 +337,6 @@ def _aegis_help_text() -> str:
         "/help - show available Aegis-native slash commands\n"
         "/model <model_name> - switch the current live session model\n"
         "/a2a - show the current A2A context XML\n"
-        "/a2a_stop - cancel the active remote A2A delegate task (loop or single-shot)\n"
         "/stop - cancel any active remote A2A delegate task, then stop the current turn"
     )
 
@@ -623,7 +622,7 @@ class ChatSessionActor:
             return None
         first_word, _, remainder = stripped.partition(" ")
         command = first_word.lower()
-        if command not in {"/a2a", "/a2a_stop", "/help", "/model", "/stop"}:
+        if command not in {"/a2a", "/help", "/model", "/stop"}:
             return None
         return command, remainder.strip()
 
@@ -716,11 +715,6 @@ class ChatSessionActor:
             turn_id=turn_id,
         )
         return True
-
-    def _handle_a2a_stop_slash(self, turn_id: str) -> None:
-        if self._cancel_active_remote_a2a_delegate(turn_id=turn_id, source="delegate"):
-            return
-        self._emit_main_text_reply("No active remote A2A delegate task.", turn_id)
 
     def _handle_stop_slash(self, turn_id: str) -> None:
         # The delegation goes first: the main turn is blocked inside the
@@ -881,9 +875,6 @@ class ChatSessionActor:
                 self._turn_id = turn_id
                 if command == "/stop":
                     self._handle_stop_slash(turn_id)
-                    return
-                if command == "/a2a_stop":
-                    self._handle_a2a_stop_slash(turn_id)
                     return
                 if command == "/a2a":
                     self._handle_a2a_slash(turn_id)
