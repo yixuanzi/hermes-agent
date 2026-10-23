@@ -2414,6 +2414,32 @@ class MessageEvent:
         return args
 
 
+# The a2a_delegate foreground loop's own controls; they stay with the loop.
+_DELEGATE_LOOP_CONTROLS = frozenset({"main", "exit"})
+
+
+def is_gateway_command_during_delegate_loop(text: Optional[str]) -> bool:
+    """Return True when *text* must reach the gateway, not a delegate loop.
+
+    Adapters that hand a chat to an ``a2a_delegate`` foreground loop route
+    its text before normal dispatch.  A resolvable gateway command such as
+    ``/stop`` or ``/new`` must still reach the gateway, which handles it
+    outside the busy queue; only the loop's ``/main`` and ``/exit`` stay
+    with the loop.  Parsing matches ``MessageEvent.get_command``.
+    """
+    stripped = str(text or "").lstrip()
+    if not stripped.startswith("/"):
+        return False
+    command = stripped.split(maxsplit=1)[0][1:].lower()
+    if "@" in command:
+        command = command.split("@", 1)[0]
+    if not command or "/" in command or command in _DELEGATE_LOOP_CONTROLS:
+        return False
+    from hermes_cli.commands import should_bypass_active_session
+
+    return should_bypass_active_session(command)
+
+
 @dataclass
 class TextDebounceState:
     event: MessageEvent

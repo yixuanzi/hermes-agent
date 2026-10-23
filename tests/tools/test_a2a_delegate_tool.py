@@ -597,6 +597,33 @@ def test_stopping_an_idle_foreground_loop_ends_it_as_interrupted(monkeypatch):
     assert not handle.has_live_task()
 
 
+def test_cancel_active_a2a_delegate_stops_an_idle_loop_and_never_raises():
+    from tools.a2a_delegate_tool import (
+        _A2ADelegateSession,
+        _RemoteA2ADelegateCancelHandle,
+        cancel_active_a2a_delegate,
+    )
+
+    # A dynamic proxy is not a delegation handle.
+    assert cancel_active_a2a_delegate(MagicMock()) == "noop"
+
+    session = _A2ADelegateSession("http://agent.local/a2a")
+    idle_input = _BlockingInput()
+    session.attach_foreground_input(idle_input)
+    parent = SimpleNamespace(_active_a2a_delegate_session=_RemoteA2ADelegateCancelHandle(session))
+
+    assert cancel_active_a2a_delegate(parent) == "completed"
+    assert idle_input.read_line(timeout=0) is None
+    assert session.stop_requested() is True
+
+    class _BrokenHandle(_RemoteA2ADelegateCancelHandle):
+        def cancel(self):
+            raise RuntimeError("remote unreachable")
+
+    parent._active_a2a_delegate_session = _BrokenHandle(session)
+    assert cancel_active_a2a_delegate(parent) == "noop"
+
+
 def test_stopping_a_running_remote_turn_still_cancels_the_remote_task():
     from tools.a2a_delegate_tool import _A2ADelegateSession, _RemoteA2ADelegateCancelHandle
 

@@ -130,6 +130,7 @@ from gateway.platforms.base import (
     cache_image_from_url,
     cache_audio_from_bytes,
     cache_image_from_bytes,
+    is_gateway_command_during_delegate_loop,
     should_send_media_as_audio,
 )
 from gateway.status import acquire_scoped_lock, release_scoped_lock
@@ -5663,14 +5664,16 @@ class FeishuAdapter(BasePlatformAdapter):
         # Foreground A2A loops own their route before normal dispatch, text
         # batching, or per-chat serialization can turn a follow-up into a new
         # main-agent turn.  `text` has already had a leading bot mention
-        # removed, so exact loop-exit commands remain recognisable.
+        # removed, so exact loop-exit commands remain recognisable.  Gateway
+        # commands such as /stop skip the loop and reach normal dispatch.
         delegate_command_text = str(text or "").strip()
         delegate_routed_text = (
             delegate_command_text
             if delegate_command_text in {"/main", "/exit"}
             else text
         )
-        if await self._maybe_route_delegate_interaction_message(
+        route_to_delegate = not is_gateway_command_during_delegate_loop(delegate_command_text)
+        if route_to_delegate and await self._maybe_route_delegate_interaction_message(
             text=delegate_routed_text,
             chat_id=chat_id,
             thread_id=thread_id,
@@ -5682,7 +5685,7 @@ class FeishuAdapter(BasePlatformAdapter):
             ),
         ):
             return
-        if await self._maybe_route_delegate_foreground_message(
+        if route_to_delegate and await self._maybe_route_delegate_foreground_message(
             text=delegate_routed_text,
             chat_id=chat_id,
             thread_id=thread_id,

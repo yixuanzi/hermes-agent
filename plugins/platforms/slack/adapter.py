@@ -58,6 +58,7 @@ from gateway.platforms.base import (
     _ssrf_redirect_guard,
     cache_document_from_bytes,
     cache_video_from_bytes,
+    is_gateway_command_during_delegate_loop,
 )
 
 try:  # sibling module; support both package and flat plugin-dir import
@@ -6954,7 +6955,10 @@ class SlackAdapter(BasePlatformAdapter):
             # text here or the foreground session loses it entirely.
             delegate_routed_text = f"{channel_context}{delegate_routed_text}"
 
-        if await self._maybe_route_delegate_interaction_message(
+        # Gateway commands such as /stop skip the delegate loop and reach
+        # normal dispatch; the loop keeps only its own /main and /exit.
+        route_to_delegate = not is_gateway_command_during_delegate_loop(delegate_command_text)
+        if route_to_delegate and await self._maybe_route_delegate_interaction_message(
             text=text,
             channel_id=channel_id,
             thread_ts=thread_ts,
@@ -6963,7 +6967,7 @@ class SlackAdapter(BasePlatformAdapter):
         ):
             return
 
-        if await self._maybe_route_delegate_foreground_message(
+        if route_to_delegate and await self._maybe_route_delegate_foreground_message(
             text=delegate_routed_text,
             channel_id=channel_id,
             thread_ts=thread_ts,

@@ -24206,6 +24206,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _process_baseline = None
         if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
             request_hard_interrupt(running_agent, interrupt_reason)
+            # An a2a_delegate call blocks the turn on a remote task or on its
+            # foreground loop's input, and neither watches the interrupt
+            # flag; stop the delegation so the turn can reach its check.
+            # Off-loop like the reaper below: a remote cancel may block.
+            from tools.a2a_delegate_tool import cancel_active_a2a_delegate
+
+            threading.Thread(
+                target=cancel_active_a2a_delegate,
+                args=(running_agent,),
+                name="gateway-a2a-delegate-cancel",
+                daemon=True,
+            ).start()
             _process_task_id = getattr(
                 running_agent, "_gateway_turn_process_task_id", ""
             )

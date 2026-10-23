@@ -294,6 +294,57 @@ async def test_slack_delegate_foreground_routes_mentioned_exit_commands_without_
 
 
 @pytest.mark.asyncio
+async def test_slack_delegate_foreground_lets_gateway_commands_through(monkeypatch):
+    adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-test"))
+    adapter._bot_user_id = "B123"
+    adapter._team_bot_user_ids["T123"] = "B123"
+    runtime = adapter.build_delegate_foreground_runtime(
+        channel_id="C123",
+        thread_ts="1717171717.720000",
+        user_id="U123",
+        chat_type="group",
+    )
+    input_adapter = runtime["input_factory"]()
+    assert input_adapter.enter_foreground() is True
+    dispatched = []
+
+    async def capture_handle_message(event):
+        dispatched.append(event)
+
+    monkeypatch.setattr(adapter, "handle_message", capture_handle_message)
+
+    async def fake_resolve_user_name(*args, **kwargs):
+        del args, kwargs
+        return "Ada"
+
+    monkeypatch.setattr(adapter, "_resolve_user_name", fake_resolve_user_name)
+    monkeypatch.setattr(adapter, "_has_active_session_for_thread", lambda **kwargs: False)
+
+    async def fake_fetch_thread_context(**kwargs):
+        del kwargs
+        return ""
+
+    monkeypatch.setattr(adapter, "_fetch_thread_context", fake_fetch_thread_context)
+
+    await adapter._handle_slack_message(
+        {
+            "type": "message",
+            "channel": "C123",
+            "channel_type": "channel",
+            "team": "T123",
+            "user": "U123",
+            "text": "<@B123> /stop",
+            "thread_ts": "1717171717.720000",
+            "ts": "1717171717.720001",
+        }
+    )
+
+    assert input_adapter.read_line(timeout=0.01) is None
+    assert [event.get_command() for event in dispatched] == ["stop"]
+    input_adapter.exit_foreground()
+
+
+@pytest.mark.asyncio
 async def test_slack_delegate_foreground_keeps_thread_context_for_regular_input(monkeypatch):
     adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-test"))
     adapter._bot_user_id = "B123"

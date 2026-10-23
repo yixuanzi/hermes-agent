@@ -2818,6 +2818,44 @@ class TestFeishuProcessInboundMessage(unittest.TestCase):
         self.assertTrue(event.text.startswith("/model"))
 
 
+    def _process_text(self, adapter, text, message_id):
+        message = SimpleNamespace(
+            content=json.dumps({"text": text}),
+            message_type="text",
+            message_id=message_id,
+            mentions=[],
+            chat_id="oc_chat",
+            parent_id=None,
+            upper_message_id=None,
+            thread_id=None,
+        )
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=message,
+                message=message,
+                sender_id=None,
+                chat_type="group",
+                message_id=message_id,
+            )
+        )
+
+    def test_gateway_commands_skip_the_delegate_loop(self):
+        for text in ("/stop", "/new"):
+            adapter = self._build_adapter()
+            self._process_text(adapter, text, "m-stop")
+            adapter._maybe_route_delegate_interaction_message.assert_not_awaited()
+            adapter._maybe_route_delegate_foreground_message.assert_not_awaited()
+            event = adapter._dispatch_inbound_event.call_args.args[0]
+            self.assertEqual(event.get_command(), text[1:])
+
+    def test_loop_controls_and_plain_text_still_reach_the_delegate_loop(self):
+        for text in ("/main", "/exit", "follow up"):
+            adapter = self._build_adapter()
+            self._process_text(adapter, text, "m-loop")
+            routed = adapter._maybe_route_delegate_foreground_message.call_args.kwargs["text"]
+            self.assertEqual(routed.strip(), text)
+
+
 class TestFeishuAutoThreading(unittest.TestCase):
     def _build_adapter(self, *, resolved_chat_type: str):
         from gateway.config import Platform, PlatformConfig

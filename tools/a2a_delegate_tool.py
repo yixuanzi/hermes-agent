@@ -1439,6 +1439,24 @@ class _RemoteA2ADelegateCancelHandle:
             return _A2A_CANCEL_STATUS_COMPLETED
 
 
+def cancel_active_a2a_delegate(parent_agent) -> str:
+    """Stop the A2A delegation *parent_agent* is running, if any.
+
+    Covers a running remote turn and a foreground loop waiting for input.
+    Returns the cancel status (``noop`` when nothing is running) and never
+    raises, so stop paths can call it unconditionally.  May block on a
+    network cancel; async callers should run it in a worker thread.
+    """
+    handle = getattr(parent_agent, _ACTIVE_A2A_SESSION_ATTR, None)
+    if not isinstance(handle, _RemoteA2ADelegateCancelHandle):
+        return _A2A_CANCEL_STATUS_NOOP
+    try:
+        return handle.cancel()
+    except Exception:
+        logger.warning("Failed to cancel the active A2A delegation", exc_info=True)
+        return _A2A_CANCEL_STATUS_NOOP
+
+
 def _parent_active_a2a_session_lock(parent_agent) -> threading.Lock:
     lock = getattr(parent_agent, _ACTIVE_A2A_SESSION_LOCK_ATTR, None)
     if lock is None:
