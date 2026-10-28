@@ -9,7 +9,6 @@ import importlib
 import inspect
 import logging
 import threading
-import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -370,50 +369,38 @@ class RelayRuntime:
             return
         task = loop.create_task(flush_async())  # type: ignore[arg-type]
         self._pending_flushes.add(task)
-        task.add_done_callback(self._on_flush_done)
+        task.add_done_callback(lambda done: self._on_flush_done(session_id, done))
 
-    def _on_flush_done(self, task: asyncio.Task[None]) -> None:
+    def _on_flush_done(self, session_id: str, task: asyncio.Task[None]) -> None:
         self._pending_flushes.discard(task)
         if task.cancelled():
             return
         exc = task.exception()
         if exc is not None:
             logger.warning(
-                "Hermes Relay deferred subscriber flush failed: %s", exc
+                "Hermes Relay session %s deferred subscriber flush failed: %s",
+                session_id,
+                exc,
             )
 
-    def _drain_pending_flushes(self, *, timeout: float = 5.0) -> None:
-        """Wait briefly for loop-scheduled flush tasks before process exit."""
-        pending = [task for task in self._pending_flushes if not task.done()]
-        if not pending:
-            return
+    def _flush_subscribers_at_shutdown(self) -> None:
+        """Run one blocking barrier for every queued subscriber callback.
+
+        A deferred ``flush_async()`` task is cancelled when its loop is torn
+        down, and a cancelled barrier is dropped by nemo-relay's flush bridge.
+        A loop-free shutdown therefore flushes once here instead of tracking
+        those tasks. On an event-loop thread the barrier cannot block, so the
+        ``flush_async()`` tasks ``close_session`` scheduled are all there is.
+        """
         try:
             asyncio.get_running_loop()
         except RuntimeError:
             pass
         else:
-            logger.debug(
-                "Hermes Relay shutdown on event loop thread; leaving %d "
-                "deferred flush task(s) to the loop",
-                len(pending),
-            )
             return
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline and any(
-            not task.done() for task in pending
-        ):
-            time.sleep(0.05)
-        still_pending = [task for task in pending if not task.done()]
-        if still_pending:
-            logger.warning(
-                "Hermes Relay %d deferred subscriber flush task(s) did not "
-                "complete within %ss at shutdown",
-                len(still_pending),
-                timeout,
-            )
-            for task in still_pending:
-                task.cancel()
-        self._pending_flushes.clear()
+        flush = getattr(getattr(self.relay, "subscribers", None), "flush", None)
+        if callable(flush):
+            flush()
 
     def shutdown(self) -> None:
         """Close all core-owned Relay session scopes."""
@@ -421,7 +408,7 @@ class RelayRuntime:
             session_ids = list(self._sessions)
         for session_id in session_ids:
             self._safe(self.close_session, {"session_id": session_id})
-        self._drain_pending_flushes(timeout=5.0)
+        self._safe(self._flush_subscribers_at_shutdown)
         if self._shutdown_registered:
             try:
                 atexit.unregister(self.shutdown)

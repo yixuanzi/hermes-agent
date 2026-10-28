@@ -840,21 +840,18 @@ def _flush_relay_subscribers(nemo_relay: Any) -> None:
             "unavailable on event loop thread"
         )
         return
-    pending_flushes: set[asyncio.Task[None]] = set()
-
-    def _on_done(task: asyncio.Task[None]) -> None:
-        pending_flushes.discard(task)
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            logger.warning(
-                "NeMo Relay plugin deferred subscriber flush failed: %s", exc
-            )
-
+    # No extra reference needed: the loop's ready queue and nemo-relay's flush
+    # bridge hold the task until its barrier completes.
     task = loop.create_task(flush_async())  # type: ignore[arg-type]
-    pending_flushes.add(task)
-    task.add_done_callback(_on_done)
+    task.add_done_callback(_log_deferred_flush_failure)
+
+
+def _log_deferred_flush_failure(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("NeMo Relay plugin deferred subscriber flush failed: %s", exc)
 
 
 def _load_plugins_config(path: str) -> dict[str, Any] | None:
