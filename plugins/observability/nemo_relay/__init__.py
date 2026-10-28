@@ -819,10 +819,42 @@ def _config_relative_path(value: str, plugins_toml_path: str) -> str:
 
 
 def _flush_relay_subscribers(nemo_relay: Any) -> None:
+    """Flush Relay subscribers without blocking a running event loop.
+
+    Mirrors ``RelayRuntime._flush_subscribers`` in ``agent/relay_runtime.py``:
+    synchronous barrier on loop-free threads, ``flush_async()`` task on
+    event-loop threads, with failures surfaced by a done-callback warning.
+    """
     subscribers = getattr(nemo_relay, "subscribers", None)
-    flush = getattr(subscribers, "flush", None)
-    if callable(flush):
-        flush()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        flush = getattr(subscribers, "flush", None)
+        if callable(flush):
+            flush()
+        return
+    flush_async = getattr(subscribers, "flush_async", None)
+    if not callable(flush_async):
+        logger.debug(
+            "NeMo Relay plugin skipped subscriber flush: flush_async "
+            "unavailable on event loop thread"
+        )
+        return
+    pending_flushes: set[asyncio.Task[None]] = set()
+
+    def _on_done(task: asyncio.Task[None]) -> None:
+        pending_flushes.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(
+                "NeMo Relay plugin deferred subscriber flush failed: %s", exc
+            )
+
+    task = loop.create_task(flush_async())  # type: ignore[arg-type]
+    pending_flushes.add(task)
+    task.add_done_callback(_on_done)
 
 
 def _load_plugins_config(path: str) -> dict[str, Any] | None:

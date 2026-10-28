@@ -9,6 +9,7 @@ import importlib
 import inspect
 import logging
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -51,6 +52,7 @@ class RelayRuntime:
         self._subagent_parent_handles: dict[str, Any] = {}
         self._execution_consumers_lock = threading.RLock()
         self._execution_consumers: set[str] = set()
+        self._pending_flushes: set[asyncio.Task[None]] = set()
         self._shutdown_registered = True
         atexit.register(self.shutdown)
 
@@ -327,7 +329,7 @@ class RelayRuntime:
                 except Exception as exc:
                     failures.append(f"session scope close failed: {exc}")
         try:
-            self.relay.subscribers.flush()
+            self._flush_subscribers(session_id)
         except Exception as exc:
             failures.append(f"subscriber flush failed: {exc}")
         with self._sessions_lock:
@@ -342,12 +344,84 @@ class RelayRuntime:
                 "; ".join(failures),
             )
 
+    def _flush_subscribers(self, session_id: str) -> None:
+        """Flush Relay subscribers without blocking a running event loop.
+
+        On a thread without a running loop, keep the historical synchronous
+        barrier. On an event-loop thread, schedule ``flush_async()`` as a task
+        so the native dispatcher never blocks the loop; failures surface via a
+        done-callback warning instead of a raised exception.
+        """
+        subscribers = getattr(self.relay, "subscribers", None)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            flush = getattr(subscribers, "flush", None)
+            if callable(flush):
+                flush()
+            return
+        flush_async = getattr(subscribers, "flush_async", None)
+        if not callable(flush_async):
+            logger.debug(
+                "Hermes Relay session %s skipped subscriber flush: "
+                "flush_async unavailable on event loop thread",
+                session_id,
+            )
+            return
+        task = loop.create_task(flush_async())  # type: ignore[arg-type]
+        self._pending_flushes.add(task)
+        task.add_done_callback(self._on_flush_done)
+
+    def _on_flush_done(self, task: asyncio.Task[None]) -> None:
+        self._pending_flushes.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(
+                "Hermes Relay deferred subscriber flush failed: %s", exc
+            )
+
+    def _drain_pending_flushes(self, *, timeout: float = 5.0) -> None:
+        """Wait briefly for loop-scheduled flush tasks before process exit."""
+        pending = [task for task in self._pending_flushes if not task.done()]
+        if not pending:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            logger.debug(
+                "Hermes Relay shutdown on event loop thread; leaving %d "
+                "deferred flush task(s) to the loop",
+                len(pending),
+            )
+            return
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and any(
+            not task.done() for task in pending
+        ):
+            time.sleep(0.05)
+        still_pending = [task for task in pending if not task.done()]
+        if still_pending:
+            logger.warning(
+                "Hermes Relay %d deferred subscriber flush task(s) did not "
+                "complete within %ss at shutdown",
+                len(still_pending),
+                timeout,
+            )
+            for task in still_pending:
+                task.cancel()
+        self._pending_flushes.clear()
+
     def shutdown(self) -> None:
         """Close all core-owned Relay session scopes."""
         with self._sessions_lock:
             session_ids = list(self._sessions)
         for session_id in session_ids:
             self._safe(self.close_session, {"session_id": session_id})
+        self._drain_pending_flushes(timeout=5.0)
         if self._shutdown_registered:
             try:
                 atexit.unregister(self.shutdown)
