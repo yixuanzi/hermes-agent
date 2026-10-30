@@ -40,6 +40,9 @@
   - 权限可见：/codex on 时即启动本会话的 codex 线程（第一轮直接复用），把 codex 在
     thread/start 上报告的实际权限档、沙箱、网络与审批策略回显给用户；/codex status
     同样展示。启动放在线程里执行，gateway 事件循环不被阻塞。
+  - 多后端：会话表、轮次切换与线程归属是通用的；CodexMode.backend 决定挂到
+    agent._codex_session 上的是什么（None = codex app-server；/claude 见 claude_cmd）。
+    一个会话同一时刻只有一种模式，开启一个即替换另一个。
 """
 
 from __future__ import annotations
@@ -84,6 +87,38 @@ _NO_SANDBOX_WARNING = (
 
 def thread_params_for(sandbox_mode: str) -> dict:
     return SANDBOX_MODES[sandbox_mode]
+
+
+class _CodexBackend:
+    """会话表的默认后端：codex app-server。其他后端（claude_cmd.ClaudeBackend）提供同名成员。"""
+
+    name = "codex"
+    title = "Codex"
+
+    @staticmethod
+    def reusable(session: Any, cwd: str, mode: "CodexMode") -> bool:
+        from agent.transports.codex_app_server_session import CodexAppServerSession
+
+        return (
+            isinstance(session, CodexAppServerSession)
+            and session.cwd == cwd
+            and session.thread_start_params == thread_params_for(mode.sandbox)
+        )
+
+    @staticmethod
+    def attach(agent: Any, mode: "CodexMode", *, session: Any = None, cwd: str = "", previous: Any = None):
+        from agent.codex_runtime import attach_codex_app_server_session
+
+        if session is not None:
+            return attach_codex_app_server_session(agent, session)
+        return attach_codex_app_server_session(
+            agent, cwd=cwd, thread_start_params=thread_params_for(mode.sandbox)
+        )
+
+
+CODEX_BACKEND = _CodexBackend()
+# 由本插件的 pre_gateway_dispatch 捕获调用者的会话命令
+SESSION_COMMANDS = frozenset({"codex", "claude"})
 # 首次切到 codex 前的宿主运行时快照，挂在 agent 实例上；off 时据此恢复。
 _HOST_ATTR = "_ext_codex_host"
 _MISSING = object()
@@ -100,6 +135,12 @@ class CodexMode:
     # 本会话的 codex 线程与其当前宿主 agent（弱引用），跨 agent 重建复用
     codex_session: Any = None
     owner_agent: Any = None
+    # None = codex app-server；/claude 为 claude_cmd.ClaudeBackend
+    backend: Any = None
+
+
+def backend_of(mode: CodexMode) -> Any:
+    return mode.backend if mode.backend is not None else CODEX_BACKEND
 
 
 @dataclass
@@ -283,17 +324,17 @@ def _rbac_role(platform: str, user_id: str) -> Optional[str]:
     return None
 
 
-def _gateway_enable_denied(scope: _Scope) -> Optional[str]:
+def _gateway_enable_denied(scope: _Scope, backend: Any = CODEX_BACKEND) -> Optional[str]:
     if scope.surface != "gateway" or scope.owner is None:
         return None
     try:
         role = _rbac_role(*scope.owner)
     except Exception as exc:
-        logger.warning("/codex: rbac role lookup failed: %s", exc)
-        return "❌ 无法确认你的角色，拒绝开启 Codex 模式。"
+        logger.warning("/%s: rbac role lookup failed: %s", backend.name, exc)
+        return f"❌ 无法确认你的角色，拒绝开启 {backend.title} 模式。"
     if role is not None and role != "admin":
         return (
-            "❌ 仅 admin 可开启 Codex 模式：codex 在自己的进程里执行命令，"
+            f"❌ 仅 admin 可开启 {backend.title} 模式：{backend.name} 在自己的进程里执行命令，"
             "不受 Hermes RBAC 工具权限约束。"
         )
     return None
@@ -405,23 +446,16 @@ def enter_codex(agent: Any, mode: CodexMode) -> bool:
 
 
 def _bind_codex_session(agent: Any, mode: CodexMode) -> None:
-    """保证本轮 agent 挂着会话的 codex 线程：沿用、从旧 agent 接管，或新建。"""
-    from agent.codex_runtime import attach_codex_app_server_session
-
+    """保证本轮 agent 挂着会话后端的线程：沿用、从旧 agent 接管，或新建。"""
+    backend = backend_of(mode)
     cwd = _effective_cwd(agent)
-    params = thread_params_for(mode.sandbox)
 
     def _reusable(session: Any) -> bool:
-        return (
-            session is not None
-            and not session.closed
-            and session.cwd == cwd
-            and session.thread_start_params == params
-        )
+        return session is not None and not session.closed and backend.reusable(session, cwd, mode)
 
     current = getattr(agent, "_codex_session", None)
     if current is not None and not _reusable(current):
-        _close_codex_session(agent)  # 已退役，或 cwd / 沙箱档位变了：重开 codex 线程
+        _close_codex_session(agent)  # 已退役，或 cwd / 沙箱档位 / 后端变了：重开线程
         current = None
 
     if current is None:
@@ -435,11 +469,11 @@ def _bind_codex_session(agent: Any, mode: CodexMode) -> None:
             ):
                 # 旧 agent 放手，免得它被关闭/驱逐时顺带关掉这个线程
                 previous._codex_session = None
-            attach_codex_app_server_session(agent, candidate)
-            logger.info("/codex: session %s reusing codex thread on rebuilt agent", mode.session_id)
+            backend.attach(agent, mode, session=candidate)
+            logger.info("/%s: session %s reusing thread on rebuilt agent", backend.name, mode.session_id)
         else:
             _release_codex_session(mode)
-            attach_codex_app_server_session(agent, cwd=cwd, thread_start_params=params)
+            backend.attach(agent, mode, cwd=cwd, previous=candidate)
 
     mode.codex_session = agent._codex_session
     mode.owner_agent = weakref.ref(agent)
@@ -490,19 +524,19 @@ def on_pre_llm_call(session_id="", platform="", sender_id="", parent_session_id=
         # 共享会话里非开启者的消息：本轮走 Hermes，保留 codex 线程给开启者
         leave_codex(agent, close_session=False)
     elif enter_codex(agent, mode):
-        logger.info("/codex: session %s turn routed to codex app-server", sid)
+        logger.info("/%s: session %s turn routed to %s", backend_of(mode).name, sid, backend_of(mode).title)
     return None
 
 
 def on_pre_gateway_dispatch(event=None, gateway=None, **_):
-    """只为 /codex 消息捕获 (runner, source)，供随后的插件命令识别会话。不影响分发。"""
+    """只为 /codex、/claude 消息捕获 (runner, source)，供随后的插件命令识别会话。不影响分发。"""
     if event is None or gateway is None:
         return None
     try:
         command = (event.get_command() or "").replace("_", "-")
     except Exception:
         return None
-    if command == "codex":
+    if command in SESSION_COMMANDS:
         _gateway_dispatch.set((weakref.ref(gateway), event.source))
     return None
 
@@ -547,6 +581,7 @@ def _help_text() -> str:
         "memory / delegate_task 等 Hermes 工具在该模式下不可用\n"
         "  • 沙箱与网络由 sandbox 档位决定（不再取决于目录 trust），`on` 与 `status` 会显示 codex 报告的实际沙箱、网络与审批\n"
         "  • 换会话（/new、自动重置）后自动失效\n"
+        "  • 与 /claude 互斥：开启 Codex 模式会关闭本会话的 Claude Code 模式，反之亦然\n"
         "  • 消息平台：启用 rbac-guard 时仅 admin 可开启；群聊中只有开启者本人的消息走 Codex"
     )
 
@@ -675,8 +710,19 @@ def _session_lines(mode: CodexMode, scope: _Scope) -> list[str]:
     return lines + _policy_lines(policy, scope)
 
 
+def other_backend_note(mode: Optional[CodexMode], own: Any) -> Optional[str]:
+    """会话当前处于另一个后端的模式时，给出提示（/codex 与 /claude 互相引用）。"""
+    if mode is None or backend_of(mode) is own or backend_of(mode).name == own.name:
+        return None
+    other = backend_of(mode)
+    return f"当前会话已开启 {other.title} 模式（/{other.name} status 查看，/{other.name} off 关闭）。"
+
+
 def _describe(scope: _Scope, mode: Optional[CodexMode]) -> str:
     session_label = scope.session_id or "（首条消息后创建）"
+    note = other_backend_note(mode, CODEX_BACKEND)
+    if note:
+        return f"💤 当前会话 `{session_label}` 未开启 Codex 模式。{note}"
     if mode is None:
         return f"💤 当前会话 `{session_label}` 使用 Hermes 默认 loop。发送 /codex on 切到 Codex。"
     lines = [
@@ -699,6 +745,7 @@ class _EnablePlan:
     started_here: bool
     version: str
     replaced: Any = None
+    switched_from: Optional[str] = None  # 被替换的其他后端模式（如 Claude Code）
 
     def start(self) -> Optional[str]:
         if self.session.effective_policy is not None:
@@ -736,7 +783,9 @@ class _EnablePlan:
         ]
         if self.scope.owner is not None:
             lines.append("  • 共享会话（群聊）中只有你的消息走 Codex，其他成员仍由 Hermes 处理。")
-        if self.replaced is not None:
+        if self.switched_from:
+            lines.append(f"  • 已关闭本会话的 {self.switched_from} 模式")
+        elif self.replaced is not None:
             lines.append(
                 "  • 已切换 cwd 或沙箱档位：已重开 codex 线程，之前的 codex 上下文不再保留"
                 + ("" if self.replaced.closed else "（旧线程在当前轮结束后关闭）")
@@ -766,7 +815,8 @@ def _plan_enable(scope: _Scope, options: dict[str, str]):
         return f"❌ 不支持的 sandbox：`{sandbox_mode}`，可选 read / network / full（默认 network）"
     existing = _lookup_mode(scope)
     if existing is not None and existing.owner not in (None, scope.owner):
-        return "❌ 当前会话的 Codex 模式由其他成员开启，请先由其 /codex off。"
+        other = backend_of(existing)
+        return f"❌ 当前会话的 {other.title} 模式由其他成员开启，请先由其 /{other.name} off。"
     mode = CodexMode(
         session_id=scope.session_id,
         cwd=cwd or (existing.cwd if existing else None),
@@ -783,18 +833,17 @@ def _plan_enable(scope: _Scope, options: dict[str, str]):
     thread_cwd = mode.cwd or str(resolve_agent_cwd())
     params = thread_params_for(sandbox_mode)
     current = mode.codex_session
-    if (
-        current is not None
-        and not current.closed
-        and current.cwd == thread_cwd
-        and current.thread_start_params == params
-    ):
+    if current is not None and not current.closed and CODEX_BACKEND.reusable(current, thread_cwd, mode):
         return _EnablePlan(scope, mode, current, started_here=False, version=version)
     # 回调在第一轮由 _bind_codex_session 绑定到 agent 线程上
     session = CodexAppServerSession(cwd=thread_cwd, thread_start_params=params)
     replaced = current if current is not None and not current.closed else None
+    switched_from = None
+    if existing is not None and backend_of(existing) is not CODEX_BACKEND:
+        switched_from = backend_of(existing).title
     return _EnablePlan(
         scope, mode, session, started_here=True, version=version, replaced=replaced,
+        switched_from=switched_from,
     )
 
 
@@ -820,6 +869,9 @@ def codex_command(raw_args: str = ""):
         return _describe(scope, _lookup_mode(scope))
 
     if sub == "off":
+        note = other_backend_note(_lookup_mode(scope), CODEX_BACKEND)
+        if note:
+            return f"当前会话未开启 Codex 模式。{note}"
         mode = _drop_mode(scope)
         if mode is None:
             return "当前会话未开启 Codex 模式。"
