@@ -5,6 +5,10 @@
                       （@agentclientprotocol/claude-agent-acp 驱动已安装、已登录的 claude CLI）
 /claude off           恢复 Hermes 默认 loop
 /claude status        查看当前会话状态
+/claude compact       让 Claude Code 压缩自己的会话上下文（/compress 由 Hermes 核心处理，效果相同）
+/claude model         列出可用模型与思考深度（effort），标出当前值
+/claude model set [model=ID] [effort=LEVEL]
+                      设置当前会话的模型 / 思考深度（也可 /claude model set ID）
 /claude [help]        命令帮助（不带参数时默认显示）
 
 设计要点：
@@ -12,7 +16,7 @@
     切换、同样的会话识别 / rbac admin / 群聊仅开启者 / 线程归会话所有并跨 AIAgent 重建
     复用。区别只在后端：CodexMode.backend = ClaudeBackend，挂到 agent._codex_session 上的是
     claude_acp.ClaudeAcpSession（与 CodexAppServerSession 同形），core 的 codex_app_server
-    整轮接管路径（投影入库、token 统计、中断、steer、/compress）原样复用，core 不改。
+    整轮接管路径（投影入库、token 统计、中断、steer）原样复用；/compress 由 core 处理并转到 Claude Code 的 /compact，core 不改。
     /codex 与 /claude 在一个会话里互斥，开启一个即替换另一个。
   - 本机配置：模型、鉴权（Claude Code 自己的登录）、MCP、hooks、CLAUDE.md、权限规则均取自
     ~/.claude；子进程不继承 Hermes 的 provider 密钥；不改任何配置文件。
@@ -107,7 +111,8 @@ class ClaudeBackend:
                 else None
             )
             session = ClaudeAcpSession(
-                cwd=cwd, permission_mode=self.permission, resume_session_id=resume, **hooks
+                cwd=cwd, permission_mode=self.permission, resume_session_id=resume,
+                preferences=previous.preferences if resume else None, **hooks
             )
         else:
             session.rebind(**hooks)
@@ -133,6 +138,12 @@ def _help_text() -> str:
         "下一条消息起整轮对话交给本机 Claude Code 执行，结果回传本会话\n"
         "  /claude off — 关闭 Claude Code 模式：下一条消息起恢复 Hermes 默认 loop，并结束本会话的 Claude Code 会话\n"
         "  /claude status — 查看当前会话的开关状态、cwd、权限模式、模型与开启者\n"
+        "  /claude compact — 让 Claude Code 压缩自己的会话上下文（/compact）；"
+        "与 Hermes 的 /compress 效果相同（后者由核心处理）；回合在执行时不可用\n"
+        "  /claude model — 列出 Claude Code 当前可用的模型与思考深度（effort），标出当前值\n"
+        "  /claude model set [model=ID] [effort=LEVEL] — 设置当前会话的模型 / 思考深度；"
+        "`/claude model set ID` 等价于 `model=ID`；先设 model 再设 effort（可选深度随模型而变）；"
+        "仅 Claude Code 模式已开启、且没有回合在执行时可用；设置只作用于本会话，不改 `~/.claude` 配置\n"
         "  /claude help — 显示本帮助（不带任何参数时默认显示）\n"
         "\n"
         "**参数**\n"
@@ -158,7 +169,7 @@ def _help_text() -> str:
         "  • 开启后同一会话多轮复用同一个 Claude Code 会话；它从空白上下文开始，看不到开启前的 Hermes 对话\n"
         "  • 模型、鉴权（Claude Code 自己的登录）、MCP、hooks、CLAUDE.md 与权限规则均使用本机 `~/.claude` 现有配置；"
         "memory / delegate_task 等 Hermes 工具在该模式下不可用\n"
-        "  • 运行中可中断（/stop）或追加消息（steer）；/compress 转为 Claude Code 的 /compact\n"
+        "  • 运行中可中断（/stop）或追加消息（steer）；/compress 或 /claude compact 压缩上下文（即 Claude Code 的 /compact）\n"
         "  • 换会话（/new、自动重置）后自动失效\n"
         "  • 与 /codex 互斥：开启 Claude Code 模式会关闭本会话的 Codex 模式，反之亦然\n"
         "  • 需要本机已安装并登录 Claude Code（`claude`）以及 Node.js（npx）；"
@@ -337,7 +348,10 @@ def _plan_enable(scope: Any, options: dict[str, str]):
         else None
     )
     # 回调在第一轮由 codex_cmd._bind_codex_session 绑定到 agent 线程上
-    session = ClaudeAcpSession(cwd=thread_cwd, permission_mode=permission, resume_session_id=resume)
+    session = ClaudeAcpSession(
+        cwd=thread_cwd, permission_mode=permission, resume_session_id=resume,
+        preferences=current.preferences if resume else None,
+    )
     switched_from = None
     if existing is not None and codex_cmd.backend_of(existing).name != ClaudeBackend.name:
         switched_from = codex_cmd.backend_of(existing).title
@@ -348,6 +362,124 @@ def _plan_enable(scope: Any, options: dict[str, str]):
     )
 
 
+def _choice_lines(info: dict, key: str) -> list[str]:
+    current = info.get(key)
+    lines = []
+    for choice in info.get(f"{key}_options") or []:
+        marker = "▶" if choice["value"] == current else " "
+        desc = choice.get("description")
+        extra = f"（{choice['name']}）" if choice["name"] != choice["value"] else ""
+        lines.append(f"  {marker} `{choice['value']}`{extra}" + (f" — {desc}" if desc else ""))
+    return lines
+
+
+def _describe_models(session: ClaudeAcpSession) -> str:
+    info = session.info
+    lines = ["**模型**（▶ 为当前）"] + (_choice_lines(info, "model") or ["  Claude Code 未报告可选模型"])
+    if info.get("effort_options"):
+        lines += ["**思考深度 effort**（▶ 为当前）"] + _choice_lines(info, "effort")
+    else:
+        lines.append("**思考深度 effort**：当前模型不支持")
+    lines.append("设置：`/claude model set model=<ID> effort=<LEVEL>`")
+    return "\n".join(lines)
+
+
+def _model_command(scope: Any, extras: list[str], options: dict[str, str]):
+    mode = codex_cmd._lookup_mode(scope)
+    note = codex_cmd.other_backend_note(mode, ClaudeBackend)
+    if note or mode is None:
+        return f"当前会话未开启 Claude Code 模式。{note or '发送 /claude on 先开启。'}"
+    session = mode.codex_session
+    if not isinstance(session, ClaudeAcpSession) or session.closed:
+        return "Claude Code 会话尚未就绪（下一条消息时启动）。"
+
+    setting = bool(extras) and extras[0].lower() == "set"
+    if setting:
+        positional = extras[1:]
+        if len(positional) > 1 or (positional and "model" in options):
+            return f"❌ 参数有误。\n\n{_help_text()}"
+        wanted = {k: v.strip() for k, v in options.items() if k in ("model", "effort") and v.strip()}
+        if positional:
+            wanted["model"] = positional[0]
+        bad = [k for k in options if k not in ("model", "effort")]
+        if bad or not wanted:
+            return "❌ 用法：`/claude model set [model=ID] [effort=LEVEL]`（也可 `/claude model set ID`）"
+        if mode.owner not in (None, scope.owner):
+            return "❌ 当前会话的 Claude Code 模式由其他成员开启，只有开启者可以修改。"
+    elif extras:
+        return f"❌ 不支持的参数：{', '.join(extras)}。设置请用 `/claude model set ...`"
+    elif options:
+        return f"❌ 不支持的参数：{', '.join(options)}。设置请用 `/claude model set ...`"
+
+    def work() -> str:
+        session.ensure_started()
+        if not setting:
+            return _describe_models(session)
+        done = []
+        for key in ("model", "effort"):  # 先 model：可选的 effort 随模型而变
+            if key in wanted:
+                valid = {c["value"] for c in session.info.get(f"{key}_options") or []}
+                if key == "effort" and not valid:
+                    return "❌ 当前模型不支持思考深度。\n\n" + _describe_models(session)
+                try:
+                    session.set_config_option(key, wanted[key])
+                except Exception as exc:
+                    prefix = "✅ " + "、".join(done) + "\n" if done else ""
+                    return f"{prefix}❌ 设置 {key} 失败：{exc}\n\n{_describe_models(session)}"
+                done.append(f"{key} → `{session.info.get(key)}`")
+        return "✅ 已设置：" + "、".join(done) + "（下一条消息起生效）\n\n" + _describe_models(session)
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return work()
+
+    async def _off_loop() -> str:
+        # gateway 在事件循环上直接调用：Claude Code 启动/请求放到线程里
+        return await asyncio.to_thread(work)
+
+    return _off_loop()
+
+
+def _compact_command(scope: Any):
+    mode = codex_cmd._lookup_mode(scope)
+    note = codex_cmd.other_backend_note(mode, ClaudeBackend)
+    if note or mode is None:
+        return f"当前会话未开启 Claude Code 模式。{note or '发送 /claude on 先开启。'}"
+    session = mode.codex_session
+    if not isinstance(session, ClaudeAcpSession) or not session.started:
+        return "Claude Code 会话尚未启动（还没有可压缩的上下文）。"
+    if mode.owner not in (None, scope.owner):
+        return "❌ 当前会话的 Claude Code 模式由其他成员开启，只有开启者可以压缩。"
+    if session.turn_active:
+        return "Claude Code 正在执行，请等本轮结束（或 /stop）后再压缩"
+
+    def work() -> str:
+        before = session.info.get("context_used")
+        result = session.compact()
+        if result.interrupted:
+            return "⚠️ 压缩被中断。"
+        if result.error:
+            return f"❌ 压缩失败：{result.error}"
+        after, window = session.info.get("context_used"), session.info.get("context_window")
+        text = "✅ 已让 Claude Code 压缩上下文。"
+        if isinstance(after, int) and isinstance(window, int) and window > 0:
+            was = f"{before:,} → " if isinstance(before, int) and before != after else ""
+            text += f"上下文：{was}{after:,} / {window:,} tokens（{after * 100 // window}%）"
+        return text
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return work()
+
+    async def _off_loop() -> str:
+        # 压缩可能持续数分钟：放到线程里，免得卡住 gateway 事件循环
+        return await asyncio.to_thread(work)
+
+    return _off_loop()
+
+
 def claude_command(raw_args: str = ""):
     try:
         sub, options, extras = codex_cmd._parse(raw_args)
@@ -356,9 +488,9 @@ def claude_command(raw_args: str = ""):
 
     if sub in ("help", "-h", "--help"):
         return _help_text()
-    if sub not in ("on", "off", "status"):
+    if sub not in ("on", "off", "status", "model", "compact"):
         return f"未知子命令：`{sub}`\n\n{_help_text()}"
-    unknown = extras + [k for k in options if not (sub == "on" and k in ("cwd", "mode"))]
+    unknown = [] if sub == "model" else extras + [k for k in options if not (sub == "on" and k in ("cwd", "mode"))]
     if unknown:
         return f"❌ 不支持的参数：{', '.join(unknown)}\n\n{_help_text()}"
 
@@ -368,6 +500,10 @@ def claude_command(raw_args: str = ""):
 
     if sub == "status":
         return _describe(scope, codex_cmd._lookup_mode(scope))
+    if sub == "compact":
+        return _compact_command(scope)
+    if sub == "model":
+        return _model_command(scope, extras, options)
 
     if sub == "off":
         note = codex_cmd.other_backend_note(codex_cmd._lookup_mode(scope), ClaudeBackend)
@@ -403,5 +539,5 @@ def register(ctx):
             "当前会话切换到本机 Claude Code（经 claude-agent-acp）执行整轮对话，"
             "会话级开关，不修改任何配置"
         ),
-        args_hint="on [cwd=DIR] [mode=default|acceptEdits|plan|auto|bypass] | off | status | help",
+        args_hint="on [cwd=DIR] [mode=...] | off | status | compact | model [set model=ID effort=LEVEL] | help",
     )

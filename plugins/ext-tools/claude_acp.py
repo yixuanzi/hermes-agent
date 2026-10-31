@@ -3,7 +3,7 @@
 本机已安装、已登录、~/.claude 已配置好的 Claude Code，由
 ``@agentclientprotocol/claude-agent-acp`` 以 ACP（JSON-RPC 2.0，换行分隔的 stdio）
 暴露为 agent。ClaudeAcpSession 与 core 的 CodexAppServerSession 同形（run_turn /
-request_interrupt / request_steer / compact_thread / rebind / close / closed /
+request_interrupt / request_steer / compact_thread / compact / rebind / close / closed /
 turn_active / cwd）：/claude 把它挂到 ``agent._codex_session`` 并把 api_mode 切到
 codex_app_server，core 的 run_codex_app_server_turn() 整轮接管路径（消息投影入库、
 token 统计、中断、steer、/compress）原样复用，core 无需改动。
@@ -667,6 +667,19 @@ def _permission_prompt(tool_call: dict, cwd: str, always_option: Optional[dict])
     return label, description
 
 
+def _flat_choices(options: Any) -> list[dict]:
+    """select 选项可能分组（{"options": [...]}）：摊平成 value/name 列表。"""
+    flat: list[dict] = []
+    for item in options or []:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("options"), list):
+            flat.extend(_flat_choices(item["options"]))
+        elif item.get("value") is not None:
+            flat.append(item)
+    return flat
+
+
 class ClaudeAcpSession:
     """一个 Hermes 会话对应的 Claude Code（ACP）会话，跨轮次复用。
 
@@ -680,6 +693,7 @@ class ClaudeAcpSession:
         cwd: str,
         permission_mode: Optional[str] = None,
         resume_session_id: Optional[str] = None,
+        preferences: Optional[dict[str, str]] = None,
         on_event: Optional[Callable[[dict], None]] = None,
         approval_callback: Optional[Callable[..., str]] = None,
         auto_approve: bool = False,
@@ -689,6 +703,8 @@ class ClaudeAcpSession:
         # None = 沿用 Claude Code 配置的 permissions.defaultMode（新会话初始模式）
         self._permission_mode = permission_mode
         self._resume_session_id = resume_session_id
+        # /claude model set 选定的 model / effort：新开或 resume 的会话握手后重新套用
+        self._preferences: dict[str, str] = dict(preferences or {})
         self._on_event = on_event
         self._approval_callback = approval_callback
         self._auto_approve = auto_approve
@@ -726,6 +742,10 @@ class ClaudeAcpSession:
     @property
     def permission_mode(self) -> Optional[str]:
         return self._permission_mode
+
+    @property
+    def preferences(self) -> dict[str, str]:
+        return dict(self._preferences)
 
     @property
     def turn_active(self) -> bool:
@@ -809,6 +829,42 @@ class ClaudeAcpSession:
         if (self.info.get("account") or {}).get("kind") == "none":
             raise ClaudeAcpError(_AUTH_HINT)
         self._set_mode(conn, self._permission_mode or self.info.get("default_mode"))
+        # 先 model 再 effort：可选的思考深度取决于当前模型
+        for config_id in ("model", "effort"):
+            value = self._preferences.get(config_id)
+            if value and value != self.info.get(config_id):
+                try:
+                    self._set_config(conn, config_id, value)
+                except ClaudeAcpError as exc:
+                    logger.warning("/claude: re-applying %s=%s failed: %s", config_id, value, exc)
+                    self._preferences.pop(config_id, None)
+
+    def set_config_option(self, config_id: str, value: str) -> None:
+        """session/set_config_option：config_id 为 model 或 effort；回合进行中不接受。"""
+        if self.turn_active:
+            raise ClaudeAcpError("Claude Code 正在执行，请等本轮结束（或 /stop）后再设置")
+        conn = self._conn
+        if conn is None or not self._acp_session_id or self._closed:
+            raise ClaudeAcpError("Claude Code 会话尚未启动")
+        self._set_config(conn, config_id, value)
+        self._preferences[config_id] = str(self.info.get(config_id) or value)
+        if config_id == "model":
+            # 换模型后原来的思考深度可能不再适用
+            effort = self._preferences.get("effort")
+            if effort and effort not in {o["value"] for o in self.info.get("effort_options") or []}:
+                self._preferences.pop("effort", None)
+
+    def _set_config(self, conn: AcpConnection, config_id: str, value: str) -> None:
+        try:
+            result = conn.request(
+                "session/set_config_option",
+                {"sessionId": self._acp_session_id, "configId": config_id, "value": value},
+                timeout=60,
+            )
+        except TimeoutError as exc:
+            raise ClaudeAcpError(f"设置 {config_id} 超时") from exc
+        if isinstance(result, dict):
+            self._absorb_config(result.get("configOptions"))
 
     def apply_permission_mode(self) -> None:
         """把期望的权限模式同步到已启动的 Claude Code 会话（未指定时恢复其初始模式）。"""
@@ -864,7 +920,11 @@ class ClaudeAcpSession:
         return self._run(acp_prompt(user_input), idle_timeout=idle_timeout, display=True)
 
     def compact_thread(self, *, turn_timeout: float = 600.0) -> TurnResult:
-        """手动 /compress：让 Claude Code 压缩自己的会话上下文（/compact）。"""
+        """core 的手动 /compress 入口（run_codex_app_server_turn 同形）：让 Claude Code 压缩自己的上下文。"""
+        return self.compact(turn_timeout=turn_timeout)
+
+    def compact(self, *, turn_timeout: float = 600.0) -> TurnResult:
+        """让 Claude Code 压缩自己的会话上下文（/compact）；/compress 与 /claude compact 共用。"""
         result = self._run([{"type": "text", "text": "/compact"}], idle_timeout=turn_timeout, display=False)
         result.compacted = result.compacted or (result.error is None and not result.interrupted)
         result.projected_messages = []
@@ -1031,17 +1091,30 @@ class ClaudeAcpSession:
         self._absorb_config(state.get("configOptions"))
 
     def _absorb_config(self, options: Any) -> None:
+        seen = set()
         for option in options or []:
             if not isinstance(option, dict):
                 continue
-            if option.get("id") == "model":
-                value = option.get("currentValue")
-                self.info["model"] = value
-                for choice in option.get("options") or []:
-                    if isinstance(choice, dict) and choice.get("value") == value:
-                        self.info["model_name"] = choice.get("description") if value == "default" else choice.get("name")
-            elif option.get("id") == "mode" and option.get("currentValue"):
-                self.info["mode"] = option["currentValue"]
+            config_id = option.get("id")
+            value = option.get("currentValue")
+            if config_id in ("model", "effort"):
+                seen.add(config_id)
+                choices = [
+                    {"value": c.get("value"), "name": c.get("name") or c.get("value"), "description": c.get("description")}
+                    for c in _flat_choices(option.get("options"))
+                ]
+                self.info[config_id] = value
+                self.info[f"{config_id}_options"] = choices
+                if config_id == "model":
+                    for choice in choices:
+                        if choice["value"] == value:
+                            self.info["model_name"] = choice["description"] if value == "default" else choice["name"]
+            elif config_id == "mode" and value:
+                self.info["mode"] = value
+        if options and "effort" not in seen:
+            # 当前模型不支持思考深度：适配器不再给出 effort 选项
+            for key in ("effort", "effort_options"):
+                self.info.pop(key, None)
 
     def _absorb_update(self, update: dict, result: Optional[TurnResult]) -> None:
         kind = update.get("sessionUpdate")

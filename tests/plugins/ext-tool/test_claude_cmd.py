@@ -3,6 +3,8 @@
 ACP 侧用 fake_claude_acp_agent.py 子进程顶替真实 claude-agent-acp。
 """
 
+import json
+import os
 import shlex
 import sys
 import threading
@@ -414,3 +416,69 @@ def test_real_agent_interrupt_and_redirect_reach_claude(real_agent, tmp_path):
     result = real_agent.run_conversation("slow")
     assert accepted == [True]
     assert result["final_response"] == "Working steered:go left"
+
+
+def test_model_lists_models_and_effort_then_sets(monkeypatch):
+    _use_cli(monkeypatch, FakeAgent("sess-cli"))
+    assert "未开启" in claude_cmd.claude_command("model")
+
+    claude_cmd.claude_command("on")
+    text = claude_cmd.claude_command("model")
+    assert "▶ `sonnet`（Sonnet 5.5）" in text and "`opus`（Opus 5.5）" in text
+    assert "▶ `medium`" in text and "`low`" in text and "`high`" in text
+
+    text = claude_cmd.claude_command("model set effort=high")
+    assert "effort → `high`" in text and "▶ `high`" in text
+    assert _session().preferences == {"effort": "high"}
+
+    # 换到不支持 effort 的模型：effort 选项消失，之前的 effort 偏好作废
+    text = claude_cmd.claude_command("model set opus")
+    assert "model → `opus`" in text and "当前模型不支持" in text
+    assert _session().preferences == {"model": "opus"}
+    assert "不支持思考深度" in claude_cmd.claude_command("model set effort=low")
+
+    text = claude_cmd.claude_command("model set model=sonnet effort=low")
+    assert "model → `sonnet`" in text and "effort → `low`" in text
+
+
+def test_model_set_rejects_bad_input_and_busy_turn(monkeypatch):
+    _use_cli(monkeypatch, FakeAgent("sess-cli"))
+    claude_cmd.claude_command("on")
+    assert "用法" in claude_cmd.claude_command("model set")
+    assert "用法" in claude_cmd.claude_command("model set color=red")
+    assert "参数有误" in claude_cmd.claude_command("model set opus model=sonnet")
+    assert "不支持的参数" in claude_cmd.claude_command("model foo")
+    text = claude_cmd.claude_command("model set model=nope")
+    assert "设置 model 失败" in text and "Invalid value" in text
+    assert _session().preferences == {} and _session().info["model"] == "sonnet"
+
+    session = _session()
+    with patch.object(ClaudeAcpSession, "turn_active", new=True):
+        assert "正在执行" in claude_cmd.claude_command("model set opus")
+    assert session.info["model"] == "sonnet"
+
+
+def test_model_preferences_survive_session_resume(monkeypatch):
+    session = ClaudeAcpSession(cwd=str(Path.cwd()), resume_session_id="known-session",
+                               preferences={"model": "sonnet", "effort": "high"})
+    try:
+        session.ensure_started()
+        assert session.info["effort"] == "high" and session.info["resumed"]
+    finally:
+        session.close()
+
+
+def test_compact_subcommand(monkeypatch):
+    _use_cli(monkeypatch, FakeAgent("sess-cli"))
+    assert "未开启" in claude_cmd.claude_command("compact")
+    claude_cmd.claude_command("on")
+    assert "不支持的参数" in claude_cmd.claude_command("compact now")
+
+    session = _session()
+    with patch.object(ClaudeAcpSession, "turn_active", new=True):
+        assert "正在执行" in claude_cmd.claude_command("compact")
+    text = claude_cmd.claude_command("compact")
+    assert "已让 Claude Code 压缩上下文" in text
+    assert not session.closed
+    prompts = [json.loads(l) for l in Path(os.environ["FAKE_ACP_LOG"]).read_text().splitlines()]
+    assert [m["params"]["prompt"][0]["text"] for m in prompts if m.get("method") == "session/prompt"] == ["/compact"]

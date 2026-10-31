@@ -13,7 +13,9 @@ import sys
 LOG = os.environ.get("FAKE_ACP_LOG")
 USAGE = {"inputTokens": 10, "outputTokens": 5, "cachedReadTokens": 100, "cachedWriteTokens": 20, "totalTokens": 135}
 BASH = {"claudeCode": {"toolName": "Bash"}}
-state = {"mode": "default"}
+state = {"mode": "default", "model": "sonnet", "effort": "medium"}
+MODELS = {"sonnet": "Sonnet 5.5", "opus": "Opus 5.5"}
+EFFORTS = {"sonnet": ["low", "medium", "high"], "opus": []}  # opus: no effort option
 
 
 def send(obj):
@@ -121,9 +123,17 @@ def session_state(sid):
         "modes": {"currentModeId": state["mode"], "availableModes": [
             {"id": mode, "name": mode} for mode in ("default", "acceptEdits", "plan", "auto", "bypassPermissions")
         ]},
-        "configOptions": [{"id": "model", "currentValue": "sonnet",
-                           "options": [{"value": "sonnet", "name": "Sonnet 5.5"}]}],
+        "configOptions": config_options(),
     }
+
+
+def config_options():
+    options = [{"id": "model", "currentValue": state["model"],
+                "options": [{"value": v, "name": n} for v, n in MODELS.items()]}]
+    if EFFORTS[state["model"]]:
+        options.append({"id": "effort", "category": "thought_level", "currentValue": state["effort"],
+                        "options": [{"value": v, "name": v.title()} for v in EFFORTS[state["model"]]]})
+    return options
 
 
 def auth_status():
@@ -154,6 +164,16 @@ while True:
         state["mode"] = msg["params"]["modeId"]
         update(msg["params"]["sessionId"], sessionUpdate="current_mode_update", currentModeId=state["mode"])
         result(rid, {})
+    elif method == "session/set_config_option":
+        cid, value = msg["params"]["configId"], msg["params"]["value"]
+        if cid == "model" and value in MODELS:
+            state["model"] = value
+        elif cid == "effort" and value in EFFORTS[state["model"]]:
+            state["effort"] = value
+        else:
+            send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32603, "message": f"Invalid value for config option {cid}: {value}"}})
+            continue
+        result(rid, {"configOptions": config_options()})
     elif method == "session/prompt":
         prompt(msg)
     elif rid is not None and method:

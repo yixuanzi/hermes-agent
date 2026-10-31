@@ -232,10 +232,20 @@ def test_dead_or_failed_turn_retires_session(tmp_path, prompt, fragment):
     assert fragment in turn.error and turn.should_retire
 
 
-def test_compact_thread_runs_claude_compact(tmp_path, fake_acp):
+def test_core_compress_entry_runs_claude_compact(tmp_path, fake_acp):
     session = _session(tmp_path)
     try:
         result = session.compact_thread()
+    finally:
+        session.close()
+    assert result.compacted and result.error is None
+    assert _sent(fake_acp, "session/prompt")[-1]["params"]["prompt"] == [{"type": "text", "text": "/compact"}]
+
+
+def test_compact_runs_claude_compact(tmp_path, fake_acp):
+    session = _session(tmp_path)
+    try:
+        result = session.compact()
     finally:
         session.close()
     assert result.compacted and result.error is None
