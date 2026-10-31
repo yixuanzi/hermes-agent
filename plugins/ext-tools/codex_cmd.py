@@ -74,6 +74,7 @@ SANDBOX_MODES: dict[str, dict] = {
     "full": {"sandbox": "danger-full-access", "approvalPolicy": "never"},
 }
 DEFAULT_SANDBOX_MODE = "network"
+_PREF_KEYS = ("model", "effort")  # /codex model set 可设；作为 turn/start 的同名字段发出
 _SANDBOX_MODE_LABELS = {
     "read": "只读沙箱，网络关闭",
     "network": "工作区可写，网络开启",
@@ -87,6 +88,46 @@ _NO_SANDBOX_WARNING = (
 
 def thread_params_for(sandbox_mode: str) -> dict:
     return SANDBOX_MODES[sandbox_mode]
+
+
+def _wrap_client(client: Any, session: Any) -> Any:
+    """给 codex 客户端的 request 加两处旁路（core 不改）：
+    turn/start 带上 /codex model set 选定的 model / effort（对该轮及后续轮生效，线程上下文不丢）；
+    thread/start 的响应里记下 codex 实际用的 model / reasoningEffort（core 只取了权限部分）。"""
+    if getattr(client, "_ext_prefs_wrapped", False):
+        return client
+    original = client.request
+
+    def request(method, params=None, timeout=30.0):
+        if method == "turn/start":
+            prefs = getattr(session, "_ext_prefs", None)
+            if prefs:
+                params = {**(params or {}), **prefs}
+        result = original(method, params, timeout=timeout)
+        if method == "thread/start" and isinstance(result, dict):
+            session._ext_thread_info = {
+                "model": result.get("model"), "effort": result.get("reasoningEffort"),
+            }
+        return result
+
+    client.request = request
+    client._ext_prefs_wrapped = True
+    return client
+
+
+def install_prefs(session: Any, prefs: Optional[dict] = None) -> Any:
+    """让 CodexAppServerSession 支持会话级 model / effort 偏好（幂等）。"""
+    if getattr(session, "_ext_prefs", None) is None:
+        session._ext_prefs = {k: v for k, v in (prefs or {}).items() if k in _PREF_KEYS and v}
+        factory = session._client_factory
+        session._client_factory = lambda **kwargs: _wrap_client(factory(**kwargs), session)
+    if getattr(session, "_client", None) is not None:
+        _wrap_client(session._client, session)
+    return session
+
+
+def _prefs_of(session: Any) -> dict:
+    return dict(getattr(session, "_ext_prefs", None) or {})
 
 
 class _CodexBackend:
@@ -110,9 +151,13 @@ class _CodexBackend:
         from agent.codex_runtime import attach_codex_app_server_session
 
         if session is not None:
-            return attach_codex_app_server_session(agent, session)
-        return attach_codex_app_server_session(
-            agent, cwd=cwd, thread_start_params=thread_params_for(mode.sandbox)
+            return install_prefs(attach_codex_app_server_session(agent, session))
+        # 线程被运行时退役后重建：沿用 /codex model set 的选择
+        return install_prefs(
+            attach_codex_app_server_session(
+                agent, cwd=cwd, thread_start_params=thread_params_for(mode.sandbox)
+            ),
+            _prefs_of(previous),
         )
 
 
@@ -558,6 +603,13 @@ def _help_text() -> str:
         "  /codex on [cwd=DIR] [sandbox=read|network|full] — 开启 Codex 模式：下一条消息起整轮对话交给本地 codex 执行，结果回传本会话\n"
         "  /codex off — 关闭 Codex 模式：下一条消息起恢复 Hermes 默认 loop，并关闭本会话的 codex 线程\n"
         "  /codex status — 查看当前会话的开关状态、cwd 与开启者\n"
+        "  /codex new — 在 Codex 模式内开一个全新的 codex 线程（清空 codex 上下文），cwd / 沙箱 / 模型选择保持；"
+        "回合在执行时不可用（先 /stop）\n"
+        "  /codex stop — 中断 Codex 正在执行的这一轮（与核心 /stop 效果相同），模式与线程保留\n"
+        "  /codex model — 列出 codex 可用的模型与当前模型支持的思考深度（effort），标出当前值\n"
+        "  /codex model set [model=ID] [effort=LEVEL] — 设置本会话的模型 / 思考深度（也可 `/codex model set ID`）；"
+        "先设 model 再设 effort（可选深度随模型而变）；下一条消息起生效，线程上下文保留；"
+        "仅 Codex 模式已开启时可用，只作用于本会话，不改 `~/.codex` 配置\n"
         "  /codex help — 显示本帮助（不带任何参数时默认显示）\n"
         "\n"
         "**参数**\n"
@@ -580,7 +632,7 @@ def _help_text() -> str:
         "  • 模型、鉴权、sandbox、MCP 均使用本机 ~/.codex 现有配置；"
         "memory / delegate_task 等 Hermes 工具在该模式下不可用\n"
         "  • 沙箱与网络由 sandbox 档位决定（不再取决于目录 trust），`on` 与 `status` 会显示 codex 报告的实际沙箱、网络与审批\n"
-        "  • 换会话（/new、自动重置）后自动失效\n"
+        "  • 换会话（/new、自动重置）后自动失效；/codex new 则只换 codex 线程、不退出 Codex 模式\n"
         "  • 与 /claude 互斥：开启 Codex 模式会关闭本会话的 Claude Code 模式，反之亦然\n"
         "  • 消息平台：启用 rbac-guard 时仅 admin 可开启；群聊中只有开启者本人的消息走 Codex"
     )
@@ -836,7 +888,9 @@ def _plan_enable(scope: _Scope, options: dict[str, str]):
     if current is not None and not current.closed and CODEX_BACKEND.reusable(current, thread_cwd, mode):
         return _EnablePlan(scope, mode, current, started_here=False, version=version)
     # 回调在第一轮由 _bind_codex_session 绑定到 agent 线程上
-    session = CodexAppServerSession(cwd=thread_cwd, thread_start_params=params)
+    session = install_prefs(
+        CodexAppServerSession(cwd=thread_cwd, thread_start_params=params), _prefs_of(current)
+    )
     replaced = current if current is not None and not current.closed else None
     switched_from = None
     if existing is not None and backend_of(existing) is not CODEX_BACKEND:
@@ -847,6 +901,204 @@ def _plan_enable(scope: _Scope, options: dict[str, str]):
     )
 
 
+def _lookup_codex_mode(scope: _Scope) -> tuple[Optional[CodexMode], Optional[str]]:
+    """model / new / stop 的共同前置：当前会话必须处于 Codex 模式。返回 (mode, 拒绝文案)。"""
+    mode = _lookup_mode(scope)
+    note = other_backend_note(mode, CODEX_BACKEND)
+    if note or mode is None:
+        return None, f"当前会话未开启 Codex 模式。{note or '发送 /codex on 先开启。'}"
+    return mode, None
+
+
+def _owner_only(mode: CodexMode, scope: _Scope, action: str) -> Optional[str]:
+    if mode.owner not in (None, scope.owner):
+        return f"❌ 当前会话的 Codex 模式由其他成员开启，只有开启者可以{action}。"
+    return None
+
+
+def _off_loop(work):
+    """gateway 在事件循环上直接调用插件命令：会阻塞的 codex 请求放到线程里。"""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return work()
+
+    async def _run() -> str:
+        return await asyncio.to_thread(work)
+
+    return _run()
+
+
+def _list_models(session: Any) -> list[dict]:
+    session.ensure_started()
+    models: list[dict] = []
+    cursor = None
+    for _ in range(10):  # 分页上限，防止服务端游标异常时死循环
+        params: dict[str, Any] = {"includeHidden": False, "limit": 100}
+        if cursor:
+            params["cursor"] = cursor
+        result = session._client.request("model/list", params, timeout=15)
+        models += [m for m in result.get("data") or [] if isinstance(m, dict)]
+        cursor = result.get("nextCursor")
+        if not cursor:
+            break
+    return models
+
+
+def _model_key(entry: dict) -> str:
+    return str(entry.get("model") or entry.get("id") or "")
+
+
+def _current_choice(session: Any, key: str, models: list[dict]) -> Optional[str]:
+    """已选 > thread/start 上报 > catalog 默认。"""
+    value = _prefs_of(session).get(key) or (getattr(session, "_ext_thread_info", None) or {}).get(key)
+    if value or key != "model":
+        return value
+    return next((_model_key(m) for m in models if m.get("isDefault")), None)
+
+
+def _efforts_of(models: list[dict], model: Optional[str]) -> list[dict]:
+    for entry in models:
+        if _model_key(entry) == model:
+            return [e for e in entry.get("supportedReasoningEfforts") or [] if isinstance(e, dict)]
+    return []
+
+
+def _describe_models(session: Any, models: list[dict]) -> str:
+    model = _current_choice(session, "model", models)
+    effort = _current_choice(session, "effort", models)
+    lines = ["**模型**（▶ 为当前）"]
+    for entry in models:
+        key = _model_key(entry)
+        name = entry.get("displayName")
+        extra = f"（{name}）" if name and name != key else ""
+        desc = entry.get("description")
+        lines.append(
+            f"  {'▶' if key == model else ' '} `{key}`{extra}" + (f" — {desc}" if desc else "")
+        )
+    if not models:
+        lines.append("  codex 未报告可选模型")
+    efforts = _efforts_of(models, model)
+    if efforts:
+        lines.append(f"**思考深度 effort**（模型 `{model}`；▶ 为当前）")
+        for entry in efforts:
+            value = entry.get("reasoningEffort")
+            desc = entry.get("description")
+            lines.append(
+                f"  {'▶' if value == effort else ' '} `{value}`" + (f" — {desc}" if desc else "")
+            )
+    else:
+        lines.append("**思考深度 effort**：当前模型不支持或 codex 未报告")
+    lines.append("设置：`/codex model set model=<ID> effort=<LEVEL>`")
+    return "\n".join(lines)
+
+
+def _model_command(scope: _Scope, extras: list[str], options: dict[str, str]):
+    mode, denied = _lookup_codex_mode(scope)
+    if denied:
+        return denied
+    session = mode.codex_session
+    if session is None or session.closed or not hasattr(session, "_ext_prefs"):
+        return "Codex 线程尚未就绪（下一条消息时启动）。"
+
+    setting = bool(extras) and extras[0].lower() == "set"
+    wanted: dict[str, str] = {}
+    if setting:
+        positional = extras[1:]
+        if len(positional) > 1 or (positional and "model" in options):
+            return f"❌ 参数有误。\n\n{_help_text()}"
+        wanted = {k: v.strip() for k, v in options.items() if k in _PREF_KEYS and v.strip()}
+        if positional:
+            wanted["model"] = positional[0]
+        if [k for k in options if k not in _PREF_KEYS] or not wanted:
+            return "❌ 用法：`/codex model set [model=ID] [effort=LEVEL]`（也可 `/codex model set ID`）"
+        denied = _owner_only(mode, scope, "修改")
+        if denied:
+            return denied
+    elif extras or options:
+        return f"❌ 不支持的参数：{', '.join(extras + list(options))}。设置请用 `/codex model set ...`"
+
+    def work() -> str:
+        try:
+            models = _list_models(session)
+        except Exception as exc:
+            return f"❌ 获取 codex 模型列表失败：{exc}"
+        if not setting:
+            return _describe_models(session, models)
+        prefs = _prefs_of(session)
+        target = wanted.get("model") or _current_choice(session, "model", models)
+        if "model" in wanted and wanted["model"] not in {_model_key(m) for m in models}:
+            return f"❌ 未知模型：`{wanted['model']}`\n\n" + _describe_models(session, models)
+        supported = [e.get("reasoningEffort") for e in _efforts_of(models, target)]
+        if "effort" in wanted and wanted["effort"] not in supported:
+            return f"❌ 模型 `{target}` 不支持思考深度 `{wanted['effort']}`\n\n" + _describe_models(session, models)
+        if "model" in wanted:
+            prefs["model"] = wanted["model"]
+            if prefs.get("effort") not in supported:  # 换模型后原来的深度可能不再适用
+                prefs.pop("effort", None)
+        if "effort" in wanted:
+            prefs["effort"] = wanted["effort"]
+        session._ext_prefs = prefs
+        done = [f"{k} → `{wanted[k]}`" for k in _PREF_KEYS if k in wanted]
+        return "✅ 已设置：" + "、".join(done) + "（下一条消息起生效）\n\n" + _describe_models(session, models)
+
+    return _off_loop(work)
+
+
+def _new_command(scope: _Scope):
+    mode, denied = _lookup_codex_mode(scope)
+    if denied:
+        return denied
+    denied = _owner_only(mode, scope, "重置")
+    if denied:
+        return denied
+    old = mode.codex_session
+    if old is not None and not old.closed and old.turn_active:
+        return "Codex 正在执行，请先 /stop 再 /codex new"
+
+    from agent.runtime_cwd import resolve_agent_cwd
+    from agent.transports.codex_app_server_session import CodexAppServerSession
+
+    live = old is not None and not old.closed
+    cwd = old.cwd if live else (mode.cwd or str(resolve_agent_cwd()))
+    session = install_prefs(
+        CodexAppServerSession(cwd=cwd, thread_start_params=thread_params_for(mode.sandbox)),
+        _prefs_of(old),
+    )
+
+    def work() -> str:
+        try:
+            session.ensure_started()
+        except Exception as exc:
+            try:
+                session.close()
+            except Exception:
+                logger.debug("/codex: codex session close failed", exc_info=True)
+            return f"❌ 无法开启新的 codex 线程（原线程保持不变）：{str(exc) or type(exc).__name__}"
+        mode.codex_session = session  # 下一轮边界 _bind_codex_session 把它绑到 agent 上
+        _close_if_idle(old)
+        return (
+            "✅ 已开启新的 codex 线程：codex 上下文已清空，cwd / 沙箱 / 模型选择不变。"
+            if live else "✅ 已准备好新的 codex 线程。"
+        ) + "\n" + "\n".join(_session_lines(mode, scope))
+
+    return _off_loop(work)
+
+
+def _stop_command(scope: _Scope):
+    mode, denied = _lookup_codex_mode(scope)
+    if denied:
+        return denied
+    denied = _owner_only(mode, scope, "中断")
+    if denied:
+        return denied
+    session = mode.codex_session
+    if session is None or session.closed or not session.turn_active:
+        return "Codex 当前没有正在执行的轮次。"
+    session.request_interrupt()
+    return "⏹ 已请求中断 Codex 当前这一轮，Codex 模式与线程保留。"
+
+
 def codex_command(raw_args: str = ""):
     try:
         sub, options, extras = _parse(raw_args)
@@ -855,9 +1107,9 @@ def codex_command(raw_args: str = ""):
 
     if sub in ("help", "-h", "--help"):
         return _help_text()
-    if sub not in ("on", "off", "status"):
+    if sub not in ("on", "off", "status", "new", "stop", "model"):
         return f"未知子命令：`{sub}`\n\n{_help_text()}"
-    unknown = extras + [k for k in options if not (sub == "on" and k in ("cwd", "sandbox"))]
+    unknown = [] if sub == "model" else extras + [k for k in options if not (sub == "on" and k in ("cwd", "sandbox"))]
     if unknown:
         return f"❌ 不支持的参数：{', '.join(unknown)}\n\n{_help_text()}"
 
@@ -867,6 +1119,12 @@ def codex_command(raw_args: str = ""):
 
     if sub == "status":
         return _describe(scope, _lookup_mode(scope))
+    if sub == "new":
+        return _new_command(scope)
+    if sub == "stop":
+        return _stop_command(scope)
+    if sub == "model":
+        return _model_command(scope, extras, options)
 
     if sub == "off":
         note = other_backend_note(_lookup_mode(scope), CODEX_BACKEND)
@@ -901,7 +1159,7 @@ def register(ctx):
             "当前会话切换到本地 Codex CLI（codex app-server）执行整轮对话，"
             "会话级开关，不修改任何配置"
         ),
-        args_hint="on [cwd=DIR] [sandbox=read|network|full] | off | status | help",
+        args_hint="on [cwd=DIR] [sandbox=read|network|full] | off | status | new | stop | model [set model=ID effort=LEVEL] | help",
     )
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
     ctx.register_hook("pre_gateway_dispatch", on_pre_gateway_dispatch)

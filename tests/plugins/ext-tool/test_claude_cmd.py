@@ -482,3 +482,59 @@ def test_compact_subcommand(monkeypatch):
     assert not session.closed
     prompts = [json.loads(l) for l in Path(os.environ["FAKE_ACP_LOG"]).read_text().splitlines()]
     assert [m["params"]["prompt"][0]["text"] for m in prompts if m.get("method") == "session/prompt"] == ["/compact"]
+
+
+def test_new_opens_fresh_session_keeping_cwd_mode_and_preferences(monkeypatch, tmp_path):
+    agent = FakeAgent("sess-cli")
+    _use_cli(monkeypatch, agent)
+    assert "未开启" in claude_cmd.claude_command("new")
+    claude_cmd.claude_command(f"on cwd={tmp_path} mode=plan")
+    claude_cmd.claude_command("model set effort=high")
+    old = _session()
+
+    text = claude_cmd.claude_command("new")
+    fresh = _session()
+    assert "已开启新的 Claude Code 会话" in text and "plan" in text
+    assert fresh is not old and old.closed and not fresh.closed
+    assert not fresh.info.get("resumed")  # 全新上下文，不 resume 旧会话
+    assert fresh.cwd == str(tmp_path.resolve())
+    assert fresh.preferences == {"effort": "high"}
+    _turn(agent)  # 下一轮把新会话绑到 agent 上
+    assert agent._codex_session is fresh
+
+
+def test_new_refused_during_turn_and_keeps_old_session(monkeypatch):
+    _use_cli(monkeypatch, FakeAgent("sess-cli"))
+    claude_cmd.claude_command("on")
+    old = _session()
+    with patch.object(ClaudeAcpSession, "turn_active", new=True):
+        assert "/stop" in claude_cmd.claude_command("new")
+    assert _session() is old and not old.closed
+    assert "不支持的参数" in claude_cmd.claude_command("new now")
+
+
+def test_new_start_failure_keeps_old_session(monkeypatch):
+    _use_cli(monkeypatch, FakeAgent("sess-cli"))
+    claude_cmd.claude_command("on")
+    old = _session()
+
+    def _boom(self):
+        raise RuntimeError("spawn failed")
+
+    monkeypatch.setattr(ClaudeAcpSession, "ensure_started", _boom)
+    assert "spawn failed" in claude_cmd.claude_command("new")
+    assert _session() is old and not old.closed
+
+
+def test_stop_interrupts_only_an_active_turn(monkeypatch):
+    _use_cli(monkeypatch, FakeAgent("sess-cli"))
+    assert "未开启" in claude_cmd.claude_command("stop")
+    claude_cmd.claude_command("on")
+    session = _session()
+    assert "没有正在执行" in claude_cmd.claude_command("stop")
+
+    with patch.object(ClaudeAcpSession, "turn_active", new=True), \
+            patch.object(ClaudeAcpSession, "request_interrupt") as interrupt:
+        assert "已请求中断" in claude_cmd.claude_command("stop")
+    interrupt.assert_called_once_with()
+    assert codex_cmd.get_mode("sess-cli") is not None and not session.closed

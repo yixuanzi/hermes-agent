@@ -564,3 +564,146 @@ def test_same_sandbox_on_rebuilt_agent_keeps_thread(monkeypatch):
     rebuilt = FakeAgent("sess-gw")
     _turn(rebuilt)
     assert rebuilt._codex_session is thread
+
+
+# ------------------------------------------------ model / new / stop ----
+MODELS = [
+    {"id": "gpt-a", "model": "gpt-a", "displayName": "GPT A", "description": "fast", "isDefault": True,
+     "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "quick"},
+                                   {"reasoningEffort": "high", "description": "deep"}]},
+    {"id": "gpt-b", "model": "gpt-b", "displayName": "gpt-b", "description": "plain", "isDefault": False,
+     "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": "mid"}]},
+]
+
+
+class FakeClient:
+    def __init__(self):
+        self.calls = []
+
+    def request(self, method, params=None, timeout=30.0):
+        self.calls.append((method, params))
+        if method == "model/list":
+            return {"data": MODELS, "nextCursor": None}
+        if method == "thread/start":
+            return {"model": "gpt-b", "reasoningEffort": "medium", "thread": {"id": "t"}}
+        return {}
+
+
+def _enabled_session(monkeypatch, sid="sess-cli"):
+    agent = FakeAgent(sid)
+    _use_cli(monkeypatch, agent)
+    codex_cmd.codex_command("on")
+    session = codex_cmd.get_mode(sid).codex_session
+    session._client = FakeClient()
+    codex_cmd.install_prefs(session)  # 已启动的线程补挂旁路
+    return agent, session
+
+
+def test_model_requires_codex_mode(monkeypatch):
+    _use_cli(monkeypatch, FakeAgent("sess-cli"))
+    for sub in ("model", "new", "stop"):
+        assert "未开启 Codex 模式" in codex_cmd.codex_command(sub)
+
+
+def test_model_lists_models_and_efforts_with_current_marker(monkeypatch):
+    _, session = _enabled_session(monkeypatch)
+    text = codex_cmd.codex_command("model")
+    assert "▶ `gpt-a`（GPT A） — fast" in text and "  `gpt-b`" in text
+    assert "▶ " not in text.split("`gpt-b`")[1].split("\n")[0]
+    assert "`low` — quick" in text and "`high` — deep" in text and "`medium`" not in text
+
+    session._ext_thread_info = {"model": "gpt-b", "effort": "medium"}  # thread/start 上报的当前值
+    text = codex_cmd.codex_command("model")
+    assert "▶ `gpt-b`" in text and "▶ `medium`" in text
+
+
+def test_model_set_validates_and_applies_to_turn_start(monkeypatch):
+    _, session = _enabled_session(monkeypatch)
+    assert "未知模型" in codex_cmd.codex_command("model set nope")
+    assert "不支持思考深度" in codex_cmd.codex_command("model set model=gpt-a effort=medium")
+    assert session._ext_prefs == {}
+
+    assert "已设置" in codex_cmd.codex_command("model set model=gpt-a effort=high")
+    assert session._ext_prefs == {"model": "gpt-a", "effort": "high"}
+    session._client.request("turn/start", {"threadId": "t", "input": []}, timeout=10)
+    assert session._client.calls[-1][1] == {
+        "threadId": "t", "input": [], "model": "gpt-a", "effort": "high",
+    }
+
+    # 换模型后不适用的 effort 被丢弃；位置参数等价于 model=
+    assert "已设置" in codex_cmd.codex_command("model set gpt-b")
+    assert session._ext_prefs == {"model": "gpt-b"}
+    # effort 单独设置按当前模型校验
+    assert "已设置" in codex_cmd.codex_command("model set effort=medium")
+    assert session._ext_prefs == {"model": "gpt-b", "effort": "medium"}
+    assert "用法" in codex_cmd.codex_command("model set")
+    assert "不支持的参数" in codex_cmd.codex_command("model bogus")
+
+
+def test_thread_start_response_records_current_model(monkeypatch):
+    _, session = _enabled_session(monkeypatch)
+    session._client.request("thread/start", {"cwd": "/x"})
+    assert session._ext_thread_info == {"model": "gpt-b", "effort": "medium"}
+
+
+def test_model_set_is_owner_only(monkeypatch):
+    _, session = _enabled_session(monkeypatch)
+    mode = codex_cmd.get_mode("sess-cli")
+    mode.owner = ("feishu", "someone-else")
+    assert "只有开启者" in codex_cmd.codex_command("model set gpt-a")
+    assert session._ext_prefs == {}
+    assert "▶" in codex_cmd.codex_command("model")  # 查看不受限
+
+
+def test_new_replaces_thread_keeps_prefs_and_cwd(monkeypatch, tmp_path):
+    agent = FakeAgent("sess-cli")
+    _use_cli(monkeypatch, agent)
+    codex_cmd.codex_command(f"on cwd={tmp_path}")
+    old = codex_cmd.get_mode("sess-cli").codex_session
+    old._ext_prefs = {"model": "gpt-b"}
+
+    assert "新的 codex 线程" in codex_cmd.codex_command("new")
+    fresh = codex_cmd.get_mode("sess-cli").codex_session
+    assert fresh is not old and old.closed and not fresh.closed
+    assert fresh.cwd == str(tmp_path.resolve()) and fresh._ext_prefs == {"model": "gpt-b"}
+    assert fresh.thread_start_params == old.thread_start_params
+    _turn(agent)  # 下一轮把新线程绑到 agent 上
+    assert agent._codex_session is fresh
+
+
+def test_new_refused_during_turn_and_start_failure_keeps_old(monkeypatch):
+    _, old = _enabled_session(monkeypatch)
+    old._active_turn_id = "turn-1"
+    assert "/stop" in codex_cmd.codex_command("new")
+    assert codex_cmd.get_mode("sess-cli").codex_session is old
+
+    old._active_turn_id = None
+    from agent.transports.codex_app_server_session import CodexAppServerSession
+
+    def _boom(self):
+        raise RuntimeError("spawn failed")
+
+    monkeypatch.setattr(CodexAppServerSession, "ensure_started", _boom)
+    assert "spawn failed" in codex_cmd.codex_command("new")
+    assert codex_cmd.get_mode("sess-cli").codex_session is old and not old.closed
+
+
+def test_stop_interrupts_only_an_active_turn(monkeypatch):
+    _, session = _enabled_session(monkeypatch)
+    assert "没有正在执行" in codex_cmd.codex_command("stop")
+    assert not session._interrupt_event.is_set()
+
+    session._active_turn_id = "turn-1"
+    assert "已请求中断" in codex_cmd.codex_command("stop")
+    assert session._interrupt_event.is_set()
+    assert codex_cmd.get_mode("sess-cli") is not None  # 模式保留
+
+
+def test_retired_thread_recreated_with_prefs(monkeypatch):
+    agent, session = _enabled_session(monkeypatch)
+    session._ext_prefs = {"model": "gpt-a", "effort": "low"}
+    _turn(agent)
+    session.close()  # 运行时退役
+    _turn(agent)
+    assert agent._codex_session is not session
+    assert agent._codex_session._ext_prefs == {"model": "gpt-a", "effort": "low"}
