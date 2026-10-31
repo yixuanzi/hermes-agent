@@ -107,7 +107,7 @@ def test_help_and_bad_args(monkeypatch):
     text = claude_cmd.claude_command("")
     assert text == claude_cmd.claude_command("help")
     for fragment in ("/claude on [cwd=DIR] [mode=default|acceptEdits|plan|auto|bypass]", "/claude off",
-                     "/claude status", "permissions.defaultMode", "`bypass`：⚠️", "与 /codex 互斥",
+                     "/claude status", "不指定时为 `auto`", "`bypass`：⚠️", "与 /codex 互斥",
                      claude_acp.DEFAULT_ACP_PACKAGE, "每个会话默认关闭"):
         assert fragment in text, fragment
     assert "未知子命令" in claude_cmd.claude_command("maybe")
@@ -136,8 +136,8 @@ def test_cli_on_reports_claude_code_state_then_status_and_off(monkeypatch, tmp_p
     _use_cli(monkeypatch, FakeAgent("sess-cli"))
     text = claude_cmd.claude_command(f"on cwd={tmp_path}")
     for fragment in ("已开启 Claude Code 模式（Claude Code 2.1.286，fake-claude-acp 9.9.9）",
-                     f"cwd：`{tmp_path.resolve()}`", "沿用 Claude Code 配置", "从空白上下文开始",
-                     "权限模式：`default`", "模型：`sonnet`（Sonnet 5.5）", "账号：Claude Team",
+                     f"cwd：`{tmp_path.resolve()}`", "权限模式设置：`auto`", "从空白上下文开始",
+                     "权限模式：`auto`", "模型：`sonnet`（Sonnet 5.5）", "账号：Claude Team",
                      "在 CLI 中弹出 Hermes 审批"):
         assert fragment in text, fragment
     mode = codex_cmd.get_mode("sess-cli")
@@ -165,7 +165,7 @@ def test_mode_option_and_reuse(monkeypatch):
 
     text = claude_cmd.claude_command("on")  # 同 cwd 再次 on：沿用会话，mode 不沿用
     assert _session() is session and not session.closed
-    assert "沿用本会话已有的 Claude Code 会话" in text and "权限模式：`default`" in text
+    assert "沿用本会话已有的 Claude Code 会话" in text and "权限模式：`auto`" in text
 
     text = claude_cmd.claude_command("on mode=BYPASS")
     assert claude_cmd._BYPASS_WARNING in text and "授权请求：不请求" in text
@@ -399,7 +399,7 @@ def test_real_agent_turn_runs_through_core_codex_path(real_agent, tmp_path):
     assert real_agent.session_total_tokens == 135
 
     second = real_agent.run_conversation("hello again")  # 同一个 Claude Code 会话继续
-    assert second["final_response"] == "mode=default echo=hello again"
+    assert second["final_response"] == "mode=auto echo=hello again"
     assert second["codex_thread_id"] == "new-session"
 
 

@@ -16,8 +16,7 @@
     /codex 与 /claude 在一个会话里互斥，开启一个即替换另一个。
   - 本机配置：模型、鉴权（Claude Code 自己的登录）、MCP、hooks、CLAUDE.md、权限规则均取自
     ~/.claude；子进程不继承 Hermes 的 provider 密钥；不改任何配置文件。
-  - 权限：mode= 为 Claude Code 的会话权限模式（session/set_mode），不指定则沿用其
-    permissions.defaultMode。Claude Code 请求授权时：CLI 弹出 Hermes 审批；无审批界面的
+  - 权限：mode= 为 Claude Code 的会话权限模式（session/set_mode），不指定则默认 auto。Claude Code 请求授权时：CLI 弹出 Hermes 审批；无审批界面的
     入口（飞书 / TUI 等）自动拒绝；approvals.mode=off / yolo 时自动批准。
   - 上下文连续：Claude Code 会话被 runtime 退役（进程崩溃、卡死）后，下一轮在同一 cwd 下
     用 session/resume 接上它；换 cwd 才从空白上下文开始。
@@ -39,6 +38,7 @@ from claude_acp import (
     check_claude_code,
 )
 
+DEFAULT_MODE = "auto"  # /claude on 未指定 mode= 时的权限模式
 _MODE_ALIASES = {
     "default": "default",
     "manual": "default",
@@ -88,7 +88,7 @@ def _session_hooks(agent: Any) -> dict:
 class ClaudeBackend:
     """codex_cmd 会话表里的 /claude 后端：Claude Code 会话的复用与创建。"""
 
-    permission: Optional[str] = None  # None = 沿用 Claude Code 配置的 permissions.defaultMode
+    permission: Optional[str] = DEFAULT_MODE  # None = 沿用 Claude Code 配置的 permissions.defaultMode
 
     name: ClassVar[str] = "claude"
     title: ClassVar[str] = "Claude Code"
@@ -143,13 +143,13 @@ def _help_text() -> str:
         "路径含空格时加引号：`cwd=\"~/my proj\"`\n"
         "    • 再次 `on` 不带 cwd 时沿用上次指定的目录；更换目录会新开 Claude Code 会话，之前的上下文不再保留\n"
         "  mode=default|acceptEdits|plan|auto|bypass — 仅 `on` 可用，Claude Code 的权限模式；"
-        "不指定时沿用 `~/.claude/settings.json` 的 `permissions.defaultMode`\n"
+        "不指定时为 `auto`\n"
         "    • `default`：编辑文件、执行未预授权的命令前都需要授权\n"
         "    • `acceptEdits`：自动接受文件编辑，执行未预授权的命令仍需授权\n"
         "    • `plan`：只规划不改动\n"
         "    • `auto`：由 Claude 自行判断哪些操作需要授权（模型不支持时 Claude Code 退回 acceptEdits）\n"
         "    • `bypass`：⚠️ 跳过所有权限检查，任意命令与文件编辑直接执行\n"
-        "    • 每次 `on` 不带 mode 时恢复默认；切换模式沿用同一个 Claude Code 会话\n"
+        "    • 每次 `on` 不带 mode 时恢复为 `auto`；切换模式沿用同一个 Claude Code 会话\n"
         "    • 「预授权」指 `~/.claude/settings.json` 等处 `permissions.allow` 里的规则\n"
         "    • 授权：CLI 会弹出 Hermes 审批；飞书 / TUI 等无审批界面的入口，需要授权的操作会被自动拒绝\n"
         "\n"
@@ -303,8 +303,8 @@ def _plan_enable(scope: Any, options: dict[str, str]):
         cwd, err = codex_cmd._resolve_cwd(options["cwd"])
         if err:
             return err
-    # 不沿用：每次 on 未指定 mode 都回到 Claude Code 配置的默认模式
-    permission = None
+    # 不沿用：每次 on 未指定 mode 都回到默认的 auto
+    permission = DEFAULT_MODE
     if "mode" in options:
         key = options["mode"].strip().lower().replace("-", "").replace("_", "")
         permission = _MODE_ALIASES.get(key)
