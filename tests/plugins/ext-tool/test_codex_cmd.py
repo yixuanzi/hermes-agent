@@ -707,3 +707,35 @@ def test_retired_thread_recreated_with_prefs(monkeypatch):
     _turn(agent)
     assert agent._codex_session is not session
     assert agent._codex_session._ext_prefs == {"model": "gpt-a", "effort": "low"}
+
+
+def test_compact_runs_codex_native_compaction(monkeypatch):
+    from agent.transports.codex_app_server_session import CodexAppServerSession, TurnResult
+
+    _use_cli(monkeypatch, FakeAgent("sess-cli"))
+    assert "未开启 Codex 模式" in codex_cmd.codex_command("compact")
+    codex_cmd.codex_command("on")
+    session = codex_cmd.get_mode("sess-cli").codex_session
+    session._thread_id = None
+    assert "尚未启动" in codex_cmd.codex_command("compact")
+    session._thread_id = "thread-test"
+    assert "不支持的参数" in codex_cmd.codex_command("compact now")
+
+    session._active_turn_id = "turn-1"
+    assert "正在执行" in codex_cmd.codex_command("compact")
+    session._active_turn_id = None
+
+    outcomes = iter([
+        TurnResult(token_usage_last={"totalTokens": 5000}, model_context_window=20000),
+        TurnResult(error="boom"),
+        TurnResult(interrupted=True),
+        TurnResult(error="wedged", should_retire=True),
+    ])
+    monkeypatch.setattr(CodexAppServerSession, "compact_thread", lambda self, **kw: next(outcomes))
+    text = codex_cmd.codex_command("compact")
+    assert "已让 Codex 压缩" in text and "5,000 / 20,000" in text and "25%" in text
+    assert "压缩失败：boom" in codex_cmd.codex_command("compact")
+    assert "被中断" in codex_cmd.codex_command("compact")
+    assert not session.closed
+    assert "压缩失败：wedged" in codex_cmd.codex_command("compact")
+    assert session.closed  # 退役，下一轮重开

@@ -4,12 +4,19 @@
                       当前会话下一条消息起，整轮交给本地 codex CLI（codex app-server）
 /codex off            恢复 Hermes 默认 loop
 /codex status         查看当前会话状态
+/codex new            在 Codex 模式内开一个全新的 codex 线程（cwd / 沙箱 / 模型选择保持）
+/codex stop           中断 codex 正在执行的这一轮，模式与线程保留
+/codex compact        让 codex 压缩自己的线程上下文（/compress 由 Hermes 核心处理，效果相同）
+/codex model [set model=ID effort=LEVEL]
+                      列出 / 设置本会话的模型与思考深度（effort）
 /codex [help]         命令帮助（不带参数时默认显示）
 
 设计要点：
   - 会话级：开关状态按 Hermes session_id 记在本插件内存里，不写 config.yaml，
     不改 ~/.codex/config.toml，不迁移 MCP。codex 子进程直接使用本机已配置好的
     codex CLI（模型、鉴权、sandbox、MCP 均取自 ~/.codex）。/new 等换会话后自动失效。
+  - 上下文压缩：核心 /compress 在该模式下不经过插件，直接转成 codex 原生的 thread
+    compaction（compact_thread）；/codex compact 是同一个动作的显式入口，不替代 /compress。
   - 复用现有 runtime：core 在 run_conversation() 里若
     ``agent.api_mode == "codex_app_server"`` 就调用
     agent/codex_runtime.run_codex_app_server_turn()（事件桥接到 CLI/gateway 界面、
@@ -606,6 +613,8 @@ def _help_text() -> str:
         "  /codex new — 在 Codex 模式内开一个全新的 codex 线程（清空 codex 上下文），cwd / 沙箱 / 模型选择保持；"
         "回合在执行时不可用（先 /stop）\n"
         "  /codex stop — 中断 Codex 正在执行的这一轮（与核心 /stop 效果相同），模式与线程保留\n"
+        "  /codex compact — 让 codex 压缩自己的线程上下文（codex 原生 compaction）；"
+        "与 Hermes 的 /compress 效果相同（后者由核心处理）；回合在执行时不可用\n"
         "  /codex model — 列出 codex 可用的模型与当前模型支持的思考深度（effort），标出当前值\n"
         "  /codex model set [model=ID] [effort=LEVEL] — 设置本会话的模型 / 思考深度（也可 `/codex model set ID`）；"
         "先设 model 再设 effort（可选深度随模型而变）；下一条消息起生效，线程上下文保留；"
@@ -1099,6 +1108,38 @@ def _stop_command(scope: _Scope):
     return "⏹ 已请求中断 Codex 当前这一轮，Codex 模式与线程保留。"
 
 
+def _compact_command(scope: _Scope):
+    mode, denied = _lookup_codex_mode(scope)
+    if denied:
+        return denied
+    denied = _owner_only(mode, scope, "压缩")
+    if denied:
+        return denied
+    session = mode.codex_session
+    if session is None or session.closed or getattr(session, "_thread_id", None) is None:
+        return "Codex 线程尚未启动（还没有可压缩的上下文）。"
+    if session.turn_active:
+        return "Codex 正在执行，请等本轮结束（或 /stop）后再压缩"
+
+    def work() -> str:
+        result = session.compact_thread()
+        if result.should_retire:
+            # 与核心 /compress 一致：线程可能已损坏，退役后下一轮重开
+            _close_if_idle(session)
+        if result.interrupted:
+            return "⚠️ 压缩被中断。"
+        if result.error:
+            return f"❌ 压缩失败：{result.error}"
+        text = "✅ 已让 Codex 压缩线程上下文。"
+        used = (result.token_usage_last or {}).get("totalTokens")
+        window = result.model_context_window
+        if isinstance(used, int) and isinstance(window, int) and window > 0:
+            text += f"上下文：{used:,} / {window:,} tokens（{used * 100 // window}%）"
+        return text
+
+    return _off_loop(work)
+
+
 def codex_command(raw_args: str = ""):
     try:
         sub, options, extras = _parse(raw_args)
@@ -1107,7 +1148,7 @@ def codex_command(raw_args: str = ""):
 
     if sub in ("help", "-h", "--help"):
         return _help_text()
-    if sub not in ("on", "off", "status", "new", "stop", "model"):
+    if sub not in ("on", "off", "status", "new", "stop", "model", "compact"):
         return f"未知子命令：`{sub}`\n\n{_help_text()}"
     unknown = [] if sub == "model" else extras + [k for k in options if not (sub == "on" and k in ("cwd", "sandbox"))]
     if unknown:
@@ -1119,6 +1160,8 @@ def codex_command(raw_args: str = ""):
 
     if sub == "status":
         return _describe(scope, _lookup_mode(scope))
+    if sub == "compact":
+        return _compact_command(scope)
     if sub == "new":
         return _new_command(scope)
     if sub == "stop":
@@ -1159,7 +1202,7 @@ def register(ctx):
             "当前会话切换到本地 Codex CLI（codex app-server）执行整轮对话，"
             "会话级开关，不修改任何配置"
         ),
-        args_hint="on [cwd=DIR] [sandbox=read|network|full] | off | status | new | stop | model [set model=ID effort=LEVEL] | help",
+        args_hint="on [cwd=DIR] [sandbox=read|network|full] | off | status | new | stop | compact | model [set model=ID effort=LEVEL] | help",
     )
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
     ctx.register_hook("pre_gateway_dispatch", on_pre_gateway_dispatch)
