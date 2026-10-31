@@ -181,6 +181,7 @@ def test_turn_switches_to_codex_and_back(monkeypatch, tmp_path, _isolated):
     session = agent._codex_session
     assert session is not None and session.cwd == str(tmp_path.resolve())
     assert codex_cmd.get_mode("sess-cli").codex_session is session
+    assert session._ext_raw_prompt_wrapped  # 网关入站消息只把原文发给 codex（raw_prompt）
 
     _turn(agent)  # 后续轮次复用同一线程
     assert agent._codex_session is session

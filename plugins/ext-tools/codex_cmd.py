@@ -50,6 +50,8 @@
   - 多后端：会话表、轮次切换与线程归属是通用的；CodexMode.backend 决定挂到
     agent._codex_session 上的是什么（None = codex app-server；/claude 见 claude_cmd）。
     一个会话同一时刻只有一种模式，开启一个即替换另一个。
+  - 原文直通：网关给入站消息加的 <source>、群聊历史、引用等不发给后端，只发用户原文
+    （附件消息保留附件说明），见 raw_prompt。
 """
 
 from __future__ import annotations
@@ -66,6 +68,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+import raw_prompt  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -527,6 +531,7 @@ def _bind_codex_session(agent: Any, mode: CodexMode) -> None:
             _release_codex_session(mode)
             backend.attach(agent, mode, cwd=cwd, previous=candidate)
 
+    raw_prompt.install_session_passthrough(agent._codex_session)
     mode.codex_session = agent._codex_session
     mode.owner_agent = weakref.ref(agent)
 
@@ -581,9 +586,12 @@ def on_pre_llm_call(session_id="", platform="", sender_id="", parent_session_id=
 
 
 def on_pre_gateway_dispatch(event=None, gateway=None, **_):
-    """只为 /codex、/claude 消息捕获 (runner, source)，供随后的插件命令识别会话。不影响分发。"""
+    """只为 /codex、/claude 消息捕获 (runner, source)，供随后的插件命令识别会话。不影响分发。
+
+    也在这里给 runner 装上入站消息原文的记录（见 raw_prompt）。"""
     if event is None or gateway is None:
         return None
+    raw_prompt.install_gateway_capture(gateway)
     try:
         command = (event.get_command() or "").replace("_", "-")
     except Exception:
