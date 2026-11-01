@@ -17805,6 +17805,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             session_key=session_key,
                             user_config=_hyg_data if isinstance(_hyg_data, dict) else None,
                         )
+                        # _resolve_session_agent_runtime may smuggle private
+                        # router markers (e.g. _session_model_pinned, set when
+                        # the session has a /model override) into the runtime
+                        # dict. AIAgent's __init__ rejects them (#33daf94db7
+                        # follow-up): strip any underscore-prefixed keys before
+                        # splatting into the hygiene agent.
+                        _hyg_runtime = {
+                            k: v for k, v in (_hyg_runtime or {}).items()
+                            if not str(k).startswith("_")
+                        }
                         if _hyg_runtime.get("api_key"):
                             # Pass the FULL transcript (tool results included).
                             # Filtering to user/assistant-only starved the
