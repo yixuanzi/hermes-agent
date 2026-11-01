@@ -50,9 +50,13 @@ BYPASS_MODE = "bypassPermissions"
 TURN_IDLE_TIMEOUT = 1800.0
 # session/cancel 之后等回合收尾的时间
 CANCEL_GRACE = 30.0
-# 投影进 Hermes 历史（state.db）的单个工具结果上限；完整上下文在 Claude Code 自己的会话里
-_HISTORY_RESULT_LIMIT = 8000
+# 投影进 Hermes 历史（state.db）的单个工具结果上限；完整上下文在 Claude Code 自己的会话里。
+# 可经 config.yaml 的 bridge.claude_history_result_limit 覆盖（默认 4000）。
+_HISTORY_RESULT_LIMIT = 4000
 _PROGRESS_RESULT_LIMIT = 4000
+# 投影进 Hermes 历史的单个工具参数（tool 输入）JSON 上限；同样可经
+# bridge.claude_args_limit 覆盖。原始参数在 Claude Code 自己的会话里完整保留。
+_HISTORY_ARGS_LIMIT = 1500
 
 _STOP_REASON_LABELS = {
     "max_tokens": "输出达到 token 上限",
@@ -60,6 +64,41 @@ _STOP_REASON_LABELS = {
     "refusal": "模型拒绝继续",
 }
 _AUTH_HINT = "Claude Code 未登录或登录已失效：在终端运行 `claude` 并执行 /login 后重试"
+
+
+def _bridge_limits() -> tuple[int, int]:
+    """从 config.yaml 的 bridge 段读取投影上限，缺省用模块默认值。
+
+    bridge.claude_history_result_limit — 工具结果上限（默认 4000）
+    bridge.claude_args_limit           — 工具参数 JSON 上限（默认 1500）
+    """
+    history = _HISTORY_RESULT_LIMIT
+    args = _HISTORY_ARGS_LIMIT
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        bridge = cfg.get("bridge") or {}
+        raw_h = bridge.get("claude_history_result_limit")
+        if isinstance(raw_h, int) and raw_h > 0:
+            history = raw_h
+        raw_a = bridge.get("claude_args_limit")
+        if isinstance(raw_a, int) and raw_a > 0:
+            args = raw_a
+    except Exception:
+        pass
+    return history, args
+
+
+def _clip_args(args: dict, limit: int) -> dict:
+    """裁剪工具参数：逐字段截断长字符串值，保留键名与结构（检索友好）。"""
+    out: dict[str, Any] = {}
+    for k, v in args.items():
+        if isinstance(v, str) and len(v) > limit:
+            out[k] = v[:limit] + f"…[clipped {len(v) - limit} chars]"
+        else:
+            out[k] = v
+    return out
 
 
 class ClaudeAcpError(RuntimeError):
@@ -488,6 +527,7 @@ class _TurnProjector:
         entry["done"] = True
         self._close_text()
         call_id = call_id_for(tool_call_id)
+        history_limit, args_limit = _bridge_limits()
         assistant: dict[str, Any] = {
             "role": "assistant",
             "content": None,
@@ -496,7 +536,7 @@ class _TurnProjector:
                 "type": "function",
                 "function": {
                     "name": entry["name"],
-                    "arguments": json.dumps(entry["args"], ensure_ascii=False, sort_keys=True),
+                    "arguments": json.dumps(_clip_args(entry["args"], args_limit), ensure_ascii=False, sort_keys=True),
                 },
             }],
         }
@@ -504,8 +544,8 @@ class _TurnProjector:
         result = tool_result_text(update)
         if status == "failed" and not result.startswith("[error]"):
             result = f"[error] {result}"
-        if len(result) > _HISTORY_RESULT_LIMIT:
-            result = result[:_HISTORY_RESULT_LIMIT] + f"\n…[truncated {len(result) - _HISTORY_RESULT_LIMIT} chars]"
+        if len(result) > history_limit:
+            result = result[:history_limit] + f"\n…[truncated {len(result) - history_limit} chars]"
         self.messages += [assistant, {"role": "tool", "tool_call_id": call_id, "content": result}]
         self.tool_iterations += 1
 

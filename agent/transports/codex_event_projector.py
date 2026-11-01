@@ -34,6 +34,56 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 
+def _bridge_int(key: str, default: int) -> int:
+    """Read an int limit from config.yaml's ``bridge`` section.
+
+    Falls back to the module default when config is unavailable or the key
+    is absent/invalid — projection must never fail on config problems.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        bridge = (load_config() or {}).get("bridge") or {}
+        raw = bridge.get(key)
+        if isinstance(raw, int) and raw > 0:
+            return raw
+    except Exception:
+        pass
+    return default
+
+
+# Projected command-output budget (chars). The full output stays in Codex's
+# own session; Hermes' transcript keeps head+tail so errors (usually at the
+# end) and the command's opening lines survive for search/summarization.
+_COMMAND_HEAD_CHARS = _bridge_int("codex_command_head_chars", 2000)
+_COMMAND_TAIL_CHARS = _bridge_int("codex_command_tail_chars", 1000)
+# Projected tool-input JSON budget per field (string values are clipped).
+_ARGS_FIELD_CHARS = _bridge_int("codex_args_field_chars", 1500)
+
+
+def _clip_output_head_tail(text: str, head: int, tail: int) -> str:
+    """Keep head+tail of a command output, marking the elided middle."""
+    if len(text) <= head + tail:
+        return text
+    elided = len(text) - head - tail
+    return (
+        text[:head]
+        + f"\n…[elided {elided} chars]\n"
+        + text[-tail:]
+    )
+
+
+def _clip_args_fields(args: dict, limit: int) -> dict:
+    """Clip long string values in a tool-input dict, preserving keys/shape."""
+    out: dict[str, Any] = {}
+    for k, v in args.items():
+        if isinstance(v, str) and len(v) > limit:
+            out[k] = v[:limit] + f"…[clipped {len(v) - limit} chars]"
+        else:
+            out[k] = v
+    return out
+
+
 def _deterministic_call_id(item_type: str, item_id: str) -> str:
     """Stable id for tool_call message correlation.
 
@@ -145,6 +195,7 @@ class CodexEventProjector:
             "command": item.get("command") or "",
             "cwd": item.get("cwd") or "",
         }
+        args = _clip_args_fields(args, _ARGS_FIELD_CHARS)
         assistant_msg = {
             "role": "assistant",
             "content": None,
@@ -163,6 +214,7 @@ class CodexEventProjector:
             assistant_msg["reasoning"] = "\n".join(self._pending_reasoning)
             self._pending_reasoning = []
         output = item.get("aggregatedOutput") or ""
+        output = _clip_output_head_tail(output, _COMMAND_HEAD_CHARS, _COMMAND_TAIL_CHARS)
         exit_code = item.get("exitCode")
         if exit_code is not None and exit_code != 0:
             output = f"[exit {exit_code}]\n{output}"
@@ -223,6 +275,7 @@ class CodexEventProjector:
         args = item.get("arguments") or {}
         if not isinstance(args, dict):
             args = {"arguments": args}
+        args = _clip_args_fields(args, _ARGS_FIELD_CHARS)
         assistant_msg = {
             "role": "assistant",
             "content": None,
@@ -265,6 +318,7 @@ class CodexEventProjector:
         args = item.get("arguments") or {}
         if not isinstance(args, dict):
             args = {"arguments": args}
+        args = _clip_args_fields(args, _ARGS_FIELD_CHARS)
         assistant_msg = {
             "role": "assistant",
             "content": None,
