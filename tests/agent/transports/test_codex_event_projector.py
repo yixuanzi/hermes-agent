@@ -115,37 +115,61 @@ class TestAgentMessageProjection:
         assert r.messages == [{"role": "assistant", "content": "hi there"}]
         assert r.is_tool_iteration is False
 
-    def test_pending_reasoning_attaches_to_next_assistant_message(self) -> None:
+    def test_reasoning_not_projected_by_default(self) -> None:
         p = CodexEventProjector()
-        # First a reasoning item lands
         r1 = p.project({
             "method": "item/completed",
             "params": {"item": {"type": "reasoning", "id": "r1",
                                 "summary": ["thinking..."],
                                 "content": ["step 1", "step 2"]}},
         })
-        assert r1.messages == []  # reasoning alone produces no message
-        # Then the assistant message
+        assert r1.messages == []
         r2 = p.project({
             "method": "item/completed",
             "params": {"item": {"type": "agentMessage", "id": "a1",
                                 "text": "ok"}},
         })
         assistant = r2.messages[0]
-        assert "reasoning" in assistant
-        assert "thinking" in assistant["reasoning"]
-        assert "step 1" in assistant["reasoning"]
+        assert "reasoning" not in assistant
+        assert assistant["content"] == "ok"
+
+    def test_pending_reasoning_attaches_to_next_assistant_message(self) -> None:
+        import agent.transports.codex_event_projector as _m
+        from unittest.mock import patch
+        with patch.object(_m, "_PROJECT_REASONING", True):
+            p = CodexEventProjector()
+        # First a reasoning item lands
+            r1 = p.project({
+                "method": "item/completed",
+                "params": {"item": {"type": "reasoning", "id": "r1",
+                                    "summary": ["thinking..."],
+                                    "content": ["step 1", "step 2"]}},
+            })
+            assert r1.messages == []  # reasoning alone produces no message
+            # Then the assistant message
+            r2 = p.project({
+                "method": "item/completed",
+                "params": {"item": {"type": "agentMessage", "id": "a1",
+                                    "text": "ok"}},
+            })
+            assistant = r2.messages[0]
+            assert "reasoning" in assistant
+            assert "thinking" in assistant["reasoning"]
+            assert "step 1" in assistant["reasoning"]
 
     def test_reasoning_consumed_after_attaching(self) -> None:
-        p = CodexEventProjector()
-        p.project({"method": "item/completed", "params": {"item": {
-            "type": "reasoning", "id": "r1", "summary": ["once"], "content": []}}})
-        first = p.project({"method": "item/completed", "params": {"item": {
-            "type": "agentMessage", "id": "a", "text": "first"}}}).messages[0]
-        second = p.project({"method": "item/completed", "params": {"item": {
-            "type": "agentMessage", "id": "b", "text": "second"}}}).messages[0]
-        assert "reasoning" in first
-        assert "reasoning" not in second
+        import agent.transports.codex_event_projector as _m
+        from unittest.mock import patch
+        with patch.object(_m, "_PROJECT_REASONING", True):
+            p = CodexEventProjector()
+            p.project({"method": "item/completed", "params": {"item": {
+                "type": "reasoning", "id": "r1", "summary": ["once"], "content": []}}})
+            first = p.project({"method": "item/completed", "params": {"item": {
+                "type": "agentMessage", "id": "a", "text": "first"}}}).messages[0]
+            second = p.project({"method": "item/completed", "params": {"item": {
+                "type": "agentMessage", "id": "b", "text": "second"}}}).messages[0]
+            assert "reasoning" in first
+            assert "reasoning" not in second
 
 
 class TestFileChangeProjection:

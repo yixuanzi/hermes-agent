@@ -91,8 +91,9 @@ def test_tool_turn_streams_projects_and_asks_hermes_approval(tmp_path, fake_acp)
     assert turn.final_text == "All done."
     assert turn.thread_id == "new-session"
     assert turn.tool_iterations == 1
+    # reasoning 默认不回灌（bridge.claude_project_reasoning: false）
     assert turn.projected_messages == [
-        {"role": "assistant", "content": "Checking.", "reasoning": "plan it"},
+        {"role": "assistant", "content": "Checking."},
         {"role": "assistant", "content": None, "tool_calls": [{
             "id": "claude_t1", "type": "function",
             "function": {"name": "Bash", "arguments": '{"command": "echo hi"}'},

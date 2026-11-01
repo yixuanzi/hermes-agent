@@ -101,6 +101,22 @@ def _clip_args(args: dict, limit: int) -> dict:
     return out
 
 
+def _project_reasoning_enabled() -> bool:
+    """Whether Claude Code's thinking is projected into Hermes history.
+
+    Default False: reasoning is bulky, rarely useful for search/summarize,
+    and always intact in Claude Code's own session. Opt back in via
+    bridge.claude_project_reasoning: true.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        bridge = (load_config() or {}).get("bridge") or {}
+        return str(bridge.get("claude_project_reasoning", False)).lower() in {"true", "1", "yes"}
+    except Exception:
+        return False
+
+
 class ClaudeAcpError(RuntimeError):
     def __init__(self, message: str, *, code: Optional[int] = None, data: Any = None):
         super().__init__(message)
@@ -475,7 +491,8 @@ class _TurnProjector:
     """把一回合的 ACP 更新投影成 Hermes 标准消息（assistant / tool_calls / tool）。
 
     文本按 messageId 分段；工具在完成时落成一对 (assistant tool_call, tool result)；
-    思考内容挂到下一条 assistant 消息的 reasoning 上。与 CodexEventProjector 同一口径。
+    思考内容默认不回灌（bridge.claude_project_reasoning 可打开），打开时挂到下一条
+    assistant 消息的 reasoning 上。与 CodexEventProjector 同一口径。
     """
 
     def __init__(self) -> None:
@@ -559,7 +576,8 @@ class _TurnProjector:
 
     def _attach_reasoning(self, message: dict) -> None:
         if self._reasoning:
-            message["reasoning"] = "".join(self._reasoning)
+            if _project_reasoning_enabled():
+                message["reasoning"] = "".join(self._reasoning)
             self._reasoning = []
 
     def _close_text(self) -> None:

@@ -61,6 +61,26 @@ _COMMAND_TAIL_CHARS = _bridge_int("codex_command_tail_chars", 1000)
 _ARGS_FIELD_CHARS = _bridge_int("codex_args_field_chars", 1500)
 
 
+def _bridge_lookup(key: str, default):
+    """Read any-typed value from config.yaml's ``bridge`` section."""
+    try:
+        from hermes_cli.config import load_config
+
+        bridge = (load_config() or {}).get("bridge") or {}
+        raw = bridge.get(key)
+        return default if raw is None else raw
+    except Exception:
+        return default
+
+
+# Whether the backend's AI reasoning/thinking is projected into Hermes
+# history at all. Default False: reasoning is bulky, rarely useful for
+# search/summarization, and always intact in the backend's own session.
+_PROJECT_REASONING = str(
+    _bridge_lookup("codex_project_reasoning", False)
+).lower() in {"true", "1", "yes"}
+
+
 def _clip_output_head_tail(text: str, head: int, tail: int) -> str:
     """Keep head+tail of a command output, marking the elided middle."""
     if len(text) <= head + tail:
@@ -170,7 +190,8 @@ class CodexEventProjector:
         text = item.get("text") or ""
         msg: dict[str, Any] = {"role": "assistant", "content": text}
         if self._pending_reasoning:
-            msg["reasoning"] = "\n".join(self._pending_reasoning)
+            if _PROJECT_REASONING:
+                msg["reasoning"] = "\n".join(self._pending_reasoning)
             self._pending_reasoning = []
         return ProjectionResult(messages=[msg], final_text=text)
 
@@ -211,7 +232,8 @@ class CodexEventProjector:
             ],
         }
         if self._pending_reasoning:
-            assistant_msg["reasoning"] = "\n".join(self._pending_reasoning)
+            if _PROJECT_REASONING:
+                assistant_msg["reasoning"] = "\n".join(self._pending_reasoning)
             self._pending_reasoning = []
         output = item.get("aggregatedOutput") or ""
         output = _clip_output_head_tail(output, _COMMAND_HEAD_CHARS, _COMMAND_TAIL_CHARS)
@@ -253,7 +275,8 @@ class CodexEventProjector:
             ],
         }
         if self._pending_reasoning:
-            assistant_msg["reasoning"] = "\n".join(self._pending_reasoning)
+            if _PROJECT_REASONING:
+                assistant_msg["reasoning"] = "\n".join(self._pending_reasoning)
             self._pending_reasoning = []
         status = item.get("status") or "unknown"
         n = len(changes_summary)
@@ -291,7 +314,8 @@ class CodexEventProjector:
             ],
         }
         if self._pending_reasoning:
-            assistant_msg["reasoning"] = "\n".join(self._pending_reasoning)
+            if _PROJECT_REASONING:
+                assistant_msg["reasoning"] = "\n".join(self._pending_reasoning)
             self._pending_reasoning = []
         result = item.get("result")
         error = item.get("error")
@@ -334,7 +358,8 @@ class CodexEventProjector:
             ],
         }
         if self._pending_reasoning:
-            assistant_msg["reasoning"] = "\n".join(self._pending_reasoning)
+            if _PROJECT_REASONING:
+                assistant_msg["reasoning"] = "\n".join(self._pending_reasoning)
             self._pending_reasoning = []
         content_items = item.get("contentItems") or []
         if isinstance(content_items, list) and content_items:
