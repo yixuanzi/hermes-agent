@@ -455,8 +455,9 @@ def _apply_continuity(
 
 def _validate_context_from_refs(refs: list[Any]) -> Optional[str]:
     """Error string if any non-"self" ref names a missing job ("self" resolves to the job's
-    own id at run time, so it can't be checked — the job doesn't exist yet at create)."""
-    from cron.jobs import get_job as _get_job
+    own id at run time, so it can't be checked — the job doesn't exist yet at create). Another
+    user's job reads as missing: context_from must not reach output the caller cannot see."""
+    from tools.cronjob_visibility import get_visible_job as _get_job
     for ref_id in refs:
         if isinstance(ref_id, str) and ref_id.strip().lower() == "self":
             continue

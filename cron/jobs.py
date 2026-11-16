@@ -42,7 +42,7 @@ from cron.jobs_normalize import (
 )
 from cron import jobs_time
 from cron.scheduler_ownership import _claim_owner_is_dead
-from cron import extra_fire, jobs_error_text, store_health
+from cron import extra_fire, jobs_error_text, jobs_identify, store_health
 from typing import Optional, Dict, List, Any, Callable, Set, Tuple, Union, Collection
 
 logger = logging.getLogger(__name__)
@@ -427,9 +427,9 @@ def fire_claim_fence(job_id: str, *, expected_owner: str):
         yield owns_claim
 
 
-# Fields that must never change after creation: ``id`` is a path component under OUTPUT_DIR, so an
-# update could leak ``../escape``/absolute/nested values into output writes/deletes.
-_IMMUTABLE_JOB_FIELDS = frozenset({"id"})
+# Fields that must never change after creation: ``id`` is a path component under OUTPUT_DIR, so an update
+# could leak ``../escape``/absolute/nested values; ``profile``/``profile_name`` are routing metadata.
+_IMMUTABLE_JOB_FIELDS = frozenset({"id", "profile", "profile_name"})
 
 
 def _job_output_dir(job_id: str) -> Path:
@@ -529,6 +529,7 @@ def _normalize_job_record(job: dict[str, Any]) -> dict[str, Any]:
     # Derived from the scheduler-honoured ``enabled`` flag so a half-paused record cannot render
     # "paused" while still firing. See effective_job_state().
     normalized["state"] = effective_job_state(normalized)
+    jobs_identify.apply_identify_field(normalized)
     return normalized
 
 
@@ -1732,6 +1733,7 @@ _CREATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     "grace_minutes": jobs_time.normalize_grace_minutes,
     "catch_up": _normalize_catch_up,
     "wrap_response": normalize_wrap_response,
+    "identify": jobs_identify.parse_job_identify,  # owning platform user; None = public job
 }
 _UPDATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     # [] is an explicit zero-tool allowlist and must survive the update path as [] too (#82010).
@@ -1747,6 +1749,7 @@ _UPDATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     "grace_minutes": jobs_time.normalize_grace_minutes,
     "catch_up": _normalize_catch_up,
     "wrap_response": normalize_wrap_response,
+    "identify": jobs_identify.parse_job_identify,
 }
 
 
@@ -1802,6 +1805,7 @@ def create_job(
     timezone: Optional[str] = None,
     grace_minutes: Optional[int] = None,
     wrap_response: Optional[bool] = None,
+    identify: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Create a new cron job and return the stored record.
 
@@ -1905,7 +1909,7 @@ def create_job(
         ("attach_to_session", normalized_attach), ("reasoning_effort", normalized_reasoning_effort),
         ("failure_deliver", f["failure_deliver"]), ("interpreter", f["interpreter"]),
         ("timezone", f["timezone"]), ("grace_minutes", f["grace_minutes"]),
-        ("catch_up", f["catch_up"]), ("wrap_response", f["wrap_response"]),
+        ("catch_up", f["catch_up"]), ("wrap_response", f["wrap_response"]), ("identify", f["identify"]),
     ):
         if value is not None:
             job[key] = value

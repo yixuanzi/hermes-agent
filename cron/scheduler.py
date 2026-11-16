@@ -527,7 +527,7 @@ from cron.jobs import (
     _ensure_cron_dir, advance_next_runs, claim_dispatch, claim_job_for_fire, fire_claim_fence,
     clear_run_claim, get_due_jobs, heartbeat_fire_claim, heartbeat_run_claim, mark_job_run,
     save_job_output, self_removal_delivery_allowed, self_removal_delivery_scope, use_cron_store)
-from cron import store_health
+from cron import jobs_identify, store_health
 from cron.execution_identity import enter_cron_execution, exit_cron_execution
 from cron.executions import (
     FIRER_FINISHED_STATES, _TERMINAL_STATES, HANDOFF_ADOPTION_GRACE_SECONDS, create_execution, finish_execution,
@@ -2479,7 +2479,7 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
 def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup, *, workdir, session_id, session_db):
     runtime = setup.runtime
     pr = _cfg.get("provider_routing") or {}
-    return AIAgent(
+    return jobs_identify.as_job_owner(job, AIAgent(
         model=setup.model,
         api_key=runtime.get("api_key"),
         base_url=runtime.get("base_url"),
@@ -2510,7 +2510,7 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
         platform="cron",
         session_id=session_id,
         session_db=session_db,
-    )
+    ))
 
 
 class _FireAudit:
@@ -2537,6 +2537,7 @@ class _FireAudit:
 
 
 
+@jobs_identify.runs_as_job_owner
 def run_job(
     job: dict, *, defer_agent_teardown: Optional[list] = None, extra_prompt: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None, execution_id: Optional[str] = None,

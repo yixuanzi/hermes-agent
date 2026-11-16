@@ -43,6 +43,7 @@ from cron.jobs import (
     trigger_job,
     update_job)
 from tools.cronjob_prompt_scan import _scan_cron_prompt
+from tools.cronjob_visibility import caller_identify, resolve_visible_job_ref, visible_jobs
 from tools.cronjob_job_args import (
     _apply_continuity,
     _canonical_skills,
@@ -736,6 +737,7 @@ def _action_create(a: dict[str, Any]) -> str:
             pinned=bool(a["pinned"]),
             failure_deliver=_resolve_cron_context_deliver(_normalize_deliver_param(a["failure_deliver"])),
             catch_up=a["catch_up"], wrap_response=_wrap_response_override(a["wrap_response"]),
+            identify=caller_identify(),  # owned by the creating platform user; None = public
             **({"paused": a["paused"], "paused_reason": a["paused_reason"]}
                if a["paused"] is not False or a["paused_reason"] is not None else {}))
     except CronSchedulerRegistrationError as exc:
@@ -756,7 +758,7 @@ def _action_create(a: dict[str, Any]) -> str:
 
 
 def _action_list(a: dict[str, Any]) -> str:
-    jobs = [_format_job(job) for job in list_jobs(include_disabled=a["include_disabled"])]
+    jobs = [_format_job(job) for job in visible_jobs(list_jobs(include_disabled=a["include_disabled"]))]
     _result = {"success": True, "count": len(jobs), "jobs": jobs}
     # Same inert-job class as create; an empty list has nothing inert.
     if jobs:
@@ -1041,9 +1043,9 @@ _JOB_ACTIONS = {
 
 
 def _resolve_job_or_error(job_id: str):
-    """``(job, None)`` or ``(None, json_error)`` for a job_id/name reference."""
+    """``(job, None)`` or ``(None, json_error)`` for a job_id/name reference the caller may see."""
     try:
-        job = resolve_job_ref(job_id)
+        job = resolve_visible_job_ref(job_id, resolve_job_ref)
     except AmbiguousJobReference as exc:
         return None, _dumps({
             "success": False,

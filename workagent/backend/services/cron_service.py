@@ -193,7 +193,7 @@ def _normalize_raw_identify(value: Any) -> dict[str, str] | None:
     if not isinstance(value, dict):
         raise HTTPException(status_code=400, detail="identify must be an object or null")
 
-    from cron.jobs import build_job_identify, parse_job_identify
+    from cron.jobs_identify import build_job_identify, parse_job_identify
 
     normalized = build_job_identify(
         value.get("platform"),

@@ -8,7 +8,7 @@
       * job 带 identify 字段 → 调用者 (platform, user_id) 必须与
         identify 严格相等才返回 prompt；否则拒绝且不回显任何 prompt 片段。
       * job 无 identify 字段 → 视为无主任务，直接返回。
-  - 复用 cron.jobs 现成的 resolve_job_ref / parse_job_identify /
+  - 复用 cron.jobs 的 resolve_job_ref 与 cron.jobs_identify 的 parse_job_identify /
     is_job_visible_to_identity，与 cronjob 工具的可见性语义保持一致。
 """
 
@@ -20,12 +20,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from cron.jobs import (
-    AmbiguousJobReference,
-    is_job_visible_to_identity,
-    parse_job_identify,
-    resolve_job_ref,
-)
+from cron.jobs import AmbiguousJobReference, resolve_job_ref
+from cron.jobs_identify import is_job_visible_to_identity, parse_job_identify
 
 
 def _current_identity():
