@@ -51,7 +51,7 @@ def _read_store_unlocked() -> dict[str, dict[str, str]]:
     if not path.exists():
         return {}
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
         logger.warning("Could not read user env store %s: %s", path, exc)
         return {}

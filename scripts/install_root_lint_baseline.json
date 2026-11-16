@@ -1,5 +1,7 @@
 {
   "root_from_file": {
+    "aegis/backend/main.py": 1,
+    "aisoc/backend/main.py": 1,
     "cron/scheduler.py": 1,
     "gateway/platforms/base.py": 1,
     "hermes_bootstrap.py": 2,
@@ -22,9 +24,12 @@
     "pm/paths.py": 1,
     "pm/worker.py": 1,
     "tools/bot_mode_dm.py": 1,
-    "tools/environments/local.py": 1
+    "tools/environments/local.py": 1,
+    "workagent/backend/main.py": 1
   },
   "module_sys_path": {
+    "aegis/backend/main.py": 1,
+    "aisoc/backend/main.py": 1,
     "cron/scheduler.py": 1,
     "gateway/platforms/base.py": 1,
     "hermes_cli/cron.py": 1,
@@ -32,7 +37,8 @@
     "hermes_cli/web_server.py": 1,
     "plugins/platforms/raft/adapter.py": 1,
     "plugins/platforms/slack/adapter.py": 1,
-    "pm/launch.py": 1
+    "pm/launch.py": 1,
+    "workagent/backend/main.py": 1
   },
   "reasons": {
     "cron/scheduler.py": "sys.path bootstrap before the first Hermes import (group C, part 2b)",

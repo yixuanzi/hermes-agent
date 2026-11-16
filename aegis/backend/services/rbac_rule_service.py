@@ -37,10 +37,11 @@ def resolve_rbac_rules_path() -> Path:
     if path.is_absolute():
         return path
 
-    # This file lives at <hermes-root>/aegis/backend/services/..., so relative
-    # RBAC paths are stable even when Aegis changes cwd to HERMES_HOME.
-    hermes_root = Path(__file__).resolve().parents[3]
-    return hermes_root / path
+    # Relative RBAC paths resolve against the install root, so they stay stable even when
+    # Aegis changes cwd to HERMES_HOME.
+    from hermes_cli._startup_fast import project_root_str
+
+    return Path(project_root_str()) / path
 
 
 class RbacRuleService:

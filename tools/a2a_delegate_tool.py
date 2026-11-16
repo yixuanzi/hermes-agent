@@ -202,7 +202,7 @@ def _refresh_a2a_registry() -> tuple[list[dict[str, Any]], list[dict[str, str]],
         A2A_REGISTRY.clear()
         return [], [], f"A2A registry not found: {path}"
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
         A2A_REGISTRY.clear()
         return [], [], f"Could not read A2A registry {path}: {exc}"

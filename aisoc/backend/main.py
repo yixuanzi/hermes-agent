@@ -15,10 +15,11 @@ import shutil
 import subprocess
 import sys
 
+from hermes_cli._startup_fast import project_root_str
 from hermes_constants import find_node_executable
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(project_root_str())
 AISOC_FRONTEND_DIR = REPO_ROOT / "aisoc" / "frontend"
 AISOC_DIST_DIR = REPO_ROOT / "aisoc" / "backend" / "web_dist"
 
