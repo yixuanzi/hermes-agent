@@ -66,43 +66,51 @@ Intent: Read the optional `steer_path` and expose `schedule_steer(text)`, which 
 Feature: Stopping a delegation.
 Intent: The active-delegate cancel handle stops a delegation in either state: a running turn gets an A2A `cancel_task` for that turn's task; a loop idle between turns closes its input adapter instead, and returns the interrupted payload rather than waiting out the 25-minute input timeout. `has_live_task` reports either case. `cancel_active_a2a_delegate(parent_agent)` gives callers that hold only the agent (the gateway `/stop` path) the same stop; it ignores non-delegation handles and never raises.
 
+Feature: Agent-loop dispatch entry.
+Intent: `dispatch_for_agent(agent, args)` is the one call site `AIAgent._dispatch_a2a_delegate` forwards to, so the sequential, concurrent and helper paths all hand the delegate the same parent agent and the gateway-bound `_delegate_ext_output_adapter` / `_delegate_ext_input_factory`.
+
 ## File: `toolsets.py`
 
-Feature: Toolset catalog.
-Intent: Expose `userenv` and A2A tools behind explicit toolsets so users opt in without adding schema cost to every session.
+Feature: Opt-in `userenv` and `aegis_a2a` toolsets.
+Intent: Expose the user-env tool and the Aegis A2A tools behind explicit toolsets so users opt in without adding schema cost to every session. The `aegis_` names keep them apart from upstream's `a2a` platform-plugin toolset, whose `a2a_list` the fork's tool used to shadow.
 
 ## File: `hermes_cli/tools_config.py`
 
 Feature: Configurable user environment and A2A toolsets.
-Intent: Surface `userenv` and `aegis_a2a` in the standard `hermes tools` flow, disabled by default until enabled per platform, without changing AISOC's dedicated A2A runtime.
+Intent: Surface `userenv` and `aegis_a2a` in the standard `hermes tools` flow, off by default until enabled per platform and never part of the core set, without changing AISOC's dedicated A2A runtime.
 
 ## File: `model_tools.py`
 
 Feature: Agent-loop tool ownership.
-Intent: Route `aegis_a2a_delegate` through the live `AIAgent`, like `delegate_task`, because it needs parent runtime state and adapter-bound foreground I/O.
+Intent: List `aegis_a2a_delegate` in `_AGENT_LOOP_TOOLS` so registry dispatch never runs it directly: like `delegate_task` it needs the live `AIAgent`'s runtime state and adapter-bound foreground I/O.
 
 ## File: `run_agent.py`
 
 Feature: Remote-only A2A delegate dispatch.
-Intent: Centralize `aegis_a2a_delegate` dispatch on `AIAgent` so sequential, concurrent and helper execution paths all receive the same parent agent, output adapter and input factory.
+Intent: `AIAgent._dispatch_a2a_delegate` is a one-line forward to `tools.a2a_delegate_tool.dispatch_for_agent`, so the facade stays thin while sequential, concurrent and helper execution share one dispatch.
 
 ## File: `agent/tool_executor.py`
 
-Feature: Tool execution identity binding.
-Intent: Bind per-user env identity around sequential and concurrent tool execution (including the default sequential registry path) so terminal and runtime tools still see the calling platform user when cron clears `HERMES_SESSION_*` or execution crosses thread boundaries.
+Feature: Tool-execution identity binding.
+Intent: Every tool call reaches its executor through `_dispatch_authorized_once`, which binds the agent's platform user (`call_as_agent_user`) for the call. One binding point covers the sequential, concurrent and helper paths, so terminal and runtime tools see the calling user even when cron cleared `HERMES_SESSION_*` or execution crossed threads.
 
-Feature: A2A delegate execution.
-Intent: Run `aegis_a2a_delegate` through an agent-loop branch with concise spinner handling instead of the generic registry handler.
+Feature: A2A delegate sequential handling.
+Intent: `aegis_a2a_delegate` spins in quiet mode, stops the spinner on failure, and is exempt from the sequential deadline like `delegate_task`, because a foreground loop blocks by design.
 
 ## File: `agent/agent_runtime_helpers.py`
 
 Feature: Agent-owned tool dispatch.
-Intent: Treat `aegis_a2a_delegate` as agent-owned and wrap runtime helper execution in the same user env identity binding as the main executor.
+Intent: Count `aegis_a2a_delegate` with `delegate_task` among the agent-owned tools so helper execution routes it to the agent instead of the registry stub. Identity binding lives in `agent/tool_executor.py`'s single dispatch entry, so this helper no longer wraps it.
+
+## File: `agent/inline_tool_executors.py`
+
+Feature: Inline executor for the A2A delegate.
+Intent: One `aegis_a2a_delegate` entry routes both the sequential and concurrent paths to `agent._dispatch_a2a_delegate`.
 
 ## File: `agent/display.py`
 
 Feature: Tool progress display.
-Intent: Show `aegis_a2a_delegate` with a compact goal preview so foreground delegation stays legible.
+Intent: Preview `aegis_a2a_delegate` by its goal and give it a compact 🤝 row that reuses the localized `delegate` verb, so foreground delegation stays legible without new locale keys.
 
 ## File: `plugins/platforms/slack/adapter.py`
 
@@ -268,6 +276,9 @@ Intent: Store user runtime env values in `$HERMES_HOME/users.env.json` keyed by 
 Feature: Runtime user env identity.
 Intent: Carry platform/user identity through ContextVars and thread propagation, with a stable local runtime scope key that isolates terminal environments by platform and user ID.
 
+Feature: `call_as_agent_user`.
+Intent: The one helper `agent/tool_executor.py` uses to bind the agent's platform user around a tool call and always restore the previous binding.
+
 ## File: `tools/userenv_tool.py`
 
 Feature: User-scoped env management tool.
@@ -275,53 +286,93 @@ Intent: Let authenticated runtime users list, set and delete only their own env 
 
 ## File: `tools/environments/local.py`
 
-Feature: Local subprocess env overlay.
-Intent: Overlay the current user's persisted env into reusable local shells and one-shot spawns without mutating process-global `os.environ`.
+Feature: Per-spawn user env overlay.
+Intent: `_scrubbed_env`, which every background spawn and the local run env pass through, adds the bound user's persisted env per spawn and never writes `os.environ`. A store that cannot be read degrades to no overlay.
 
 ## File: `tools/environments/base.py`
 
 Feature: Local shell snapshot hygiene.
-Intent: Export user env values only for the active command and unset them before saving the reusable shell snapshot, so secrets do not persist across users or after deletion.
+Intent: The command wrapper exports the user's values only for the active command and unsets them before the bootstrap and every snapshot re-dump (with `tools/environments/base_session_env.py`), so secrets never persist across commands, users, or after deletion.
+
+## File: `tools/environments/base_session_env.py`
+
+Feature: User env kept out of snapshots.
+Intent: Unset the bound user's exported values before the session bootstrap and every snapshot re-dump, so the reusable shell snapshot never carries one user's secrets into another command or user.
 
 ## File: `tools/terminal_tool.py`
 
 Feature: Local terminal environment cache isolation.
-Intent: Key the local backend cache as `local::{platform}::{user_id}` when a runtime identity is bound, isolating messaging users while letting user-name changes reuse the same environment.
+Intent: `_env_cache_key` keys the local backend as `local::{platform}::{user_id}` when a runtime identity is bound, so messaging users never share a shell while a user whose display name changes keeps theirs.
 
 ## File: `tools/delegate_tool.py`
 
 Feature: Delegate subagent user env inheritance.
-Intent: Carry the parent's user identity into classic `delegate_task` children so user-scoped env behaves the same for main agents and subagents.
+Intent: Classic `delegate_task` children get the parent's `user_id` / `user_name` and its env platform, so user-scoped env behaves the same for main agents and subagents.
 
 ## File: `cron/jobs.py`
 
 Feature: Cron job identity ownership metadata.
-Intent: Add normalized `identify` ownership records; legacy `identify=None` jobs stay visible public jobs, malformed identify data is non-public; `id`, `profile` and `profile_name` stay immutable while `identify` can be corrected through raw job updates.
+Intent: `identify` is validated on create and update (helpers in `cron/jobs_identify.py`) and persisted only when set, so public jobs keep their stored shape. A malformed owner is flagged on read and never treated as public; `id`, `profile` and `profile_name` stay immutable and `update_job` still rejects them.
+
+## File: `cron/jobs_identify.py`
+
+Feature: Cron ownership helpers.
+Intent: `build_job_identify`, `parse_job_identify` and `is_job_visible_to_identity` are the one definition of a job owner record and its visibility (legacy jobs without `identify` stay public; malformed records are non-public), shared by the cron tools, the scheduler, the AISOC/Workagent cron services and ext-tools `/cron_prompt`.
 
 ## File: `tools/cronjob_tools.py`
 
 Feature: User-visible cron job filtering.
-Intent: Scope cron create/list/update/pause/resume/remove/run/context references to the current runtime user plus legacy public jobs, so one messaging user cannot operate another's jobs.
+Intent: Create records the caller as owner; list, every job action and `context_from` see only the caller's and public jobs (`tools/cronjob_visibility.py`), so one messaging user cannot operate another's jobs. A name matching several jobs is resolved among the caller's own jobs only, so the ambiguity error never lists another user's job IDs. Webhook triggers stay unfiltered.
+
+## File: `tools/cronjob_visibility.py`
+
+Feature: Caller-scoped cron job lookup.
+Intent: `caller_identity`, `visible_jobs`, `get_visible_job` and `resolve_visible_job_ref` apply the current runtime user's visibility to cron job reads in one place, so every cron tool action filters identically.
+
+## File: `tools/cronjob_job_args.py`
+
+Feature: Owner recorded on job creation.
+Intent: New jobs created through the cron tool carry the caller's `identify`, never one taken from model-supplied arguments.
 
 ## File: `cron/scheduler.py`
 
-Feature: Cron runtime user identity restoration.
-Intent: Restore platform/user identity from `identify` across cron agent runs, prompt prerun scripts and `no_agent` script execution, so scheduled jobs apply the owner's env without gateway session vars; fail malformed identify records explicitly instead of treating them as public, and keep the legacy one-argument script-runner call for public jobs.
+Feature: Cron runs act as the job owner.
+Intent: `run_job` binds the job's owner for the whole fire through a decorator and always undoes it; the cron agent carries the owner as `_user_env_platform` / user while staying `platform="cron"`, which v0.4 checks for cron behaviour such as approvals. A malformed owner fails that run explicitly instead of running as public.
 
-## File: `tools/lazy_deps.py`
+## File: `cron/scheduler_prompt.py`
 
-Feature: Lazy A2A SDK dependency.
-Intent: Register `a2a-sdk[fastapi]==1.1.0` as an opt-in lazy dependency so A2A client and FastAPI server surfaces load on demand without expanding the core install.
+Feature: Prompt prerun scripts run as the owner.
+Intent: Direct `_build_job_prompt` calls bind the job owner around prerun scripts too, so a script reads the owner's env even outside a full `run_job` fire.
+
+## File: `cron/monitor.py`
+
+Feature: Monitor scripts run as the owner.
+Intent: Monitor and `no_agent` scripts bind the job owner like agent runs; a malformed owner fails only that monitor run, never the scheduler tick.
+
+## File: `cron/scheduler_delivery.py`
+
+Feature: Feishu topic delivery for cron output.
+Intent: An explicit Feishu target on the origin chat inherits the origin topic, like Slack threads; the lost-thread warning fires only for the origin chat, and only dict responses are read for `thread_fallback`, so an SDK response object cannot crash bookkeeping and cause a duplicate send.
 
 ## File: `hermes_cli/main.py`
 
-Feature: AISOC and Aegis builtin CLI dispatch.
-Intent: Recognize `hermes aisoc` and `hermes aegis` without plugin discovery, register their product-owned parsers, and forward the parsed namespace to each backend, keeping product startup and security policy outside Hermes core.
+Feature: AISOC, Aegis and Workagent builtin CLI dispatch.
+Intent: `main.py` only calls the builder in `hermes_cli/subcommands/products.py` and re-exports `cmd_aegis` / `cmd_aisoc` / `cmd_workagent`, listed as builtins so no plugin discovery is needed; product startup and security policy stay in each product's backend.
+
+## File: `hermes_cli/subcommands/products.py`
+
+Feature: `hermes aegis` / `hermes aisoc` / `hermes workagent`.
+Intent: Attach each product's own parser and delegate to its backend `cmd_*` with lazy imports, so the product CLIs ship without growing `hermes_cli/main.py` or relying on plugin discovery.
 
 ## File: `pyproject.toml`
 
-Feature: AISOC/Aegis package and A2A server dependency exposure.
-Intent: Ship the two product packages as importable distributions and keep the FastAPI portion of the A2A SDK behind the opt-in `a2a` extra, not the default install.
+Feature: Opt-in A2A SDK and fork app packaging.
+Intent: Keep `a2a-sdk[fastapi]` behind the opt-in `a2a` extra (out of `[all]`), pin the same version in the `test` group so the A2A suites run against the real SDK, and ship the aegis/aisoc/workagent packages through `packages.find`. `hermes_self_restart` needs no entry: v0.4's `setup.py` ships every root module.
+
+## File: `pm/extras.py`
+
+Feature: A2A extra anchor.
+Intent: Register `a2a.client` / `a2a.types` as the `a2a` extra's import anchor so PM can tell whether the opt-in SDK is installed (v0.4 replaced `tools/lazy_deps.py` registration).
 
 ## File: `scripts/a2a_smoke_test.py`
 
@@ -331,53 +382,60 @@ Intent: Exercise Agent Card discovery, single and multi-turn context reuse, poll
 ## File: `hermes_cli/config_defaults.py`
 
 Feature: Jev decision-layer configuration surface.
-Intent: Declare the `jev:` section (endpoint, decision model, feature flags, complexity scope, agent description, thresholds, per-band criteria, models and reasoning efforts, including effort-only bands and precedence) so it is discoverable in one place, with both features defaulting off. `TYPESAFE_API_KEY` (and `TYPESAFE_BASE_URL` for self-hosted/proxied gateways) are the only secrets, marked advanced; every other knob is a setting whose canonical home is config.yaml even though it is also readable from the environment.
+Intent: Expose the `jev:` section in `DEFAULT_CONFIG` and spread the Jev secrets into `OPTIONAL_ENV_VARS`, line-neutral: the definitions live in `hermes_cli/config_defaults_jev.py` so this over-cap file only wires them in.
+
+## File: `hermes_cli/config_defaults_jev.py`
+
+Feature: Jev `jev:` config section, secrets and env names.
+Intent: Declare the section `agent/jev_policy.py` reads (endpoint, decision model, feature flags, complexity scope, agent description, thresholds, per-band criteria, models and efforts; both features off by default), the `TYPESAFE_API_KEY` / `TYPESAFE_BASE_URL` setup entries (the only secrets, marked advanced) and the non-secret `TYPESAFE_MODEL` / `HERMES_JEV_*` names, in a sibling so the over-cap config files only wire it in.
 
 ## File: `hermes_cli/config.py`
 
 Feature: Jev environment-variable recognition.
-Intent: Keep `TYPESAFE_MODEL` / `HERMES_JEV_*` keys (including per-band model, provider, reasoning and criteria vars, but not the removed `HERMES_JEV_BUSINESS_SCOPE`, which reports as unknown) known to `.env` reload and doctor. They stay out of the global-env allowlist in `agent/secret_scope.py` so a multiplexing gateway can serve different agent descriptions and band models per profile.
+Intent: Union `JEV_ENV_KEYS` into `_EXTRA_ENV_KEYS` so `.env` reload and doctor know `TYPESAFE_*` / `HERMES_JEV_*` (the removed `HERMES_JEV_BUSINESS_SCOPE` still reports as unknown). They stay out of the global-env allowlist in `agent/secret_scope.py` so a multiplexing gateway can serve different agent descriptions and band models per profile.
 
 ## File: `agent/codex_runtime.py`
 
-Feature: Codex app-server commentary vs final-answer streaming.
-Intent: Hold a completed `agentMessage` until the next item of the same turn starts (delta, `item/started`, or a fast tool `item/completed`) — only then is it commentary and emitted, followed by a stream-segment reset and paragraph break — and drop it at the turn boundary (`turn/started`, `turn/completed`, a different turn id), because it was the final answer, which normal final-response delivery owns, matching the Hermes loop. `run_codex_app_server_turn` resets stream delivery tracking at every codex turn start. Otherwise the final answer reaches gateways twice and the streamed-text tracker carries the previous turn.
+Feature: Owner-attached codex sessions.
+Intent: `attach_codex_app_server_session(agent, session=None, *, cwd, thread_start_params, projection_limits)` lets a plugin backend (ext-tools `/codex`, `/claude`) create or re-bind its own thread across AIAgent rebuilds, with the approval hooks `_ensure_codex_session` builds. Hermes never retires an owner-attached session, never sends it Hermes' model, effort or tier, and never stores its thread id as the session's resumable `codex_thread_id`; Hermes' own session (by identity) keeps upstream behaviour.
 
-Feature: Reusable codex app-server session binding.
-Intent: `attach_codex_app_server_session(agent, session=None, cwd=None, thread_start_params=None)` builds the owner-bound hooks (approval callback from the calling thread, approval-bypass routing, event bridge) once and creates or re-binds a session on `agent._codex_session`. The lazy creation in `run_codex_app_server_turn` and session-level owners (the `/codex` plugin) both use it, so one codex thread can move onto a rebuilt AIAgent.
+Feature: Per-turn stream reset.
+Intent: Each codex turn resets stream-delivery tracking and the pending segment break first, as the loop does per API call, so an interrupted stream's text is never compared against the next turn's.
 
-Feature: Turn input de-duplication.
-Intent: codex echoes each `turn/start` input as a `userMessage` item. Hermes has already flushed that user turn, so `run_codex_app_server_turn` drops the first projected user message when it matches the turn input before splicing and persisting (otherwise history and state.db store it twice and replay it twice after switching back). Later user items such as mid-turn steer input are kept.
+Feature: Final-answer delivery and turn-input echo.
+Intent: Not ported from aegis_v0.3 because v0.4 covers both: the gateway suppresses the final send by exact delivered text (#74248 / #80519), and `run_turn` records `submitted_user_text` so persistence drops exactly the codex echo.
 
 ## File: `agent/transports/codex_app_server_session.py`
 
-Feature: Session state accessors and hook re-binding.
-Intent: Expose read-only `cwd`, `closed`, `turn_active`, `effective_policy` and `rebind(approval_callback, on_event, request_routing)` so an owner above one AIAgent can check reusability, close safely, and repoint callbacks to a new agent between turns without touching private state; the subprocess and thread are unaffected.
+Feature: Session owner surface.
+Intent: `thread_start_params` pins sandbox, approval policy and config per thread without editing `~/.codex/config.toml` (Hermes' cwd and personality still win). `effective_policy` records what codex actually applied from the `thread/start` or `thread/resume` response. Read-only `cwd`, `closed`, `turn_active`, `thread_start_params` and `rebind(...)` let an owner check reusability and move a thread to a new agent between turns without touching private state.
 
-Feature: Per-thread `thread/start` overrides and reported policy.
-Intent: `CodexAppServerSession(thread_start_params=...)` merges stable fields (`sandbox`, `approvalPolicy`, `config`) into the request (session cwd always authoritative) and exposes them read-only so an owner can tell whether a thread matches the requested sandbox — a sandbox choice without editing `~/.codex/config.toml`. Hermes sends no permissions itself (codex resolves them from its config and project trust), so `ensure_started()` records what codex reports in the `thread/start` response (permission profile, approval policy, sandbox, network access, writable roots, /tmp and $TMPDIR writability) as `effective_policy` and logs those real values; Hermes' `HERMES_TERMINAL_SECURITY_MODE` mapping is only the documented requested profile.
+## File: `agent/transports/codex_event_projector.py`
 
-## File: `agent/chat_completion_helpers.py`
-
-Feature: Fallback activation honors a named custom provider's declared `api_mode`.
-Intent: `try_activate_fallback` reads `api_mode` from the named custom provider entry (`custom_providers:` / `providers:`, the field `_resolve_named_custom_runtime` honors on the primary path) before falling back to built-in heuristics, so a Responses-only third-party endpoint (e.g. a GLM Coding Plan key entitled only on `/responses`) is not sent to `/chat/completions` after failover and rejected with `403 model_access_denied`. Built-in providers are unaffected.
+Feature: Optional `ProjectionLimits`.
+Intent: A session owner may clamp command output (head + tail), long tool-argument strings and reasoning in what its threads write to Hermes history, while the full turn stays in codex's own thread. Only `/codex` threads pass limits (read from `bridge.codex_*` config when the session is created); without limits the projection is unchanged.
 
 ## File: `agent/auxiliary_client.py`
 
 Feature: Named custom providers honor `raw_codex` in `resolve_provider_client`.
-Intent: For a named custom provider declaring `api_mode: codex_responses`, skip the `CodexAuxiliaryClient` wrap when the caller passes `raw_codex=True` (as the main loop's fallback activation and init routing do, since they call `responses.create()` directly; the wrapper has no `.responses` and drops `_custom_headers`), matching `_needs_codex_wrap` and the `openai-codex` branch. Auxiliary callers without `raw_codex` still get the wrapper.
+Intent: For a named custom provider declaring `api_mode: codex_responses`, return the bare client to `raw_codex=True` callers (the main client and the fallback chain call `responses.create()` directly; the wrapper has no `.responses` and drops `_custom_headers`). Auxiliary callers without `raw_codex` still get `CodexAuxiliaryClient`.
 
 ## File: `agent/model_metadata.py`
 
-Feature: DeepSeek V4 family hardcoded context fallback.
-Intent: A single `deepseek-v4` family key at 1M makes every V4 slug (point releases, dated snapshots, vendor-prefixed and mixed-case forms) resolve to 1M instead of the 128K `deepseek` catch-all. Older DeepSeek ids keep 128K, legacy `deepseek-chat` / `deepseek-reasoner` stay at 1M, and endpoint-scoped overrides (NVIDIA NIM's 262,144) and live/cached metadata still take precedence.
+Feature: DeepSeek V4 family context fallback.
+Intent: A `deepseek-v4` family key gives every V4 point release and dated snapshot the 1M window instead of the 128K `deepseek` catch-all, and marks a point release cached at the catch-all as stale. Upstream's explicit V4 entries, pre-V4 ids and NVIDIA's endpoint-scoped 262,144 are unchanged.
 
-## File: `agent/relay_runtime.py`
+## File: `hermes_state.py`
 
-Feature: Thread-aware subscriber flush.
-Intent: `close_session()` is synchronous but the gateway calls it on its event-loop thread, where nemo-relay's `subscribers.flush()` raises `RuntimeError`. `_flush_subscribers()` keeps the blocking `flush()` on loop-free threads and on a loop thread schedules `flush_async()` as a task the runtime holds a reference to, logging failures with the session id and skipping bindings without `flush_async` (DEBUG log). On a loop thread the barrier is best effort: `close_session()` returns before the flush completes. `shutdown()` runs one blocking `flush()` after closing remaining sessions whenever no loop runs on the calling thread (cancelled deferred tasks are dropped by nemo-relay's bridge); on a loop thread it never blocks. The gateway exits via `os._exit`, skipping `atexit`, so delivery there depends on the awaits in `_finalize_shutdown_agents`.
+Feature: Session ownership for per-account consoles.
+Intent: Expose `SessionDB.set_session_user_id` (implemented in `hermes_state_owner.py`) so a console can attach or clear an account on an existing session row.
 
-## File: `plugins/observability/nemo_relay/__init__.py`
+## File: `hermes_state_owner.py`
 
-Feature: Thread-aware subscriber flush on plugin configuration release.
-Intent: `_ProcessPluginConfiguration.release()` can run on an event-loop thread, where `flush()` raises. `_flush_relay_subscribers()` follows the `RelayRuntime` rule — blocking `flush()` without a running loop, otherwise a `flush_async()` task whose failure a done callback logs — and the activation close still runs.
+Feature: Session owner writes.
+Intent: Attach or clear a session's account after the row exists, used by the AISOC/Aegis consoles to scope their private session lists.
+
+## File: `hermes_state_sessions.py`
+
+Feature: Owner-scoped session listing.
+Intent: `list_sessions_rich` / `session_count` take `user_id` and `include_ownerless` (default `True`: owned plus ownerless history; `False`: strictly private) through the shared WHERE builder, so counts, the last-active query and the pinned back-fill agree.
