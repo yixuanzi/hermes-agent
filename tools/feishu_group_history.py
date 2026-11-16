@@ -28,12 +28,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
-import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Sequence, Set, Tuple
+
+from hermes_platform.resolver import locate_command
 
 logger = logging.getLogger(__name__)
 
@@ -513,6 +515,7 @@ CommandRunner = Callable[[Sequence[str]], Awaitable[tuple[int, bytes, bytes]]]
 async def _run_subprocess(argv: Sequence[str], *, timeout: float) -> tuple[int, bytes, bytes]:
     proc = await asyncio.create_subprocess_exec(
         *argv,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -569,7 +572,10 @@ class LarkCliHistorySource:
         return await self._list(argv, label=f"thread {thread_id}", page_size=page_size)
 
     def _resolve_binary(self) -> Optional[str]:
-        return shutil.which(self._binary) or (self._binary if "/" in self._binary else None)
+        if os.path.dirname(self._binary):
+            return self._binary  # an operator-pinned path is used as configured
+        found = locate_command(self._binary).command
+        return found[0] if found else None
 
     async def _list(self, argv: list[str], *, label: str, page_size: int) -> Optional[list[HistoryMessage]]:
         binary = self._resolve_binary()

@@ -21,6 +21,7 @@ _repo = str(Path(__file__).resolve().parents[2])
 if _repo not in sys.path:
     sys.path.insert(0, _repo)
 
+from hermes_platform.resolver.core import Candidate, Resolution
 from tools import feishu_group_history as gh
 
 
@@ -130,8 +131,14 @@ def _cli_source(runner, binary="lark-cli"):
     return gh.LarkCliHistorySource(binary=binary, runner=runner)
 
 
+def _lookup(found):
+    cand = Candidate(found or "lark-cli", "PATH", found is not None)
+    resolution = Resolution("path_executable" if found else "missing", (cand,))
+    return patch("tools.feishu_group_history.locate_command", return_value=resolution)
+
+
 def _with_binary(fn):
-    with patch("tools.feishu_group_history.shutil.which", return_value="/opt/bin/lark-cli"):
+    with _lookup("/opt/bin/lark-cli"):
         return fn()
 
 
@@ -217,7 +224,7 @@ def test_cli_failure_modes_yield_none_or_empty(kwargs):
 
 def test_cli_missing_binary_yields_none_without_running():
     runner = _runner(_cli_payload([]))
-    with patch("tools.feishu_group_history.shutil.which", return_value=None):
+    with _lookup(None):
         result = asyncio.run(_cli_source(runner, binary="definitely-not-installed").list_chat("oc_g", page_size=5, since_epoch=0))
     assert result is None
     assert runner.calls == []
@@ -225,9 +232,10 @@ def test_cli_missing_binary_yields_none_without_running():
 
 def test_cli_absolute_binary_path_is_used_without_which():
     runner = _runner(_cli_payload([]))
-    with patch("tools.feishu_group_history.shutil.which", return_value=None):
+    with _lookup(None) as lookup:
         asyncio.run(_cli_source(runner, binary="/custom/lark-cli").list_chat("oc_g", page_size=5, since_epoch=0))
     assert runner.calls[0][0] == "/custom/lark-cli"
+    lookup.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
