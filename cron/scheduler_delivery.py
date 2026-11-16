@@ -660,9 +660,10 @@ def _resolve_single_delivery_target(
             logger.warning("Invalid cron delivery target '%s': %s", deliver_value, resolution_error)
             return None
         # Chat-only target on the origin chat adopts the origin lane where it is a durable place
-        # (Telegram topic, Slack thread); Matrix/Mattermost threads are per-message ids -> top-level.
+        # (Telegram topic, Slack thread, Feishu topic); Matrix/Mattermost threads are per-message ids ->
+        # top-level.
         if (
-            thread_id is None and platform_key in ("telegram", "slack")
+            thread_id is None and platform_key in ("telegram", "slack", "feishu")
             and origin
             and str(origin.get("platform") or "").lower() == platform_key
             and str(origin.get("chat_id")) == str(chat_id)
@@ -1339,7 +1340,9 @@ def _live_send_text(
         _warn_live_lane_failure(job, msg, t.is_relay)
         target_errors.append(msg)
         return False, False, None
-    if send_raw_response and t.thread_id and send_raw_response.get("thread_fallback"):
+    # Only dict responses (Telegram) carry the fallback marker; a raw SDK response object (Feishu's
+    # ReplyMessageResponse) has no ``.get`` and must not crash bookkeeping after a successful send.
+    if send_raw_response and t.thread_id and isinstance(send_raw_response, dict) and send_raw_response.get("thread_fallback"):
         requested_thread_id = send_raw_response.get("requested_thread_id") or t.thread_id
         _note_target_error(
             job,
@@ -1584,7 +1587,11 @@ def _prepare_target_delivery(
 
     origin = _resolve_origin(job) or {}
     origin_thread = origin.get("thread_id")
-    if origin_thread and not thread_id:
+    # Only the origin conversation itself can lose its thread; a fan-out or explicit deliver to
+    # another chat legitimately has none, so warning there is a false positive.
+    same_chat = (str(origin.get("platform") or "").lower(), str(origin.get("chat_id") or "")) == (
+        str(platform_name).lower(), str(chat_id))
+    if origin_thread and not thread_id and same_chat:
         logger.warning(
             "Job '%s': origin has thread_id=%s but delivery target lost it (deliver=%s, target=%s)",
             job["id"], origin_thread, job.get("deliver", "local"), target)
