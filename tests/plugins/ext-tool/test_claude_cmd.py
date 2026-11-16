@@ -89,7 +89,8 @@ def _use_cli(monkeypatch, agent):
     import hermes_cli.plugins as plugins_mod
 
     cli = SimpleNamespace(agent=agent, session_id=getattr(agent, "session_id", None))
-    monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=cli))
+    # Only the CLI reference is faked: the real manager keeps serving the turn loop (held transforms, hooks).
+    monkeypatch.setattr(plugins_mod.get_plugin_manager(), "_cli_ref", cli, raising=False)
 
 
 def _turn(agent, **kwargs):
@@ -105,7 +106,7 @@ def _session(sid="sess-cli") -> ClaudeAcpSession:
 def test_help_and_bad_args(monkeypatch):
     import hermes_cli.plugins as plugins_mod
 
-    monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None))
+    monkeypatch.setattr(plugins_mod.get_plugin_manager(), "_cli_ref", None, raising=False)
     text = claude_cmd.claude_command("")
     assert text == claude_cmd.claude_command("help")
     for fragment in ("/claude on [cwd=DIR] [mode=default|acceptEdits|plan|auto|bypass]", "/claude off",
@@ -303,7 +304,7 @@ def _gateway_command(runner, raw_args, *, uid="ou_admin", chat="oc_1"):
 def test_gateway_owner_only_and_auto_deny_notice(monkeypatch):
     import hermes_cli.plugins as plugins_mod
 
-    monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None))
+    monkeypatch.setattr(plugins_mod.get_plugin_manager(), "_cli_ref", None, raising=False)
     runner = FakeRunner("sess-gw")
     text = _gateway_command(runner, "on")
     assert "只有你的消息走 Claude Code" in text and "自动拒绝" in text
@@ -320,7 +321,7 @@ def test_gateway_owner_only_and_auto_deny_notice(monkeypatch):
 def test_gateway_requires_rbac_admin(monkeypatch):
     import hermes_cli.plugins as plugins_mod
 
-    monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None))
+    monkeypatch.setattr(plugins_mod.get_plugin_manager(), "_cli_ref", None, raising=False)
     monkeypatch.setattr(codex_cmd, "_rbac_role", lambda platform, uid: "user")
     assert "仅 admin 可开启 Claude Code 模式" in _gateway_command(FakeRunner("sess-gw"), "on")
     assert codex_cmd.get_mode("sess-gw") is None
@@ -331,7 +332,7 @@ def test_on_inside_event_loop_starts_off_loop(monkeypatch):
 
     import hermes_cli.plugins as plugins_mod
 
-    monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None))
+    monkeypatch.setattr(plugins_mod.get_plugin_manager(), "_cli_ref", None, raising=False)
     threads = []
     original = ClaudeAcpSession.ensure_started
 
