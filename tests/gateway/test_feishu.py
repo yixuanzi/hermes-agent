@@ -67,6 +67,26 @@ class TestConfigEnvOverrides(unittest.TestCase):
         self.assertEqual(config.platforms[Platform.FEISHU].extra["app_id"], "cli_xxx")
         self.assertEqual(config.platforms[Platform.FEISHU].extra["connection_mode"], "websocket")
 
+    def test_reply_thread_flag_defaults_true_and_parses_false_values(self):
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(FeishuAdapter._load_settings({}).reply_thread)
+        for value in ("false", "0", "no", "off", " FALSE "):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {"FEISHU_REPLY_THREAD": value}, clear=True
+            ):
+                self.assertFalse(FeishuAdapter._load_settings({}).reply_thread)
+
+    def test_reply_thread_flag_invalid_value_warns_and_defaults_true(self):
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        with patch.dict(
+            os.environ, {"FEISHU_REPLY_THREAD": "sometimes"}, clear=True
+        ), self.assertLogs(level="WARNING") as logs:
+            self.assertTrue(FeishuAdapter._load_settings({}).reply_thread)
+        self.assertTrue(any("FEISHU_REPLY_THREAD" in line for line in logs.output))
+
 class TestFeishuMessageNormalization(unittest.TestCase):
 
     def test_normalize_interactive_card_preserves_title_body_and_actions(self):
@@ -260,6 +280,172 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         self.assertEqual(
             captured["calls"][1].request_body.content,
             json.dumps({"text": "可以用 粗体 和 斜体。"}, ensure_ascii=False),
+        )
+
+    @patch.dict(os.environ, {
+        "FEISHU_APP_ID": "cli_app",
+        "FEISHU_APP_SECRET": "secret_app",
+        "FEISHU_CONNECTION_MODE": "webhook",
+        "FEISHU_WEBHOOK_HOST": "127.0.0.1",
+        "FEISHU_WEBHOOK_PORT": "9001",
+        "FEISHU_WEBHOOK_PATH": "/hook",
+        "FEISHU_VERIFICATION_TOKEN": "vtok",
+    }, clear=True)
+    def test_connect_webhook_mode_starts_local_server(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        runner = AsyncMock()
+        site = AsyncMock()
+        web_module = SimpleNamespace(
+            Application=lambda **_kwargs: SimpleNamespace(router=SimpleNamespace(add_post=lambda *_args, **_kwargs: None)),
+            AppRunner=lambda _app: runner,
+            TCPSite=lambda _runner, host, port: SimpleNamespace(start=site.start, host=host, port=port),
+        )
+
+        with (
+            patch("plugins.platforms.feishu.adapter.FEISHU_AVAILABLE", True),
+            patch("plugins.platforms.feishu.adapter.FEISHU_WEBHOOK_AVAILABLE", True),
+            patch("plugins.platforms.feishu.adapter.EventDispatcherHandler") as mock_handler_class,
+            patch("plugins.platforms.feishu.adapter.acquire_scoped_lock", return_value=(True, None)),
+            patch("plugins.platforms.feishu.adapter.release_scoped_lock"),
+            patch.object(adapter, "_hydrate_bot_identity", new=AsyncMock()),
+            patch.object(adapter, "_build_lark_client", return_value=SimpleNamespace()),
+            patch("plugins.platforms.feishu.adapter.web", web_module),
+        ):
+            _mock_event_dispatcher_builder(mock_handler_class)
+            connected = asyncio.run(adapter.connect())
+
+        self.assertTrue(connected)
+        runner.setup.assert_awaited_once()
+        site.start.assert_awaited_once()
+
+    @patch.dict(os.environ, {
+        "FEISHU_APP_ID": "cli_app",
+        "FEISHU_APP_SECRET": "secret_app",
+    }, clear=True)
+    def test_connect_acquires_scoped_lock_and_disconnect_releases_it(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        ws_client = SimpleNamespace()
+
+        with (
+            patch("plugins.platforms.feishu.adapter.FEISHU_AVAILABLE", True),
+            patch("plugins.platforms.feishu.adapter.FEISHU_WEBSOCKET_AVAILABLE", True),
+            patch("plugins.platforms.feishu.adapter.lark", SimpleNamespace(LogLevel=SimpleNamespace(INFO="INFO", WARNING="WARNING"))),
+            patch("plugins.platforms.feishu.adapter.EventDispatcherHandler") as mock_handler_class,
+            patch("plugins.platforms.feishu.adapter.FeishuWSClient", return_value=ws_client),
+            patch("plugins.platforms.feishu.adapter._run_official_feishu_ws_client"),
+            patch("plugins.platforms.feishu.adapter.acquire_scoped_lock", return_value=(True, None)) as acquire_lock,
+            patch("plugins.platforms.feishu.adapter.release_scoped_lock") as release_lock,
+            patch.object(adapter, "_hydrate_bot_identity", new=AsyncMock()),
+            patch.object(adapter, "_build_lark_client", return_value=SimpleNamespace()),
+        ):
+            _mock_event_dispatcher_builder(mock_handler_class)
+
+            loop = asyncio.new_event_loop()
+            future = loop.create_future()
+            future.set_result(None)
+
+            class _Loop:
+                def run_in_executor(self, *_args, **_kwargs):
+                    return future
+
+                def is_closed(self):
+                    return False
+
+            try:
+                with patch("plugins.platforms.feishu.adapter.asyncio.get_running_loop", return_value=_Loop()):
+                    connected = asyncio.run(adapter.connect())
+                    asyncio.run(adapter.disconnect())
+            finally:
+                loop.close()
+
+        self.assertTrue(connected)
+        self.assertIsNone(adapter._event_handler)
+        acquire_lock.assert_called_once_with(
+            "feishu-app-id",
+            "cli_app",
+            metadata={"platform": "feishu"},
+        )
+        release_lock.assert_called_once_with("feishu-app-id", "cli_app")
+
+    def test_build_websocket_client_omits_ua_tag_for_legacy_sdk(self):
+        """Older lark-oapi clients must still connect without the new keyword."""
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        calls = []
+
+        class _LegacyWSClient:
+            def __init__(self, app_id, app_secret, log_level, event_handler, domain):
+                calls.append({
+                    "app_id": app_id,
+                    "app_secret": app_secret,
+                    "log_level": log_level,
+                    "event_handler": event_handler,
+                    "domain": domain,
+                })
+
+        with (
+            patch("plugins.platforms.feishu.adapter.FeishuWSClient", _LegacyWSClient),
+            patch("plugins.platforms.feishu.adapter.lark", SimpleNamespace(LogLevel=SimpleNamespace(INFO="INFO"))),
+        ):
+            client = adapter._build_websocket_client(domain="https://open.feishu.cn", event_handler="handler")
+
+        self.assertIsInstance(client, _LegacyWSClient)
+        self.assertEqual(calls, [{
+            "app_id": adapter._app_id,
+            "app_secret": adapter._app_secret,
+            "log_level": "INFO",
+            "event_handler": "handler",
+            "domain": "https://open.feishu.cn",
+        }])
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_edit_message_updates_existing_feishu_message(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = {}
+
+        class _MessageAPI:
+            def update(self, request):
+                captured["request"] = request
+                return SimpleNamespace(success=lambda: True)
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    message=_MessageAPI(),
+                )
+            )
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("plugins.platforms.feishu.adapter.asyncio.to_thread", side_effect=_direct):
+            result = asyncio.run(
+                adapter.edit_message(
+                    chat_id="oc_chat",
+                    message_id="om_progress",
+                    content="📖 read_file: \"/tmp/image.png\"",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message_id, "om_progress")
+        self.assertEqual(captured["request"].message_id, "om_progress")
+        self.assertEqual(captured["request"].request_body.msg_type, "text")
+        self.assertEqual(
+            captured["request"].request_body.content,
+            json.dumps({"text": "📖 read_file: \"/tmp/image.png\""}, ensure_ascii=False),
         )
 
 
@@ -1420,6 +1606,38 @@ class TestAdapterBehavior(unittest.TestCase):
             ],
         )
 
+    @patch.dict(os.environ, {}, clear=True)
+    def test_media_handling_is_untouched_when_card_output_is_off(self):
+        """Card mode extracts attachments out of card text and dedupes uploads.
+
+        With ``FEISHU_CARD_OUTPUT`` off, neither may happen: the text goes out
+        exactly as given (tag included — the gateway strips it upstream on this
+        path) and the same file can be sent as many times as the caller asks.
+        """
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        self.assertFalse(adapter._card_output_enabled)
+
+        with tempfile.NamedTemporaryFile("wb", suffix=".pdf", delete=False) as tmp:
+            tmp.write(b"%PDF-1.4 test")
+            file_path = tmp.name
+
+        try:
+            text = f"see the report MEDIA:{file_path}"
+            body, owed = adapter._split_card_mode_attachments(
+                chat_id="oc_chat", content=text, metadata=None,
+            )
+            self.assertEqual(body, text)
+            self.assertEqual(owed, [])
+
+            # The per-turn ledger is inert too, so nothing is ever skipped.
+            self.assertTrue(adapter._claim_card_media("oc_chat", file_path, None))
+            self.assertTrue(adapter._claim_card_media("oc_chat", file_path, None))
+        finally:
+            os.unlink(file_path)
+
 @unittest.skipUnless(_HAS_LARK_OAPI, "lark-oapi not installed")
 class TestPendingInboundQueue(unittest.TestCase):
     """Tests for the loop-not-ready race (#5499): inbound events arriving
@@ -2033,6 +2251,8 @@ class TestFeishuProcessInboundMessage(unittest.TestCase):
         )
         adapter._resolve_source_chat_type = Mock(return_value="group")
         adapter.build_source = Mock(return_value=SimpleNamespace(thread_id=None))
+        adapter._maybe_route_delegate_interaction_message = AsyncMock(return_value=False)
+        adapter._maybe_route_delegate_foreground_message = AsyncMock(return_value=False)
         adapter._dispatch_inbound_event = AsyncMock()
         return adapter
 
@@ -2207,6 +2427,43 @@ class TestFeishuProcessInboundMessage(unittest.TestCase):
         adapter.build_source.assert_called_once()
         self.assertEqual(adapter.build_source.call_args.kwargs["thread_id"], "omt_thread")
 
+    def _process_text(self, adapter, text, message_id):
+        message = SimpleNamespace(
+            content=json.dumps({"text": text}),
+            message_type="text",
+            message_id=message_id,
+            mentions=[],
+            chat_id="oc_chat",
+            parent_id=None,
+            upper_message_id=None,
+            thread_id=None,
+        )
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=message,
+                message=message,
+                sender_id=None,
+                chat_type="group",
+                message_id=message_id,
+            )
+        )
+
+    def test_gateway_commands_skip_the_delegate_loop(self):
+        for text in ("/stop", "/new"):
+            adapter = self._build_adapter()
+            self._process_text(adapter, text, "m-stop")
+            adapter._maybe_route_delegate_interaction_message.assert_not_awaited()
+            adapter._maybe_route_delegate_foreground_message.assert_not_awaited()
+            event = adapter._dispatch_inbound_event.call_args.args[0]
+            self.assertEqual(event.get_command(), text[1:])
+
+    def test_loop_controls_and_plain_text_still_reach_the_delegate_loop(self):
+        for text in ("/main", "/exit", "follow up"):
+            adapter = self._build_adapter()
+            self._process_text(adapter, text, "m-loop")
+            routed = adapter._maybe_route_delegate_foreground_message.call_args.kwargs["text"]
+            self.assertEqual(routed.strip(), text)
+
 class TestFeishuFetchMessageText(unittest.TestCase):
     def _build_adapter(self):
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -2264,6 +2521,8 @@ class TestFeishuMentionEndToEnd(unittest.TestCase):
         )
         adapter._resolve_source_chat_type = Mock(return_value="group")
         adapter.build_source = Mock(return_value=SimpleNamespace(thread_id=None))
+        adapter._maybe_route_delegate_interaction_message = AsyncMock(return_value=False)
+        adapter._maybe_route_delegate_foreground_message = AsyncMock(return_value=False)
         adapter._dispatch_inbound_event = AsyncMock()
         return adapter
 
@@ -2529,3 +2788,973 @@ def test_processing_failure_skips_cross_mark_when_typing_removal_fails(fake_lark
     assert tracker.created == ["Typing"]
     assert tracker.deleted == ["r_typing"]
     assert adapter._pending_processing_reactions["om_msg"] == "r_typing"
+
+
+class TestFeishuAttachmentTopicRouting(unittest.TestCase):
+    """Attachments rejected by topic routing must be re-anchored, not dropped.
+
+    A message created with ``receive_id_type=thread_id`` is fine for text and
+    cards but comes back 99992402 for every attachment kind, so a file the user
+    asked for inside a Feishu topic used to be lost while the identical request
+    in the main chat worked.
+    """
+
+    def _adapter(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        return FeishuAdapter(PlatformConfig())
+
+    @staticmethod
+    def _rejected():
+        return SimpleNamespace(success=lambda: False, code=99992402, msg="field validation failed")
+
+    @staticmethod
+    def _accepted(message_id="om_sent"):
+        return SimpleNamespace(
+            success=lambda: True, code=0, data=SimpleNamespace(message_id=message_id)
+        )
+
+    def test_a_file_the_topic_rejects_is_resent_as_a_reply_inside_the_topic(self):
+        adapter = self._adapter()
+        adapter._send_raw_message = AsyncMock(side_effect=[self._rejected(), self._accepted()])
+        adapter._fetch_last_message_in_thread = AsyncMock(return_value="om_last_in_topic")
+
+        response = asyncio.run(
+            adapter._send_attachment_message(
+                chat_id="oc_chat",
+                msg_type="file",
+                payload=json.dumps({"file_key": "file_1"}),
+                reply_to=None,
+                metadata={"thread_id": "omt_topic"},
+            )
+        )
+
+        self.assertTrue(response.success())
+        self.assertEqual(adapter._send_raw_message.await_count, 2)
+        retry = adapter._send_raw_message.await_args_list[1].kwargs
+        self.assertEqual(retry["reply_to"], "om_last_in_topic")
+        # The retry keeps the thread metadata, so the file lands in the topic
+        # the user asked in rather than at the bottom of the chat.
+        self.assertEqual(retry["metadata"], {"thread_id": "omt_topic"})
+
+    def test_a_known_anchor_is_reused_instead_of_listing_the_topic(self):
+        adapter = self._adapter()
+        adapter._send_raw_message = AsyncMock(side_effect=[self._rejected(), self._accepted()])
+        adapter._fetch_last_message_in_thread = AsyncMock(return_value="om_listed")
+
+        asyncio.run(
+            adapter._send_attachment_message(
+                chat_id="oc_chat",
+                msg_type="file",
+                payload="{}",
+                reply_to=None,
+                metadata={"thread_id": "omt_topic", "reply_to_message_id": "om_known"},
+            )
+        )
+
+        adapter._fetch_last_message_in_thread.assert_not_awaited()
+        self.assertEqual(
+            adapter._send_raw_message.await_args_list[1].kwargs["reply_to"], "om_known"
+        )
+
+    def test_without_an_anchor_the_file_goes_out_flat_rather_than_not_at_all(self):
+        adapter = self._adapter()
+        adapter._send_raw_message = AsyncMock(side_effect=[self._rejected(), self._accepted()])
+        adapter._fetch_last_message_in_thread = AsyncMock(return_value=None)
+
+        response = asyncio.run(
+            adapter._send_attachment_message(
+                chat_id="oc_chat",
+                msg_type="file",
+                payload="{}",
+                reply_to=None,
+                metadata={"thread_id": "omt_topic"},
+            )
+        )
+
+        self.assertTrue(response.success())
+        self.assertEqual(adapter._send_raw_message.await_count, 2)
+        flat = adapter._send_raw_message.await_args_list[1].kwargs
+        self.assertIsNone(flat["reply_to"])
+        self.assertIsNone(flat["metadata"])
+
+    def test_a_rejected_reply_still_falls_back_to_the_flat_chat(self):
+        adapter = self._adapter()
+        adapter._send_raw_message = AsyncMock(
+            side_effect=[self._rejected(), self._rejected(), self._accepted()]
+        )
+        adapter._fetch_last_message_in_thread = AsyncMock(return_value="om_last_in_topic")
+
+        response = asyncio.run(
+            adapter._send_attachment_message(
+                chat_id="oc_chat",
+                msg_type="file",
+                payload="{}",
+                reply_to=None,
+                metadata={"thread_id": "omt_topic"},
+            )
+        )
+
+        self.assertTrue(response.success())
+        self.assertEqual(adapter._send_raw_message.await_count, 3)
+        self.assertIsNone(adapter._send_raw_message.await_args_list[2].kwargs["metadata"])
+
+    def test_some_other_rejection_is_reported_rather_than_retried(self):
+        adapter = self._adapter()
+        denied = SimpleNamespace(success=lambda: False, code=230011, msg="no permission")
+        adapter._send_raw_message = AsyncMock(return_value=denied)
+
+        response = asyncio.run(
+            adapter._send_attachment_message(
+                chat_id="oc_chat",
+                msg_type="file",
+                payload="{}",
+                reply_to=None,
+                metadata={"thread_id": "omt_topic"},
+            )
+        )
+
+        self.assertIs(response, denied)
+        self.assertEqual(adapter._send_raw_message.await_count, 1)
+
+    def test_outside_a_topic_there_is_nothing_to_re_anchor(self):
+        adapter = self._adapter()
+        rejected = self._rejected()
+        adapter._send_raw_message = AsyncMock(return_value=rejected)
+
+        response = asyncio.run(
+            adapter._send_attachment_message(
+                chat_id="oc_chat",
+                msg_type="file",
+                payload="{}",
+                reply_to=None,
+                metadata=None,
+            )
+        )
+
+        self.assertIs(response, rejected)
+        self.assertEqual(adapter._send_raw_message.await_count, 1)
+
+    def test_a_document_asked_for_inside_a_topic_is_delivered(self):
+        """End to end over the reported failure: a .txt requested in a topic."""
+        adapter = self._adapter()
+
+        class _FileAPI:
+            def create(self, request):
+                return SimpleNamespace(
+                    success=lambda: True, data=SimpleNamespace(file_key="file_123")
+                )
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(v1=SimpleNamespace(file=_FileAPI()))
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        adapter._send_raw_message = AsyncMock(side_effect=[self._rejected(), self._accepted()])
+        adapter._fetch_last_message_in_thread = AsyncMock(return_value="om_last_in_topic")
+
+        with tempfile.NamedTemporaryFile("wb", suffix=".txt", delete=False) as tmp:
+            tmp.write(b"hello world")
+            file_path = tmp.name
+
+        try:
+            with patch.object(adapter, "_run_blocking", side_effect=_direct):
+                result = asyncio.run(
+                    adapter.send_document(
+                        chat_id="oc_chat",
+                        file_path=file_path,
+                        metadata={"thread_id": "omt_topic"},
+                    )
+                )
+        finally:
+            os.unlink(file_path)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message_id, "om_sent")
+
+    def test_an_image_gets_the_same_ladder_as_a_file(self):
+        adapter = self._adapter()
+
+        class _ImageAPI:
+            def create(self, request):
+                return SimpleNamespace(
+                    success=lambda: True, data=SimpleNamespace(image_key="img_123")
+                )
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(v1=SimpleNamespace(image=_ImageAPI()))
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        adapter._send_raw_message = AsyncMock(side_effect=[self._rejected(), self._accepted()])
+        adapter._fetch_last_message_in_thread = AsyncMock(return_value="om_last_in_topic")
+
+        with tempfile.NamedTemporaryFile("wb", suffix=".png", delete=False) as tmp:
+            tmp.write(b"\x89PNG\r\n\x1a\n")
+            image_path = tmp.name
+
+        try:
+            with patch.object(adapter, "_run_blocking", side_effect=_direct):
+                result = asyncio.run(
+                    adapter.send_image_file(
+                        chat_id="oc_chat",
+                        image_path=image_path,
+                        metadata={"thread_id": "omt_topic"},
+                    )
+                )
+        finally:
+            os.unlink(image_path)
+
+        self.assertTrue(result.success)
+        self.assertEqual(adapter._send_raw_message.await_count, 2)
+
+
+class TestFeishuAutoThreading(unittest.TestCase):
+    def _build_adapter(self, *, resolved_chat_type: str):
+        from gateway.config import Platform, PlatformConfig
+        from gateway.session import SessionSource
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter.__new__(FeishuAdapter)
+        adapter.config = PlatformConfig(extra={})
+        adapter.platform = Platform.FEISHU
+        adapter._bot_open_id = "ou_bot"
+        adapter._bot_user_id = ""
+        adapter._bot_name = "Hermes"
+        adapter._download_feishu_message_resources = AsyncMock(return_value=([], []))
+        adapter._fetch_message_text = AsyncMock(return_value=None)
+        adapter.get_chat_info = AsyncMock(
+            return_value={"name": "Test Chat", "type": resolved_chat_type}
+        )
+        adapter._resolve_sender_profile = AsyncMock(
+            return_value={"user_id": "u1", "user_name": "Alice", "user_id_alt": None}
+        )
+
+        def _build_source(**kwargs):
+            return SessionSource(platform=Platform.FEISHU, **kwargs)
+
+        adapter.build_source = Mock(side_effect=_build_source)
+        adapter._maybe_route_delegate_interaction_message = AsyncMock(return_value=False)
+        adapter._maybe_route_delegate_foreground_message = AsyncMock(return_value=False)
+        adapter._dispatch_inbound_event = AsyncMock()
+        adapter._active_sessions = {}
+        adapter._session_store = None
+        adapter._pending_auto_thread_roots = OrderedDict()
+        adapter._failed_auto_thread_roots = OrderedDict()
+        return adapter
+
+    @staticmethod
+    def _message(
+        message_id: str,
+        *,
+        thread_id=None,
+        root_id=None,
+        chat_id="oc_chat",
+    ):
+        return SimpleNamespace(
+            content=json.dumps({"text": "hello"}),
+            message_type="text",
+            message_id=message_id,
+            mentions=[],
+            chat_id=chat_id,
+            parent_id=root_id,
+            upper_message_id=None,
+            thread_id=thread_id,
+            root_id=root_id,
+        )
+
+    def _dispatch(self, adapter, message, *, event_chat_type="group"):
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=message,
+                message=message,
+                sender_id=SimpleNamespace(open_id="ou_user"),
+                chat_type=event_chat_type,
+                message_id=message.message_id,
+            )
+        )
+        return adapter._dispatch_inbound_event.call_args.args[0]
+
+    def test_top_level_group_and_dm_messages_use_message_id_as_session_thread(self):
+        from gateway.session import build_session_key
+
+        cases = (("group", "group", "oc_chat"), ("dm", "p2p", "ou_dm_chat"))
+        keys = []
+        for source_type, event_type, chat_id in cases:
+            with self.subTest(chat_type=source_type), patch.dict(os.environ, {}, clear=True):
+                adapter = self._build_adapter(resolved_chat_type=source_type)
+                event = self._dispatch(
+                    adapter,
+                    self._message("om_root_1", chat_id=chat_id),
+                    event_chat_type=event_type,
+                )
+                self.assertEqual(event.source.thread_id, "om_root_1")
+                self.assertIn("om_root_1", adapter._pending_auto_thread_roots)
+                keys.append(build_session_key(event.source))
+        self.assertNotEqual(keys[0], keys[1])
+
+    def test_different_top_level_messages_create_different_sessions(self):
+        from gateway.session import build_session_key
+
+        adapter = self._build_adapter(resolved_chat_type="group")
+        with patch.dict(os.environ, {}, clear=True):
+            first = self._dispatch(adapter, self._message("om_root_1"))
+            adapter._dispatch_inbound_event.reset_mock()
+            second = self._dispatch(adapter, self._message("om_root_2"))
+        self.assertNotEqual(build_session_key(first.source), build_session_key(second.source))
+
+    def test_forum_and_disabled_flag_preserve_flat_messages(self):
+        forum = self._build_adapter(resolved_chat_type="forum")
+        with patch.dict(os.environ, {}, clear=True):
+            forum_event = self._dispatch(forum, self._message("om_forum"))
+        self.assertIsNone(forum_event.source.thread_id)
+
+        cases = (("group", "group", "oc_chat"), ("dm", "p2p", "ou_dm_chat"))
+        for source_type, event_type, chat_id in cases:
+            with self.subTest(chat_type=source_type), patch.dict(
+                os.environ, {"FEISHU_REPLY_THREAD": "false"}, clear=True
+            ):
+                adapter = self._build_adapter(resolved_chat_type=source_type)
+                event = self._dispatch(
+                    adapter,
+                    self._message("om_flat", chat_id=chat_id),
+                    event_chat_type=event_type,
+                )
+                self.assertIsNone(event.source.thread_id)
+
+    def test_follow_up_reuses_active_root_session(self):
+        from gateway.session import SessionSource, build_session_key
+
+        adapter = self._build_adapter(resolved_chat_type="group")
+        candidate = SessionSource(
+            platform=adapter.platform,
+            chat_id="oc_chat",
+            chat_name="Test Chat",
+            chat_type="group",
+            user_id="u1",
+            user_name="Alice",
+            thread_id="om_root_1",
+            message_id="om_child",
+        )
+        root_key = build_session_key(candidate)
+        adapter._active_sessions[root_key] = asyncio.Event()
+
+        event = self._dispatch(
+            adapter,
+            self._message(
+                "om_child",
+                thread_id="omt_real_thread",
+                root_id="om_root_1",
+            ),
+        )
+        self.assertEqual(event.source.thread_id, "om_root_1")
+        self.assertEqual(build_session_key(event.source), root_key)
+
+    def test_follow_up_reuses_persisted_root_session_in_dm(self):
+        from gateway.session import SessionSource, build_session_key
+
+        adapter = self._build_adapter(resolved_chat_type="dm")
+        candidate = SessionSource(
+            platform=adapter.platform,
+            chat_id="ou_dm_chat",
+            chat_name="Test Chat",
+            chat_type="dm",
+            user_id="u1",
+            user_name="Alice",
+            thread_id="om_dm_root",
+            message_id="om_dm_child",
+        )
+        root_key = build_session_key(candidate)
+        adapter._session_store = SimpleNamespace(
+            peek_session_id=Mock(side_effect=lambda key: "session-1" if key == root_key else None)
+        )
+
+        event = self._dispatch(
+            adapter,
+            self._message(
+                "om_dm_child",
+                thread_id="omt_dm_thread",
+                root_id="om_dm_root",
+                chat_id="ou_dm_chat",
+            ),
+            event_chat_type="p2p",
+        )
+        self.assertEqual(event.source.thread_id, "om_dm_root")
+        self.assertEqual(build_session_key(event.source), root_key)
+
+    def test_human_thread_without_root_session_keeps_real_thread_id(self):
+        adapter = self._build_adapter(resolved_chat_type="group")
+        event = self._dispatch(
+            adapter,
+            self._message(
+                "om_child",
+                thread_id="omt_human_thread",
+                root_id="om_human_root",
+            ),
+        )
+        self.assertEqual(event.source.thread_id, "omt_human_thread")
+
+    def test_quote_reply_and_its_topic_follow_up_share_one_session(self):
+        # A main-timeline quote reply carries root_id (the quoted message) but
+        # no thread_id. The bot's reply roots the topic on the quote reply
+        # itself, so later topic messages arrive with root_id = the quote reply.
+        from gateway.session import build_session_key
+
+        adapter = self._build_adapter(resolved_chat_type="group")
+        with patch.dict(os.environ, {}, clear=True):
+            first = self._dispatch(
+                adapter, self._message("om_quote_reply", root_id="om_quoted")
+            )
+        first_key = build_session_key(first.source)
+        self.assertEqual(first.source.thread_id, "om_quote_reply")
+        self.assertIn("om_quote_reply", adapter._pending_auto_thread_roots)
+        self.assertEqual(first.reply_to_message_id, "om_quoted")
+
+        follow_up_adapter = self._build_adapter(resolved_chat_type="group")
+        follow_up_adapter._session_store = SimpleNamespace(
+            peek_session_id=Mock(side_effect=lambda key: "session-1" if key == first_key else None)
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            follow_up = self._dispatch(
+                follow_up_adapter,
+                self._message("om_in_topic", thread_id="omt_topic", root_id="om_quote_reply"),
+            )
+        self.assertEqual(build_session_key(follow_up.source), first_key)
+
+    def test_quote_reply_with_reply_thread_disabled_keeps_quoted_root(self):
+        adapter = self._build_adapter(resolved_chat_type="group")
+        with patch.dict(os.environ, {"FEISHU_REPLY_THREAD": "false"}, clear=True):
+            event = self._dispatch(
+                adapter, self._message("om_quote_reply", root_id="om_quoted")
+            )
+        self.assertEqual(event.source.thread_id, "om_quoted")
+        self.assertNotIn("om_quoted", adapter._pending_auto_thread_roots)
+
+    def test_quote_reply_approval_card_lands_under_the_quote_reply(self):
+        # Approval cards anchor on the session thread_id rather than on the
+        # triggering message, so a session keyed on the quoted message would
+        # open a second topic under it.
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        router = self._build_adapter(resolved_chat_type="group")
+        with patch.dict(os.environ, {}, clear=True):
+            event = self._dispatch(
+                router, self._message("om_quote_reply", root_id="om_quoted")
+            )
+
+        captured = {}
+
+        class _MessageAPI:
+            def reply(self, request):
+                captured["request"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id="om_card"),
+                )
+
+        sender = FeishuAdapter(PlatformConfig())
+        sender._client = SimpleNamespace(
+            im=SimpleNamespace(v1=SimpleNamespace(message=_MessageAPI()))
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch.object(sender, "_run_blocking", side_effect=_direct):
+            result = asyncio.run(
+                sender.send_exec_approval(
+                    chat_id="oc_chat",
+                    command="rm -rf /tmp/x",
+                    session_key="session-key",
+                    metadata={"thread_id": event.source.thread_id},
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured["request"].message_id, "om_quote_reply")
+        self.assertTrue(captured["request"].request_body.reply_in_thread)
+
+
+class TestFeishuAutoThreadSending(unittest.TestCase):
+    def _build_adapter(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        return adapter
+
+    def test_root_thread_metadata_replies_to_root_and_sets_thread_flag(self):
+        adapter = self._build_adapter()
+        captured = {}
+
+        class _MessageAPI:
+            def reply(self, request):
+                captured["request"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id="om_reply"),
+                )
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(v1=SimpleNamespace(message=_MessageAPI()))
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch.object(adapter, "_run_blocking", side_effect=_direct):
+            response = asyncio.run(
+                adapter._send_raw_message(
+                    chat_id="oc_chat",
+                    msg_type="text",
+                    payload=json.dumps({"text": "hello"}),
+                    reply_to=None,
+                    metadata={"thread_id": "om_root_1"},
+                )
+            )
+
+        self.assertTrue(response.success())
+        self.assertEqual(captured["request"].message_id, "om_root_1")
+        self.assertTrue(captured["request"].request_body.reply_in_thread)
+
+    def test_auto_thread_failure_falls_back_once_without_thread_metadata(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_pending("om_root_1")
+        failed = SimpleNamespace(success=lambda: False, code=230011)
+        succeeded = SimpleNamespace(success=lambda: True, code=0)
+        adapter._send_raw_message = AsyncMock(side_effect=[failed, succeeded])
+
+        result = asyncio.run(
+            adapter._feishu_send_with_retry(
+                chat_id="oc_chat",
+                msg_type="text",
+                payload="payload",
+                reply_to="om_root_1",
+                metadata={"thread_id": "om_root_1"},
+            )
+        )
+
+        self.assertIs(result, succeeded)
+        self.assertEqual(adapter._send_raw_message.await_count, 2)
+        fallback = adapter._send_raw_message.await_args_list[1].kwargs
+        self.assertIsNone(fallback["reply_to"])
+        self.assertIsNone(fallback["metadata"])
+        self.assertIn("om_root_1", adapter._failed_auto_thread_roots)
+
+    def test_later_output_stays_flat_after_auto_thread_failure(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_failed("om_root_1")
+        succeeded = SimpleNamespace(success=lambda: True, code=0)
+        adapter._send_raw_message = AsyncMock(return_value=succeeded)
+
+        result = asyncio.run(
+            adapter._feishu_send_with_retry(
+                chat_id="oc_chat",
+                msg_type="text",
+                payload="payload",
+                reply_to="om_root_1",
+                metadata={"thread_id": "om_root_1"},
+            )
+        )
+
+        self.assertIs(result, succeeded)
+        call = adapter._send_raw_message.await_args_list[-1].kwargs
+        self.assertIsNone(call["reply_to"])
+        self.assertIsNone(call["metadata"])
+
+    def test_invalid_post_keeps_auto_thread_pending_for_plain_text_retry(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_pending("om_root_1")
+        failed = SimpleNamespace(
+            success=lambda: False,
+            code=230001,
+            msg="content format of the post type is incorrect",
+        )
+        adapter._send_raw_message = AsyncMock(return_value=failed)
+
+        result = asyncio.run(
+            adapter._feishu_send_with_retry(
+                chat_id="oc_chat",
+                msg_type="post",
+                payload="payload",
+                reply_to="om_root_1",
+                metadata={"thread_id": "om_root_1"},
+            )
+        )
+
+        self.assertIs(result, failed)
+        self.assertEqual(adapter._send_raw_message.await_count, 1)
+        self.assertIn("om_root_1", adapter._pending_auto_thread_roots)
+        self.assertNotIn("om_root_1", adapter._failed_auto_thread_roots)
+
+    def test_real_thread_failure_never_falls_back_to_top_level(self):
+        adapter = self._build_adapter()
+        failed = SimpleNamespace(success=lambda: False, code=230011)
+        adapter._send_raw_message = AsyncMock(return_value=failed)
+
+        result = asyncio.run(
+            adapter._feishu_send_with_retry(
+                chat_id="oc_chat",
+                msg_type="text",
+                payload="payload",
+                reply_to="om_child",
+                metadata={"thread_id": "omt_real_thread"},
+            )
+        )
+
+        self.assertIs(result, failed)
+        self.assertEqual(adapter._send_raw_message.await_count, 1)
+
+    def test_root_thread_id_is_already_a_valid_media_reply_anchor(self):
+        adapter = self._build_adapter()
+        adapter._client = Mock()
+        self.assertEqual(
+            asyncio.run(adapter._fetch_last_message_in_thread("om_root_1")),
+            "om_root_1",
+        )
+        self.assertFalse(adapter._client.im.v1.message.list.called)
+
+    # -- failures that do not rule a topic out -------------------------------
+
+    _CARD_PAYLOAD = json.dumps({"type": "card", "data": {"card_id": "card_1"}})
+
+    def _send_pending(self, adapter, *, msg_type="text", payload="payload"):
+        # The in-topic retry backs off; the tests do not need to wait for it.
+        with patch("plugins.platforms.feishu.adapter.asyncio.sleep", new=AsyncMock()):
+            return asyncio.run(
+                adapter._feishu_send_with_retry(
+                    chat_id="oc_chat",
+                    msg_type=msg_type,
+                    payload=payload,
+                    reply_to="om_root_1",
+                    metadata={"thread_id": "om_root_1"},
+                )
+            )
+
+    def _assert_all_sends_in_topic(self, adapter):
+        for call in adapter._send_raw_message.await_args_list:
+            self.assertEqual(call.kwargs["metadata"], {"thread_id": "om_root_1"})
+
+    def test_internal_error_is_retried_in_the_topic_once_it_exists(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_pending("om_root_1")
+        failed = SimpleNamespace(success=lambda: False, code=2200, msg="internal error")
+        succeeded = SimpleNamespace(success=lambda: True, code=0)
+        adapter._send_raw_message = AsyncMock(side_effect=[failed, succeeded])
+        adapter._auto_thread_topic_exists = AsyncMock(return_value=True)
+
+        result = self._send_pending(adapter)
+
+        self.assertIs(result, succeeded)
+        self.assertEqual(adapter._send_raw_message.await_count, 2)
+        self._assert_all_sends_in_topic(adapter)
+        self.assertNotIn("om_root_1", adapter._pending_auto_thread_roots)
+        self.assertNotIn("om_root_1", adapter._failed_auto_thread_roots)
+
+    def test_one_failure_without_a_topic_is_retried_in_the_topic(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_pending("om_root_1")
+        failed = SimpleNamespace(success=lambda: False, code=230020, msg="rate limited")
+        succeeded = SimpleNamespace(success=lambda: True, code=0)
+        adapter._send_raw_message = AsyncMock(side_effect=[failed, succeeded])
+        adapter._auto_thread_topic_exists = AsyncMock(return_value=False)
+
+        result = self._send_pending(adapter)
+
+        self.assertIs(result, succeeded)
+        self.assertEqual(adapter._send_raw_message.await_count, 2)
+        self._assert_all_sends_in_topic(adapter)
+        self.assertNotIn("om_root_1", adapter._pending_auto_thread_roots)
+        self.assertNotIn("om_root_1", adapter._failed_auto_thread_roots)
+
+    def test_second_failure_without_a_topic_falls_back_flat_once(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_pending("om_root_1")
+        failed = SimpleNamespace(success=lambda: False, code=2200, msg="internal error")
+        succeeded = SimpleNamespace(success=lambda: True, code=0)
+        adapter._send_raw_message = AsyncMock(side_effect=[failed, failed, succeeded])
+        adapter._auto_thread_topic_exists = AsyncMock(return_value=False)
+
+        result = self._send_pending(adapter)
+
+        self.assertIs(result, succeeded)
+        calls = adapter._send_raw_message.await_args_list
+        self.assertEqual(len(calls), 3)
+        for call in calls[:2]:
+            self.assertEqual(call.kwargs["metadata"], {"thread_id": "om_root_1"})
+        self.assertIsNone(calls[2].kwargs["reply_to"])
+        self.assertIsNone(calls[2].kwargs["metadata"])
+        self.assertIn("om_root_1", adapter._failed_auto_thread_roots)
+
+    def test_errors_in_the_topic_retry_are_not_counted_twice(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_pending("om_root_1")
+        failed = SimpleNamespace(success=lambda: False, code=2200, msg="internal error")
+        succeeded = SimpleNamespace(success=lambda: True, code=0)
+        timeout = RuntimeError("timed out")
+        adapter._send_raw_message = AsyncMock(
+            side_effect=[failed, timeout, timeout, timeout, succeeded]
+        )
+        adapter._auto_thread_topic_exists = AsyncMock(return_value=False)
+
+        result = self._send_pending(adapter)
+
+        # One failed reply, one retry that exhausts its own attempts, then the
+        # single flat message — not a second round of attempts on top.
+        self.assertIs(result, succeeded)
+        calls = adapter._send_raw_message.await_args_list
+        self.assertEqual(len(calls), 5)
+        self.assertIsNone(calls[-1].kwargs["metadata"])
+        self.assertIn("om_root_1", adapter._failed_auto_thread_roots)
+
+    def test_group_without_topic_support_falls_back_flat_at_once(self):
+        for code in (230071, 230072):
+            with self.subTest(code=code):
+                adapter = self._build_adapter()
+                adapter._mark_auto_thread_pending("om_root_1")
+                failed = SimpleNamespace(success=lambda: False, code=code)
+                succeeded = SimpleNamespace(success=lambda: True, code=0)
+                adapter._send_raw_message = AsyncMock(side_effect=[failed, succeeded])
+                adapter._auto_thread_topic_exists = AsyncMock(return_value=False)
+
+                result = self._send_pending(adapter)
+
+                self.assertIs(result, succeeded)
+                self.assertIsNone(adapter._send_raw_message.await_args_list[1].kwargs["metadata"])
+                self.assertIn("om_root_1", adapter._failed_auto_thread_roots)
+                adapter._auto_thread_topic_exists.assert_not_awaited()
+
+    def test_card_entity_is_never_resent_by_the_flat_fallback(self):
+        cases = (
+            SimpleNamespace(success=lambda: False, code=230071),
+            SimpleNamespace(success=lambda: False, code=2200, msg="internal error"),
+        )
+        for failed in cases:
+            with self.subTest(code=failed.code):
+                adapter = self._build_adapter()
+                adapter._mark_auto_thread_pending("om_root_1")
+                adapter._send_raw_message = AsyncMock(return_value=failed)
+                adapter._auto_thread_topic_exists = AsyncMock(return_value=False)
+
+                for _ in range(3):
+                    result = self._send_pending(
+                        adapter, msg_type="interactive", payload=self._CARD_PAYLOAD
+                    )
+
+                self.assertIs(result, failed)
+                # One attempt per call — the entity is never sent a second time.
+                self.assertEqual(adapter._send_raw_message.await_count, 3)
+
+    def test_card_entity_raising_after_retries_is_not_resent_flat(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_pending("om_root_1")
+        adapter._send_raw_message = AsyncMock(side_effect=RuntimeError("timed out"))
+        adapter._auto_thread_topic_exists = AsyncMock(return_value=False)
+
+        with self.assertRaises(RuntimeError):
+            self._send_pending(adapter, msg_type="interactive", payload=self._CARD_PAYLOAD)
+
+        for call in adapter._send_raw_message.await_args_list:
+            self.assertEqual(call.kwargs["metadata"], {"thread_id": "om_root_1"})
+        self.assertIn("om_root_1", adapter._pending_auto_thread_roots)
+
+    def test_failure_log_names_the_code_message_and_log_id(self):
+        adapter = self._build_adapter()
+        adapter._mark_auto_thread_pending("om_root_1")
+        failed = SimpleNamespace(
+            success=lambda: False,
+            code=2200,
+            msg="internal error",
+            get_log_id=lambda: "log_abc",
+        )
+        succeeded = SimpleNamespace(success=lambda: True, code=0)
+        adapter._send_raw_message = AsyncMock(side_effect=[failed, succeeded])
+        adapter._auto_thread_topic_exists = AsyncMock(return_value=False)
+
+        with self.assertLogs(level="WARNING") as logs:
+            self._send_pending(adapter)
+
+        line = "\n".join(logs.output)
+        self.assertIn("code=2200", line)
+        self.assertIn("internal error", line)
+        self.assertIn("log_id=log_abc", line)
+        self.assertIn("reply_to=om_root_1", line)
+
+    def test_card_block_handle_is_never_a_reply_target(self):
+        adapter = self._build_adapter()
+        succeeded = SimpleNamespace(success=lambda: True, code=0)
+        adapter._send_raw_message = AsyncMock(return_value=succeeded)
+
+        asyncio.run(
+            adapter._feishu_send_with_retry(
+                chat_id="oc_chat",
+                msg_type="text",
+                payload="payload",
+                reply_to="hermes-card:card_1:0:abcd1234",
+                metadata={"thread_id": "omt_real_thread"},
+            )
+        )
+
+        call = adapter._send_raw_message.await_args.kwargs
+        self.assertIsNone(call["reply_to"])
+        self.assertEqual(call["metadata"], {"thread_id": "omt_real_thread"})
+
+    def test_topic_probe_reads_the_root_messages_thread_id(self):
+        adapter = self._build_adapter()
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        def _client_returning(response):
+            return SimpleNamespace(
+                im=SimpleNamespace(
+                    v1=SimpleNamespace(message=SimpleNamespace(get=lambda request: response))
+                )
+            )
+
+        def _root(thread_id):
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(items=[SimpleNamespace(thread_id=thread_id)]),
+            )
+
+        cases = (
+            (_root("omt_new_topic"), True),
+            (_root(None), False),
+            (SimpleNamespace(success=lambda: False, code=231003), False),
+        )
+        for response, expected in cases:
+            with self.subTest(expected=expected):
+                adapter._client = _client_returning(response)
+                with patch.object(adapter, "_run_blocking", side_effect=_direct):
+                    self.assertIs(
+                        asyncio.run(adapter._auto_thread_topic_exists("om_root_1")),
+                        expected,
+                    )
+
+
+@unittest.skipUnless(_HAS_LARK_OAPI, "lark-oapi not installed")
+class TestSenderNameResolution(unittest.TestCase):
+    """Tests for _resolve_sender_name_from_api (contact API + cache)."""
+
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_returns_cached_name_within_ttl(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        adapter._client = SimpleNamespace()
+        future_expire = time.time() + 600
+        adapter._sender_name_cache["ou_cached"] = ("Alice", future_expire)
+        result = asyncio.run(adapter._resolve_sender_name_from_api("ou_cached"))
+        self.assertEqual(result, "Alice")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_fetches_and_caches_name_from_api(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        user_obj = SimpleNamespace(name="Bob", display_name=None, nickname=None, en_name=None)
+        mock_response = SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(user=user_obj),
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        class _ContactAPI:
+            def get(self, request):
+                return mock_response
+
+        adapter._client = SimpleNamespace(
+            contact=SimpleNamespace(v3=SimpleNamespace(user=_ContactAPI()))
+        )
+
+        with patch("plugins.platforms.feishu.adapter.asyncio.to_thread", side_effect=_direct):
+            result = asyncio.run(adapter._resolve_sender_name_from_api("ou_bob"))
+
+        self.assertEqual(result, "Bob")
+        self.assertIn("ou_bob", adapter._sender_name_cache)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_sender_profile_prefers_open_id_and_caches_all_identity_aliases(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        adapter._resolve_sender_name_from_api = AsyncMock(return_value="Ada")
+        sender_id = SimpleNamespace(
+            open_id="ou_ada",
+            user_id="legacy_user_id",
+            union_id="on_ada",
+        )
+
+        profile = asyncio.run(adapter._resolve_sender_profile(sender_id))
+
+        self.assertEqual(profile, {
+            "user_id": "legacy_user_id",
+            "user_name": "Ada",
+            "user_id_alt": "on_ada",
+        })
+        adapter._resolve_sender_name_from_api.assert_awaited_once_with("ou_ada", is_bot=False)
+        assert {"ou_ada", "legacy_user_id", "on_ada"} <= set(adapter._sender_name_cache)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_expired_cache_triggers_new_api_call(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        # Expired cache entry.
+        adapter._sender_name_cache["ou_expired"] = ("OldName", time.time() - 1)
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        user_obj = SimpleNamespace(name="NewName", display_name=None, nickname=None, en_name=None)
+
+        class _ContactAPI:
+            def get(self, request):
+                return SimpleNamespace(success=lambda: True, data=SimpleNamespace(user=user_obj))
+
+        adapter._client = SimpleNamespace(
+            contact=SimpleNamespace(v3=SimpleNamespace(user=_ContactAPI()))
+        )
+
+        with patch("plugins.platforms.feishu.adapter.asyncio.to_thread", side_effect=_direct):
+            result = asyncio.run(adapter._resolve_sender_name_from_api("ou_expired"))
+
+        self.assertEqual(result, "NewName")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_api_failure_returns_none_without_raising(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+
+        class _BrokenContactAPI:
+            def get(self, _request):
+                raise RuntimeError("API down")
+
+        adapter._client = SimpleNamespace(
+            contact=SimpleNamespace(v3=SimpleNamespace(user=_BrokenContactAPI()))
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("plugins.platforms.feishu.adapter.asyncio.to_thread", side_effect=_direct):
+            result = asyncio.run(adapter._resolve_sender_name_from_api("ou_broken"))
+
+        self.assertIsNone(result)
+

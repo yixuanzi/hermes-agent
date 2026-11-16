@@ -23,9 +23,28 @@ if _repo not in sys.path:
     sys.path.insert(0, _repo)
 
 
+class _RecordingRequestBuilder:
+    """Stands in for lark-oapi's fluent ``ListMessageRequest.builder()``: records each field."""
+
+    def __init__(self) -> None:
+        self._fields: dict = {}
+
+    def __getattr__(self, name: str):
+        def _set(value):
+            self._fields[name] = value
+            return self
+        return _set
+
+    def build(self) -> SimpleNamespace:
+        return SimpleNamespace(**self._fields)
+
+
 def _ensure_feishu_mocks():
+    # The test environment ships without the optional ``feishu`` extra; the history fetch reads
+    # the request it built, so the list-request builder records its fields instead of mocking them.
     if importlib.util.find_spec("lark_oapi") is None and "lark_oapi" not in sys.modules:
         mock = MagicMock()
+        mock.ListMessageRequest = SimpleNamespace(builder=_RecordingRequestBuilder)
         for name in ("lark_oapi", "lark_oapi.api.im.v1", "lark_oapi.event"):
             sys.modules.setdefault(name, mock)
 
