@@ -104,6 +104,38 @@ def thread_params_for(sandbox_mode: str) -> dict:
     return SANDBOX_MODES[sandbox_mode]
 
 
+# 投影进 Hermes 历史（state.db）的上限，完整内容在 codex 自己的线程里。config.yaml 的 bridge 段可覆盖：
+#   bridge.codex_command_head_chars / codex_command_tail_chars — 命令输出保留的头 / 尾字符数（默认 2000 / 1000）
+#   bridge.codex_args_field_chars — 工具参数里单个字符串字段的上限（默认 1500）
+#   bridge.codex_project_reasoning — 是否把 codex 的思考内容写进历史（默认 false）
+_PROJECTION_INT_KEYS = {
+    "codex_command_head_chars": "command_head_chars",
+    "codex_command_tail_chars": "command_tail_chars",
+    "codex_args_field_chars": "args_field_chars",
+}
+
+
+def projection_limits() -> Any:
+    """本插件 codex 线程的投影上限（建会话时读取 config.yaml，读不到就用默认值）。"""
+    from agent.transports.codex_event_projector import ProjectionLimits
+
+    try:
+        from hermes_cli.config import load_config
+
+        bridge = (load_config() or {}).get("bridge") or {}
+    except Exception:
+        logger.debug("/codex: bridge config unreadable; default projection limits", exc_info=True)
+        bridge = {}
+    if not isinstance(bridge, dict):
+        bridge = {}
+    fields = {
+        field: raw for key, field in _PROJECTION_INT_KEYS.items()
+        if isinstance(raw := bridge.get(key), int) and not isinstance(raw, bool) and raw > 0
+    }
+    reasoning = str(bridge.get("codex_project_reasoning", False)).strip().lower() in {"true", "1", "yes"}
+    return ProjectionLimits(**fields, project_reasoning=reasoning)
+
+
 def _wrap_client(client: Any, session: Any) -> Any:
     """给 codex 客户端的 request 加两处旁路（core 不改）：
     turn/start 带上 /codex model set 选定的 model / effort（对该轮及后续轮生效，线程上下文不丢）；
@@ -169,7 +201,8 @@ class _CodexBackend:
         # 线程被运行时退役后重建：沿用 /codex model set 的选择
         return install_prefs(
             attach_codex_app_server_session(
-                agent, cwd=cwd, thread_start_params=thread_params_for(mode.sandbox)
+                agent, cwd=cwd, thread_start_params=thread_params_for(mode.sandbox),
+                projection_limits=projection_limits(),
             ),
             _prefs_of(previous),
         )

@@ -148,14 +148,17 @@ def test_native_image_keeps_image_parts():
 
 
 def test_codex_echo_of_raw_text_is_dropped():
-    from agent.codex_runtime import _drop_turn_input_echo
-    from agent.transports.codex_app_server_session import TurnResult
+    from types import SimpleNamespace
+
+    from agent.codex_runtime import _persist_projected_messages
+    from agent.transports.codex_app_server_session import TurnResult, _build_turn_input
 
     class EchoingSession:
-        """codex 把 turn/start 的输入作为 userMessage 回显，后面跟回合中的 steer。"""
+        """codex 把 turn/start 的输入作为 userMessage 回显，后面跟回合中的 steer（与真实会话一样记下实际发出的文本）。"""
 
         def run_turn(self, user_input, *, turn_timeout=600.0):
             result = TurnResult()
+            result.submitted_user_text = _build_turn_input(user_input)[1]
             result.projected_messages = [
                 {"role": "user", "content": user_input},
                 {"role": "user", "content": "steer text"},
@@ -180,16 +183,22 @@ def test_codex_echo_of_raw_text_is_dropped():
 
     asyncio.run(turn())
 
-    expected = [{"role": "user", "content": "steer text"}, {"role": "assistant", "content": "done"}]
-    assert seen["result"].projected_messages == expected
-    # core 随后按加工后的输入去重：对不上，steer 保留
-    assert _drop_turn_input_echo(seen["result"].projected_messages, seen["prepared"]) == expected
+    result = seen["result"]
+    assert result.submitted_user_text == "改一下 README"  # 发出的是原文，不是网关加工后的文本
+    # core 落库时按实际发出的原文去掉回显，回合中的 steer 保留
+    history: list = []
+    _persist_projected_messages(SimpleNamespace(), result, history)
+    assert [m["content"] for m in history] == ["steer text", "done"]
 
-    # 没有替换（CLI）：回显留给 core 去重
+    # 没有替换（CLI）：原样透传，回显同样由 core 按发出的文本去掉
     cli = EchoingSession()
     raw_prompt.install_session_passthrough(cli)
     raw_prompt._inbound.set(None)
-    assert cli.run_turn(user_input="cli text").projected_messages[0] == {"role": "user", "content": "cli text"}
+    cli_result = cli.run_turn(user_input="cli text")
+    assert cli_result.submitted_user_text == "cli text"
+    cli_history: list = []
+    _persist_projected_messages(SimpleNamespace(), cli_result, cli_history)
+    assert [m["content"] for m in cli_history] == ["steer text", "done"]
 
 
 def test_queued_followup_gets_its_own_text_once():
