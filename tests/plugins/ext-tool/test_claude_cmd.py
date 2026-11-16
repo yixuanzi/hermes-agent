@@ -56,7 +56,6 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.setenv(claude_acp.ACP_COMMAND_ENV, f"{shlex.quote(sys.executable)} {shlex.quote(str(FAKE_AGENT))}")
     monkeypatch.setenv("CLAUDE_CODE_EXECUTABLE", sys.executable)
     monkeypatch.setenv("FAKE_ACP_LOG", str(tmp_path / "acp.jsonl"))
-    monkeypatch.setattr(codex_cmd, "_publish_aux_runtime", lambda agent, mode: None)
     monkeypatch.setattr(codex_cmd, "_rbac_role", lambda platform, uid: None)
     monkeypatch.setattr(codex_cmd, "_approval_bypass_active", lambda scope: False)
     monkeypatch.setattr(codex_cmd, "_codex_binary", lambda: (True, "0.144.1"))
