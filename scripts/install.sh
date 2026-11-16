@@ -78,9 +78,9 @@ while [ $# -gt 0 ]; do
             echo "  --channel       stable (default): the latest published release, then release"
             echo "                  to release. main: every commit. Also HERMES_INSTALL_CHANNEL;"
             echo "                  an explicit choice is saved like 'hermes update --set-channel'."
-            echo "  --skip-browser  Do not install the browser tools (agent-browser + Chromium)."
-            echo "                  Alias: --no-playwright. Remembered by later"
-            echo "                  installs and 'hermes update'; undo with 'hermes pm install agent-browser'."
+            echo "  --skip-browser  Do not install the browser (Chromium). Alias: --no-playwright."
+            echo "                  Remembered by later installs and 'hermes update';"
+            echo "                  undo with 'hermes pm install chromium'."
             echo "  --skip-computer-use"
             echo "                  Do not install the computer-use driver (cua-driver). Remembered"
             echo "                  the same way; undo with 'hermes pm install cua-driver'."
@@ -407,7 +407,10 @@ ensure_uv() {
             rm -rf "$_tmp"
             fail "uv download digest mismatch from $_fetched_from (expected $UV_PIN_SHA256, got $_digest)" download_digest_mismatch
         fi
-        if ! tar -xzf "$_tmp/uv.tar.gz" -C "$_tmp"; then
+        # Release tarballs record the builder's uid (1001); as root, tar would
+        # restore it and hand the uv that root runs to that local account. -o,
+        # not --no-same-owner: busybox tar without long options takes only -o.
+        if ! tar -o -xzf "$_tmp/uv.tar.gz" -C "$_tmp"; then
             rm -rf "$_tmp"
             fail "failed to extract pinned uv archive" uv_unusable
         fi
@@ -535,6 +538,14 @@ emit_manifest() {
 }
 
 git_runs() { command -v git >/dev/null 2>&1 && git --version >/dev/null 2>&1; }
+
+# An exported GIT_DIR/GIT_WORK_TREE (a dotfiles alias, a git hook) retargets every
+# `git -C "$INSTALL_DIR"` at the user's other repo, and the rerun's stash/reset would act on
+# it (#146032). Stages run in a subshell (run_stage), so this stays local to the stage.
+drop_git_location_env() {
+    unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE
+}
 
 # macOS ships /usr/bin/git as a stub until Apple's Command Line Tools are
 # installed: it is on PATH, but every call fails ("see man xcode-select").
@@ -709,13 +720,19 @@ stable_unreachable() {
 
 stage_repository() {
     local pinned=false channel="" release="" origin
+    drop_git_location_env
     # An interrupted clone from an older installer can leave a .git with no
     # initial commit, where stash/checkout abort ("You do not have the
     # initial commit yet", #40998); a killed update or a sync tool can leave
     # one git rejects outright (empty HEAD, a gitdir: file pointing nowhere),
     # where `hermes update` cannot fetch. Move it aside -- never delete it, it
     # may hold something the user wants -- and clone fresh below.
-    if [ -e "$INSTALL_DIR/.git" ] && ! git -C "$INSTALL_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then
+    # A .git git cannot read makes it search the parent directories, and a
+    # git-managed $HOME would pass the probe and get the stash/reset below
+    # (#146032): the ceiling keeps the probe to INSTALL_DIR's own .git.
+    local ceiling
+    ceiling="$(CDPATH="" cd "$INSTALL_DIR" 2>/dev/null && pwd -P)" && ceiling="$(dirname "$ceiling")" || ceiling=""
+    if { [ -e "$INSTALL_DIR/.git" ] || [ -L "$INSTALL_DIR/.git" ]; } && ! GIT_CEILING_DIRECTORIES="$ceiling" git -C "$INSTALL_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then
         local broken
         broken="${INSTALL_DIR}.broken-$(date -u +%Y%m%d-%H%M%S)"
         log_warn "$INSTALL_DIR is not a usable git checkout (interrupted clone or damaged .git); moving it aside to $broken"
@@ -1024,6 +1041,8 @@ bootstrap_pm() {
     local pm_args=(install)
     # PM records the opt-outs, so later installs and `hermes update` keep the
     # tools off until `hermes pm install <name>` opts back in.
+    # Legacy spelling on purpose: the stable PM this script installs by default
+    # rejects `chromium`, and newer PMs read `agent-browser` as `chromium`.
     [ "$SKIP_BROWSER" = true ] && pm_args+=(--without agent-browser)
     [ "$SKIP_COMPUTER_USE" = true ] && pm_args+=(--without cua-driver)
     bootstrap_python
@@ -1169,6 +1188,7 @@ stage_gateway() {
 
 stage_complete() {
     local commit
+    drop_git_location_env
     commit="$INSTALL_COMMIT"
     [ -n "$commit" ] || commit=$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null) || commit=""
     if [ -n "$commit" ]; then

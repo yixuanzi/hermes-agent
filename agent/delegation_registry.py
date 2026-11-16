@@ -5,7 +5,7 @@ asks :func:`get_active_provider` which strategy turns each task into a child run
 ``delegation.backend`` in config.yaml, ``default`` when unset. The default strategy (today's
 behaviour: every child follows the ``delegation`` section, else the parent's route) is itself a
 plugin, the bundled ``plugins/delegation/default``, registered through the same seam as any other.
-A session may override the selection (``agent/delegation_backends.py``). A configured backend that is
+``agent/delegation_backends.py`` saves it (``/delegation``); a session routes on the backend its tools were built from. A configured backend that is
 not registered or reports unavailable fails closed: ``delegate_task`` returns a tool error naming the
 backend and the fix, and never quietly runs the children on another route. Its schema parameters are
 absent, since the schema is built from the same resolution.
@@ -71,8 +71,9 @@ def _load_bundled(name: str) -> Optional[DelegationProvider]:
     plugin_dir = get_bundled_plugins_dir() / "delegation" / name
     if not (plugin_dir / "plugin.yaml").is_file():
         return None
+    package = f"{plugin_loader.__package__}.delegation"
     module = plugin_loader.load_plugin_module(
-        f"plugins.delegation.{name.replace('-', '_')}", plugin_dir, parents=("plugins", "plugins.delegation"),
+        f"{package}.{name.replace('-', '_')}", plugin_dir, parents=(plugin_loader.__package__, package),
         logger=logger)
     if module is None:
         return None
