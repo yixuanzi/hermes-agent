@@ -11,7 +11,7 @@ import importlib
 import pytest
 
 
-@pytest.mark.parametrize("platform, cls", [("signal", "SignalAdapter")])
+@pytest.mark.parametrize("platform, cls", [("signal", "SignalAdapter"), ("feishu", "FeishuAdapter")])
 def test_registry_factory_is_the_canonical_adapter_class(platform, cls):
     from gateway.platform_registry import platform_registry
     from hermes_cli.plugins import discover_plugins

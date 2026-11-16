@@ -142,6 +142,11 @@ Intent: A `bot_message` event without `user` keeps `bot_id` as the sender identi
 Feature: Fork mixin wiring.
 Intent: The adapter composes `FeishuAegisMixin` and only calls its seams: `_jev_gate` after `_admit`, `_aegis_inbound` between `build_source` and dispatch, `_auto_thread_route` / `_send_in_pending_topic` inside `_feishu_send_with_retry`, and the card-mode hooks in `send`, `edit_message` and `delete_message`. Fork behaviour lives in the `adapter_aegis*.py` siblings so the over-cap adapter barely grows.
 
+## File: `plugins/platforms/feishu/__init__.py`
+
+Feature: One canonical Feishu adapter module.
+Intent: Register through `plugins.platforms.feishu.adapter`, as Signal does. The loader runs the package as `hermes_plugins.platforms__feishu`; with a relative `from .adapter import register` the fork siblings' absolute imports load a second adapter module whose lazily bound SDK names (`lark`, `FeishuWSClient`, the card-callback models) stay None, so `build_feishu_ws_client` failed every connect and card actions got no response.
+
 ## File: `plugins/platforms/feishu/adapter_aegis.py`
 
 Feature: Feishu fork composition and settings.

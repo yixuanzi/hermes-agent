@@ -60,6 +60,7 @@ _ensure_feishu_mocks()
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionSource
+from hermes_platform.resolver.core import Candidate, Resolution
 from plugins.platforms.feishu.adapter import FeishuAdapter
 from plugins.platforms.feishu.adapter_aegis import load_aegis_settings
 from plugins.platforms.feishu.adapter_aegis_admission import _FEISHU_GROUP_HISTORY_METADATA_KEY
@@ -216,7 +217,8 @@ def test_adapter_cli_mode_never_touches_sdk_list_and_renders_cli_content():
         return backend
 
     adapter._build_group_history_source = patched_builder
-    with patch("tools.feishu_group_history.shutil.which", return_value="/opt/bin/lark-cli"):
+    found = Resolution("path_executable", (Candidate("/opt/bin/lark-cli", "PATH", True),))
+    with patch("tools.feishu_group_history.locate_command", return_value=found):
         block = asyncio.run(adapter._fetch_group_history_block(chat_id="oc_g", exclude_message_id="om_now"))
     # Default card regions (title,body): the card renders as 【title】 body.
     assert block == "<group_messages>\n[09-26 20:15] [assistant]: 【x】 body\n</group_messages>"
