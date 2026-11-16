@@ -598,11 +598,13 @@ def _publish_runtime_main(agent: Any) -> None:
         # (#79017). Resolved with the never-raising variant OUTSIDE the argument list, so a resolution
         # failure can only lose the scope — never the whole runtime binding.
         _cache_scope = resolve_prompt_cache_scope_safe(agent) or ""
+        from agent.codex_owner_runtime import main_runtime_api_mode
         set_runtime_main(
             _str_attr(agent, "provider"), _str_attr(agent, "model"),
             **{k: _str_attr(agent, k) for k in (
-                "requested_provider", "base_url", "api_key", "api_mode", "auth_mode", "session_id"
+                "requested_provider", "base_url", "api_key", "auth_mode", "session_id"
             )},
+            api_mode=main_runtime_api_mode(agent),
             cache_scope=_cache_scope,
         )
 

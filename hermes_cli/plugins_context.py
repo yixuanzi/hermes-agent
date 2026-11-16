@@ -413,6 +413,11 @@ class PluginContext(PluginCapabilityCtxMixin, PluginIdleTaskCtxMixin):
         from hermes_cli.plugin_session import context_surface
         return context_surface(self._manager)
 
+    def session_id(self) -> str:
+        """The calling session's id: the classic CLI's current session, else the turn's (``""`` outside one)."""
+        from hermes_cli.plugin_session import context_session_id
+        return context_session_id(self._manager)
+
     def post_message(self, text: str) -> Any:
         """Post *text* into the session bound to this call; the handle's ``edit(text)`` updates it in
         place. Never raises (``ok=False`` + ``error`` with no conversation): ``plugin_messages.py``."""

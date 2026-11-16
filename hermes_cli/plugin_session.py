@@ -56,6 +56,18 @@ def context_surface(manager) -> str:
     return "cli" if manager._cli_ref is not None else session_surface()
 
 
+def context_session_id(manager) -> str:
+    """The calling session's id for a plugin context. The classic CLI process owns one interactive
+    session, so a command run there (even before its first turn built an agent) gets it from the CLI;
+    elsewhere it is the id bound for the running turn."""
+    cli = manager._cli_ref
+    if cli is not None:
+        agent = getattr(cli, "agent", None)
+        return str(getattr(agent, "session_id", None) or getattr(cli, "session_id", None) or "")
+    from gateway.session_context import get_session_env
+    return get_session_env("HERMES_SESSION_ID", "")
+
+
 def context_cwd(manager) -> str:
     """``session_cwd()`` for a plugin context: the classic CLI process keeps its launch directory."""
     return os.getcwd() if manager._cli_ref is not None else session_cwd()

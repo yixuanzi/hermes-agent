@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable, Optional
 
-from cron.jobs import AmbiguousJobReference, get_job
+from cron.jobs import AmbiguousJobReference, get_job, resolve_job_ref
 from cron.jobs_identify import build_job_identify, is_job_visible_to_identity
 
 
@@ -35,6 +35,13 @@ def visible_jobs(jobs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 def get_visible_job(job_id: str) -> Optional[dict[str, Any]]:
     job = get_job(job_id)
     return job if job is not None and is_job_visible_to_identity(job, caller_identity()) else None
+
+
+def resolve_caller_job(ref: str) -> Optional[dict[str, Any]]:
+    """The caller's (or a public) job by ID, then case-insensitive name; None when it is not there for
+    this caller. Raises ``AmbiguousJobReference`` (a ``LookupError``) only over the caller's own matches.
+    The plugin-facing lookup (ext-tools ``cron_prompt``)."""
+    return resolve_visible_job_ref(ref, resolve_job_ref)
 
 
 def resolve_visible_job_ref(ref: str, resolve: Callable[[str], Optional[dict[str, Any]]]) -> Optional[dict[str, Any]]:

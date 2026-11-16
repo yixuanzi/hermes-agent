@@ -515,11 +515,14 @@ class AIAgent(
         self._emit_warning(f"⚠ Auxiliary {task} failed: {detail}")
 
     def _current_main_runtime(self) -> dict[str, str]:
-        """Return the live main runtime for session-scoped auxiliary routing."""
-        return {
+        """Return the live main runtime for session-scoped auxiliary routing (the host api_mode while an
+        owner-attached codex session runs the turns: agent/codex_owner_runtime.py)."""
+        from agent.codex_owner_runtime import main_runtime_api_mode
+        runtime = {
             key: getattr(self, key, "") or ""
-            for key in ("model", "provider", "base_url", "api_key", "api_mode", "auth_mode", "session_id")
+            for key in ("model", "provider", "base_url", "api_key", "auth_mode", "session_id")
         }
+        return {**runtime, "api_mode": main_runtime_api_mode(self)}
 
     _check_compression_model_feasibility = _forward("agent.conversation_compression", "check_compression_model_feasibility")
     _replay_compression_warning = _forward("agent.conversation_compression", "replay_compression_warning")

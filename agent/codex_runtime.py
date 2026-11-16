@@ -539,6 +539,16 @@ def _codex_request_hooks(agent) -> tuple[Any, Any]:
         auto_approve_exec=auto_approve_requests, auto_approve_apply_patch=auto_approve_requests)
 
 
+def owner_session_approval(agent) -> tuple[Any, bool]:
+    """``(approval_callback, auto_approve)`` for a backend session its owner drives on the agent's turn thread.
+
+    The same policy Hermes' own codex sessions get (``_codex_request_hooks``): the CLI's prompt callback when
+    someone can answer, none on unattended surfaces, and ``auto_approve`` only under an explicit approval
+    bypass. For owner sessions that are not a ``CodexAppServerSession`` (ext-tools ``/claude``)."""
+    approval_callback, routing = _codex_request_hooks(agent)
+    return approval_callback, bool(routing.auto_approve_exec)
+
+
 def attach_codex_app_server_session(agent, session=None, *, cwd=None, thread_start_params=None,
                                     projection_limits=None):
     """Bind a codex app-server session the CALLER owns to ``agent`` and return it.
@@ -1564,6 +1574,7 @@ __all__ = [
     "_consume_codex_event_stream",
     "attach_codex_app_server_session",
     "make_codex_app_server_event_bridge",
+    "owner_session_approval",
     "run_codex_app_server_turn",
     "run_codex_stream",
 ]
