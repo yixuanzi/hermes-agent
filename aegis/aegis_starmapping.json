@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema_version": "1.0.0",
+  "document_type": "aegis_starmapping",
+  "title": "Aegis Orchestration Topology — Three-Layer Starmapping",
+  "language": "zh-CN",
+  "updated_at": "2026-07-24",
+  "status": "design-baseline",
+  "usage": {
+    "purpose": "Aegis Orchestration Topology 的唯一设计数据源；供后续前端、后端 topology API 与运行态适配器使用。",
+    "rendering_rule": "中心层只渲染 Aegis；Agent 环只渲染 7 个业务域 Agent；群星层按选中的 Agent 展开其所属支撑节点，避免在默认视图堆叠 84 个节点。",
+    "runtime_rule": "节点的 enabled、health、last_seen、task_count 与告警状态必须由运行态覆盖，不能修改本文件定义的身份、职责和归属。"
+  },
+  "layers": [
+    {
+      "id": "center",
+      "order": 1,
+      "name": "中心",
+      "name_en": "Aegis Core",
+      "description": "统一接收任务、执行策略判定、编排跨域协作并汇总证据、风险和审计结果。"
+    },
+    {
+      "id": "agent_ring",
+      "order": 2,
+      "name": "外环",
+      "name_en": "Domain Agents",
+      "description": "七个面向安全与运维业务域的自治 Agent；每个 Agent 只消费自己所属的群星能力。"
+    },
+    {
+      "id": "star_field",
+      "order": 3,
+      "name": "群星",
+      "name_en": "Tools, APIs & Data",
+      "description": "支撑 Agent 落地执行的必要工具、API 和数据源；每个节点必须明确接入方式与用途。"
+    }
+  ],
+  "center": {
+    "id": "aegis",
+    "layer": "center",
+    "name": "Aegis",
+    "symbol": "aegis-connection",
+    "role": "Security & Operations Orchestration Core",
+    "description": "跨域任务路由、策略约束、Agent 委派、证据汇聚、风险升级与可审计闭环的中枢。",
+    "capabilities": [
+      "intent-routing",
+      "policy-enforcement",
+      "agent-delegation",
+      "evidence-correlation",
+      "risk-prioritization",
+      "audit-trail"
+    ],
+    "layout": { "x": 0.5, "y": 0.5, "radius": "core" }
+  },
+  "agent_ring": [
+    {
+      "id": "ai-soc",
+      "layer": "agent_ring",
+      "business_domain": "AI-SOC",
+      "product_service_code": "WORKAGENT-AI-SOC",
+      "name": "Argus",
+      "symbol": "argus-eyes",
+      "display_name": "AI-SOC · Argus",
+      "marketing_name": "[ Argus ]",
+      "cultural_origin": "希腊神话·百眼巨人",
+      "business_fit": "全天候、零死角威胁监控与感知",
+      "role": "安全运营、告警关联、威胁研判与响应协同",
+      "layout": { "ring_position": 0, "angle_degrees": 270, "radius": "agent" },
+      "star_nodes": [
+        { "id": "argus-siem", "layer": "star_field", "kind": "tool", "name": "SIEM 检索与关联", "integration": "Splunk / Microsoft Sentinel API", "purpose": "检索、关联和回溯安全事件", "required": true },
+        { "id": "argus-edr", "layer": "star_field", "kind": "api", "name": "终端检测与响应遥测", "integration": "CrowdStrike Falcon / Microsoft Defender API", "purpose": "获取终端告警、进程和隔离动作", "required": true },
+        { "id": "argus-ndr", "layer": "star_field", "kind": "data", "name": "网络检测遥测", "integration": "Zeek / Suricata / NDR feed", "purpose": "发现横向移动、C2 与异常网络行为", "required": true },
+        { "id": "argus-soar", "layer": "star_field", "kind": "tool", "name": "SOAR 剧本执行", "integration": "SOAR platform API", "purpose": "执行获批的隔离、封禁和工单响应", "required": true },
+        { "id": "argus-threat-intel", "layer": "star_field", "kind": "data", "name": "威胁情报库", "integration": "MISP / STIX-TAXII", "purpose": "富化 IOC、TTP 和威胁团伙上下文", "required": true },
+        { "id": "argus-reputation", "layer": "star_field", "kind": "api", "name": "IOC 信誉查询", "integration": "VirusTotal / sandbox API", "purpose": "判断文件、域名、IP 与 URL 风险", "required": true },
+        { "id": "argus-vulnerability", "layer": "star_field", "kind": "data", "name": "漏洞暴露上下文", "integration": "Tenable / Qualys API", "purpose": "关联告警资产的漏洞与可利用性", "required": true },
+        { "id": "argus-cmdb", "layer": "star_field", "kind": "data", "name": "资产与服务目录", "integration": "CMDB API", "purpose": "识别资产所有者、关键性与业务影响", "required": true },
+        { "id": "argus-identity", "layer": "star_field", "kind": "data", "name": "身份认证日志", "integration": "Entra ID / Okta logs", "purpose": "确认账号风险、会话与权限变化", "required": true },
+        { "id": "argus-cloud-audit", "layer": "star_field", "kind": "data", "name": "云审计日志", "integration": "AWS CloudTrail / Azure Activity Log", "purpose": "追溯云控制面高风险操作", "required": true },
+        { "id": "argus-email", "layer": "star_field", "kind": "data", "name": "邮件安全遥测", "integration": "Secure Email Gateway API", "purpose": "研判钓鱼、恶意附件和邮件传播路径", "required": true },
+        { "id": "argus-data-lake", "layer": "star_field", "kind": "data", "name": "安全数据湖", "integration": "OpenSearch / data lake query API", "purpose": "保存长周期狩猎数据与跨源证据", "required": true }
+      ]
+    },
+    {
+      "id": "ai-grc",
+      "layer": "agent_ring",
+      "business_domain": "AI-GRC",
+      "product_service_code": "WORKAGENT-AI-GRC",
+      "name": "Themis",
+      "symbol": "themis-scales",
+      "display_name": "AI-GRC · Themis",
+      "marketing_name": "[ Themis ]",
+      "cultural_origin": "希腊神话·正义与秩序女神",
+      "business_fit": "合规、合理、秩序与法则",
+      "role": "治理、风险、合规控制设计与审计证据闭环",
+      "layout": { "ring_position": 1, "angle_degrees": 321, "radius": "agent" },
+      "star_nodes": [
+        { "id": "themis-control-library", "layer": "star_field", "kind": "data", "name": "控制库", "integration": "ISO 27001 / NIST / CIS control catalog", "purpose": "映射要求、控制目标和责任人", "required": true },
+        { "id": "themis-regulations", "layer": "star_field", "kind": "data", "name": "法规与标准知识库", "integration": "Regulatory content service", "purpose": "维护适用法律、监管规则和版本变更", "required": true },
+        { "id": "themis-grc-platform", "layer": "star_field", "kind": "tool", "name": "GRC 平台", "integration": "ServiceNow GRC / OneTrust API", "purpose": "管理控制、评估和整改工作流", "required": true },
+        { "id": "themis-risk-register", "layer": "star_field", "kind": "data", "name": "风险登记册", "integration": "Risk register API", "purpose": "记录风险、固有/剩余风险和处置计划", "required": true },
+        { "id": "themis-evidence-vault", "layer": "star_field", "kind": "data", "name": "审计证据库", "integration": "Document management / object storage API", "purpose": "保全证据版本、来源和保留期限", "required": true },
+        { "id": "themis-assessment", "layer": "star_field", "kind": "tool", "name": "合规评估工作流", "integration": "Assessment workflow API", "purpose": "发起问卷、收集证明并跟踪缺口", "required": true },
+        { "id": "themis-asset-classification", "layer": "star_field", "kind": "data", "name": "资产与数据分类", "integration": "CMDB / data classification API", "purpose": "确定控制适用范围与数据敏感级别", "required": true },
+        { "id": "themis-access-review", "layer": "star_field", "kind": "data", "name": "访问复核记录", "integration": "IGA / IAM API", "purpose": "验证权限治理与定期复核证据", "required": true },
+        { "id": "themis-remediation", "layer": "star_field", "kind": "data", "name": "整改与漏洞证据", "integration": "ITSM / vulnerability management API", "purpose": "验证缺陷修复与例外到期情况", "required": true },
+        { "id": "themis-audit-archive", "layer": "star_field", "kind": "data", "name": "不可篡改审计归档", "integration": "WORM archive / SIEM archive", "purpose": "提供可追溯的日志与操作证据", "required": true },
+        { "id": "themis-third-party", "layer": "star_field", "kind": "tool", "name": "第三方风险管理", "integration": "TPRM questionnaire API", "purpose": "评估供应商风险、证明与续期", "required": true },
+        { "id": "themis-legal-change", "layer": "star_field", "kind": "api", "name": "法规变更订阅", "integration": "Legal/regulatory change feed", "purpose": "主动识别影响控制设计的监管变化", "required": true }
+      ]
+    },
+    {
+      "id": "ai-redteam",
+      "layer": "agent_ring",
+      "business_domain": "AI-REDTEAM",
+      "product_service_code": "WORKAGENT-AI-REDTEAM",
+      "name": "Loki",
+      "symbol": "loki-knot",
+      "display_name": "AI-REDTEAM · Loki",
+      "marketing_name": "[ Loki ]",
+      "cultural_origin": "北欧神话·恶作剧与变幻之神",
+      "business_fit": "模拟实战攻击、出其不意、突破防御",
+      "role": "授权范围内的攻击模拟、暴露验证与紫队检测验证",
+      "layout": { "ring_position": 2, "angle_degrees": 12, "radius": "agent" },
+      "star_nodes": [
+        { "id": "loki-roe", "layer": "star_field", "kind": "data", "name": "授权范围与交战规则", "integration": "Engagement authorization registry", "purpose": "约束目标、时间窗、禁止动作和升级联系人", "required": true },
+        { "id": "loki-attack-platform", "layer": "star_field", "kind": "tool", "name": "攻击模拟平台", "integration": "BAS / adversary emulation API", "purpose": "以受控方式执行授权攻击路径模拟", "required": true },
+        { "id": "loki-mitre", "layer": "star_field", "kind": "data", "name": "MITRE ATT&CK 知识库", "integration": "ATT&CK STIX feed", "purpose": "规划 TTP、覆盖度和检测验证", "required": true },
+        { "id": "loki-asm", "layer": "star_field", "kind": "tool", "name": "攻击面管理", "integration": "External attack surface management API", "purpose": "识别互联网暴露资产与影子资产", "required": true },
+        { "id": "loki-recon", "layer": "star_field", "kind": "data", "name": "公开侦察数据", "integration": "DNS / WHOIS / certificate transparency API", "purpose": "建立授权目标的外部暴露画像", "required": true },
+        { "id": "loki-vuln-scanner", "layer": "star_field", "kind": "tool", "name": "漏洞验证扫描", "integration": "Authenticated scanner API", "purpose": "在批准范围内确认漏洞可达性", "required": true },
+        { "id": "loki-dast", "layer": "star_field", "kind": "tool", "name": "Web 与 API 安全测试", "integration": "DAST scanner API", "purpose": "验证应用攻击面及安全控制", "required": true },
+        { "id": "loki-directory", "layer": "star_field", "kind": "data", "name": "身份目录与权限图", "integration": "Directory / IAM read-only API", "purpose": "建模授权环境中的权限边界", "required": true },
+        { "id": "loki-cloud-posture", "layer": "star_field", "kind": "data", "name": "云安全态势", "integration": "CSPM API", "purpose": "定位云配置错误和潜在提权链", "required": true },
+        { "id": "loki-attack-path", "layer": "star_field", "kind": "tool", "name": "攻击路径图谱", "integration": "Identity attack-path analysis API", "purpose": "量化横向移动和高价值目标路径", "required": true },
+        { "id": "loki-exploit-intel", "layer": "star_field", "kind": "data", "name": "漏洞利用情报", "integration": "CISA KEV / vendor advisory feed", "purpose": "按已知利用风险排序验证场景", "required": true },
+        { "id": "loki-purple-validation", "layer": "star_field", "kind": "api", "name": "紫队检测验证", "integration": "SIEM / EDR detection validation API", "purpose": "验证模拟是否被检测并生成改进建议", "required": true }
+      ]
+    },
+    {
+      "id": "ai-sdlc",
+      "layer": "agent_ring",
+      "business_domain": "AI-SDLC",
+      "product_service_code": "WORKAGENT-AI-SDLC",
+      "name": "Vulcan",
+      "symbol": "vulcan-anvil",
+      "display_name": "AI-SDLC · Vulcan",
+      "marketing_name": "[ Vulcan ]",
+      "cultural_origin": "罗马神话·工匠与锻造之神",
+      "business_fit": "源头铸造、安全开发与软件工程",
+      "role": "软件供应链、代码、构建、部署与开发安全治理",
+      "layout": { "ring_position": 3, "angle_degrees": 63, "radius": "agent" },
+      "star_nodes": [
+        { "id": "vulcan-scm", "layer": "star_field", "kind": "tool", "name": "源码管理", "integration": "GitHub / GitLab API", "purpose": "读取仓库、提交、拉取请求和分支保护状态", "required": true },
+        { "id": "vulcan-cicd", "layer": "star_field", "kind": "tool", "name": "CI/CD 编排", "integration": "GitHub Actions / Jenkins API", "purpose": "接入构建门禁、流水线状态和发布证据", "required": true },
+        { "id": "vulcan-sast", "layer": "star_field", "kind": "tool", "name": "静态代码扫描", "integration": "SAST API", "purpose": "发现源代码缺陷并定位到代码行", "required": true },
+        { "id": "vulcan-sca", "layer": "star_field", "kind": "tool", "name": "依赖与 SBOM 分析", "integration": "SCA / SBOM API", "purpose": "识别开源组件漏洞和许可证风险", "required": true },
+        { "id": "vulcan-dast", "layer": "star_field", "kind": "tool", "name": "动态应用与 API 测试", "integration": "DAST / API security API", "purpose": "在测试环境发现运行态应用漏洞", "required": true },
+        { "id": "vulcan-secrets", "layer": "star_field", "kind": "tool", "name": "密钥泄露扫描", "integration": "Secret scanning API", "purpose": "识别代码、历史提交和构建日志中的凭证", "required": true },
+        { "id": "vulcan-iac", "layer": "star_field", "kind": "tool", "name": "基础设施即代码扫描", "integration": "IaC security API", "purpose": "在部署前发现云和容器配置缺陷", "required": true },
+        { "id": "vulcan-container", "layer": "star_field", "kind": "tool", "name": "容器镜像安全", "integration": "Container registry / scanner API", "purpose": "验证镜像漏洞、签名和基线", "required": true },
+        { "id": "vulcan-artifacts", "layer": "star_field", "kind": "data", "name": "制品仓库与签名", "integration": "Artifact repository / Sigstore API", "purpose": "追踪可信构建产物与供应链完整性", "required": true },
+        { "id": "vulcan-issues", "layer": "star_field", "kind": "tool", "name": "缺陷协作系统", "integration": "Jira / Azure DevOps API", "purpose": "创建、分派和跟踪安全修复事项", "required": true },
+        { "id": "vulcan-change", "layer": "star_field", "kind": "data", "name": "发布与变更记录", "integration": "ITSM / deployment API", "purpose": "关联漏洞、版本、环境与变更审批", "required": true },
+        { "id": "vulcan-code-owners", "layer": "star_field", "kind": "data", "name": "代码所有权与审查规则", "integration": "CODEOWNERS / branch protection API", "purpose": "落实安全责任、评审门禁和例外控制", "required": true }
+      ]
+    },
+    {
+      "id": "ai-ueba",
+      "layer": "agent_ring",
+      "business_domain": "AI-UEBA",
+      "product_service_code": "WORKAGENT-AI-UEBA",
+      "name": "Heimdall",
+      "symbol": "heimdall-eye",
+      "display_name": "AI-UEBA · Heimdall",
+      "marketing_name": "[ Heimdall ]",
+      "cultural_origin": "北欧神话·极目神/守护神",
+      "business_fit": "敏锐洞察细微行为异常、防潜入",
+      "role": "用户、实体和行为异常建模、风险评分与入侵早期预警",
+      "layout": { "ring_position": 4, "angle_degrees": 114, "radius": "agent" },
+      "star_nodes": [
+        { "id": "heimdall-auth", "layer": "star_field", "kind": "data", "name": "身份认证日志", "integration": "Entra ID / Okta / AD logs", "purpose": "建立登录、MFA 与会话行为基线", "required": true },
+        { "id": "heimdall-baseline", "layer": "star_field", "kind": "tool", "name": "行为基线模型", "integration": "UEBA feature store / model service", "purpose": "按用户、实体和群体计算异常偏离", "required": true },
+        { "id": "heimdall-edr", "layer": "star_field", "kind": "data", "name": "终端行为遥测", "integration": "EDR API", "purpose": "分析进程、命令、设备和横向行为", "required": true },
+        { "id": "heimdall-network", "layer": "star_field", "kind": "data", "name": "网络流量与 DNS", "integration": "NetFlow / DNS / NDR feed", "purpose": "识别异常访问目的地和流量模式", "required": true },
+        { "id": "heimdall-saas", "layer": "star_field", "kind": "data", "name": "SaaS 审计日志", "integration": "Microsoft 365 / Google Workspace API", "purpose": "发现协作平台中的异常下载、共享和登录", "required": true },
+        { "id": "heimdall-pam", "layer": "star_field", "kind": "data", "name": "特权访问会话", "integration": "PAM API", "purpose": "监测高权限账号的异常使用和越权行为", "required": true },
+        { "id": "heimdall-physical", "layer": "star_field", "kind": "data", "name": "物理门禁上下文", "integration": "Physical access control API", "purpose": "关联物理在场与逻辑登录矛盾", "required": true },
+        { "id": "heimdall-hr", "layer": "star_field", "kind": "data", "name": "组织与 HR 上下文", "integration": "HRIS API", "purpose": "识别离职、调岗和高风险角色变化", "required": true },
+        { "id": "heimdall-data-access", "layer": "star_field", "kind": "data", "name": "数据访问审计", "integration": "Database / file access audit feed", "purpose": "识别异常查询、下载和数据聚合", "required": true },
+        { "id": "heimdall-dlp", "layer": "star_field", "kind": "data", "name": "DLP 事件", "integration": "DLP API", "purpose": "将敏感数据外泄信号纳入行为风险", "required": true },
+        { "id": "heimdall-intel", "layer": "star_field", "kind": "data", "name": "威胁情报", "integration": "MISP / identity risk feed", "purpose": "关联恶意基础设施和已泄露身份指标", "required": true },
+        { "id": "heimdall-case", "layer": "star_field", "kind": "tool", "name": "调查工单与案例", "integration": "SOAR / case management API", "purpose": "将高风险行为提交调查并接收处置反馈", "required": true }
+      ]
+    },
+    {
+      "id": "ai-itops",
+      "layer": "agent_ring",
+      "business_domain": "AI-ITOps",
+      "product_service_code": "WORKAGENT-AI-ITOps",
+      "name": "Janus",
+      "symbol": "janus-duality",
+      "display_name": "AI-ITOps · Janus",
+      "marketing_name": "[ Janus ]",
+      "cultural_origin": "罗马神话·双面与门户之神",
+      "business_fit": "观前顾后、确保系统通达与平稳运转",
+      "role": "可观测性、事件响应、变更风险和可靠性自动化",
+      "layout": { "ring_position": 5, "angle_degrees": 165, "radius": "agent" },
+      "star_nodes": [
+        { "id": "janus-metrics", "layer": "star_field", "kind": "data", "name": "基础设施指标", "integration": "Prometheus / cloud monitoring API", "purpose": "监控容量、性能和资源饱和度", "required": true },
+        { "id": "janus-logs", "layer": "star_field", "kind": "data", "name": "集中日志", "integration": "ELK / OpenSearch / Splunk API", "purpose": "诊断异常、错误模式和服务影响", "required": true },
+        { "id": "janus-traces", "layer": "star_field", "kind": "data", "name": "分布式追踪", "integration": "OpenTelemetry / APM API", "purpose": "定位跨服务调用链的性能与故障根因", "required": true },
+        { "id": "janus-cmdb", "layer": "star_field", "kind": "data", "name": "服务拓扑与 CMDB", "integration": "CMDB / service map API", "purpose": "评估故障影响范围与依赖关系", "required": true },
+        { "id": "janus-itsm", "layer": "star_field", "kind": "tool", "name": "IT 服务管理", "integration": "ServiceNow / Jira Service Management API", "purpose": "管理事件、问题、请求和升级路径", "required": true },
+        { "id": "janus-apm", "layer": "star_field", "kind": "tool", "name": "应用性能管理", "integration": "Datadog / Dynatrace / New Relic API", "purpose": "识别应用错误、慢事务和用户体验退化", "required": true },
+        { "id": "janus-cloud", "layer": "star_field", "kind": "data", "name": "云运行态监控", "integration": "AWS CloudWatch / Azure Monitor API", "purpose": "监控托管服务、事件和云资源健康度", "required": true },
+        { "id": "janus-paging", "layer": "star_field", "kind": "tool", "name": "值班告警与升级", "integration": "PagerDuty / Opsgenie API", "purpose": "按服务责任和严重度通知值班人员", "required": true },
+        { "id": "janus-change-calendar", "layer": "star_field", "kind": "data", "name": "变更日历", "integration": "Change management API", "purpose": "关联故障与近期发布、维护窗口和审批", "required": true },
+        { "id": "janus-config-drift", "layer": "star_field", "kind": "data", "name": "配置漂移与期望状态", "integration": "Configuration management / IaC state API", "purpose": "识别偏离基线的配置变化", "required": true },
+        { "id": "janus-slo", "layer": "star_field", "kind": "data", "name": "SLO 与错误预算", "integration": "Reliability platform API", "purpose": "基于用户承诺决定处置优先级", "required": true },
+        { "id": "janus-runbooks", "layer": "star_field", "kind": "tool", "name": "运行手册自动化", "integration": "Automation / runbook API", "purpose": "执行批准的诊断、缓解和恢复动作", "required": true }
+      ]
+    },
+    {
+      "id": "ai-web3",
+      "layer": "agent_ring",
+      "business_domain": "AI-Web3",
+      "product_service_code": "WORKAGENT-AI-Web3",
+      "name": "Wedjat",
+      "symbol": "wedjat-eye",
+      "display_name": "AI-Web3 · Wedjat",
+      "marketing_name": "[ Wedjat ]",
+      "cultural_origin": "古埃及神话·荷鲁斯之眼",
+      "business_fit": "完整性、去中心化信任与圣物防护",
+      "role": "链上风险、智能合约、数字资产与去中心化基础设施安全",
+      "layout": { "ring_position": 6, "angle_degrees": 216, "radius": "agent" },
+      "star_nodes": [
+        { "id": "wedjat-rpc", "layer": "star_field", "kind": "api", "name": "区块链 RPC 节点", "integration": "Ethereum / EVM / non-EVM RPC", "purpose": "读取链上状态、交易和合约调用结果", "required": true },
+        { "id": "wedjat-explorer", "layer": "star_field", "kind": "api", "name": "区块浏览器", "integration": "Etherscan-compatible API", "purpose": "富化交易、地址、合约验证和事件数据", "required": true },
+        { "id": "wedjat-chain-analytics", "layer": "star_field", "kind": "data", "name": "链上风险分析", "integration": "Blockchain analytics API", "purpose": "识别资金流、风险地址和可疑交易模式", "required": true },
+        { "id": "wedjat-contract-analysis", "layer": "star_field", "kind": "tool", "name": "智能合约分析", "integration": "Static analysis / formal verification API", "purpose": "发现合约漏洞、权限风险和升级缺陷", "required": true },
+        { "id": "wedjat-custody", "layer": "star_field", "kind": "api", "name": "钱包托管与多签", "integration": "Custody / multisig API", "purpose": "监控资产策略、签名阈值和关键操作", "required": true },
+        { "id": "wedjat-simulation", "layer": "star_field", "kind": "tool", "name": "交易仿真", "integration": "Transaction simulation API", "purpose": "在提交前预演交易影响与授权风险", "required": true },
+        { "id": "wedjat-node-telemetry", "layer": "star_field", "kind": "data", "name": "节点与验证者遥测", "integration": "Node monitoring / validator API", "purpose": "监测共识节点健康、同步和异常行为", "required": true },
+        { "id": "wedjat-bridge-oracle", "layer": "star_field", "kind": "data", "name": "跨链桥与预言机状态", "integration": "Protocol monitoring API", "purpose": "发现桥接、价格源和预言机完整性风险", "required": true },
+        { "id": "wedjat-token-risk", "layer": "star_field", "kind": "data", "name": "代币与制裁风险", "integration": "Token risk / sanctions screening API", "purpose": "筛查资产、地址与交易对手风险", "required": true },
+        { "id": "wedjat-siem", "layer": "star_field", "kind": "api", "name": "安全事件接入", "integration": "SIEM / SOAR API", "purpose": "把链上风险事件送入统一调查与响应流程", "required": true },
+        { "id": "wedjat-contract-inventory", "layer": "star_field", "kind": "data", "name": "合约与资产清单", "integration": "Web3 asset inventory API", "purpose": "维护受保护合约、钱包、域名和协议组件", "required": true },
+        { "id": "wedjat-code-provenance", "layer": "star_field", "kind": "data", "name": "合约源码与发布溯源", "integration": "Source verification / repository API", "purpose": "验证已部署合约与可信源代码、构建产物的一致性", "required": true }
+      ]
+    }
+  ],
+  "relationships": {
+    "center_to_agents": [
+      { "source": "aegis", "target": "ai-soc", "mode": "orchestrates" },
+      { "source": "aegis", "target": "ai-grc", "mode": "orchestrates" },
+      { "source": "aegis", "target": "ai-redteam", "mode": "orchestrates" },
+      { "source": "aegis", "target": "ai-sdlc", "mode": "orchestrates" },
+      { "source": "aegis", "target": "ai-ueba", "mode": "orchestrates" },
+      { "source": "aegis", "target": "ai-itops", "mode": "orchestrates" },
+      { "source": "aegis", "target": "ai-web3", "mode": "orchestrates" }
+    ],
+    "agent_to_stars": "每个 agent_ring[].star_nodes[] 节点隐式创建一条 parent Agent -> star node 的 requires 边；运行时可增加实际调用次数、健康状态和最近结果。"
+  },
+  "validation": {
+    "agent_count": 7,
+    "required_star_nodes_per_agent": { "minimum": 10, "maximum": 20 },
+    "required_star_node_count": 84,
+    "allowed_star_kinds": ["tool", "api", "data"],
+    "unique_ids_required": true,
+    "all_star_nodes_must_have": ["id", "layer", "kind", "name", "integration", "purpose", "required"]
+  }
+}

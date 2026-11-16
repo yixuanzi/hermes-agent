@@ -1,0 +1,11 @@
+name: rbac-guard
+version: "1.0.0"
+description: "RBAC layer: inject per-user role constraints into each turn and enforce them on every tool call"
+author: "amber"
+provides_tools:
+  # - rbac_status
+  - rbac_set_role
+provides_hooks:
+  - pre_llm_call
+  - pre_tool_call
+  - post_tool_call

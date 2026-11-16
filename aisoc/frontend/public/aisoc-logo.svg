@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="AISOC logo">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0d1726"/>
+      <stop offset="1" stop-color="#060c17"/>
+    </linearGradient>
+    <linearGradient id="body" x1="15" y1="14" x2="33" y2="34" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#a855f7"/>
+      <stop offset="0.5" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#1e3a8a"/>
+    </linearGradient>
+    <radialGradient id="lit" cx="0.34" cy="0.3" r="0.72">
+      <stop offset="0" stop-color="#eafcff" stop-opacity="0.7"/>
+      <stop offset="0.45" stop-color="#7dd3fc" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="6" y1="30" x2="42" y2="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8b5cf6"/>
+      <stop offset="0.5" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0.75" y="0.75" width="46.5" height="46.5" rx="11" fill="url(#tile)" stroke="#1e2b45" stroke-width="1"/>
+
+  <!-- xingmang -->
+  <g fill="#eafcff">
+    <path d="M9.5 8.9L10.13 10.37L11.6 11L10.13 11.63L9.5 13.1L8.87 11.63L7.4 11L8.87 10.37Z"/>
+    <path d="M38.5 32.2L39.04 33.46L40.3 34L39.04 34.54L38.5 35.8L37.96 34.54L36.7 34L37.96 33.46Z" opacity="0.9"/>
+  </g>
+
+  <!-- ring back -->
+  <path d="M41.38 17.67 L41.50 18.20 L41.49 18.78 L41.34 19.40 L41.06 20.05 L40.65 20.73 L40.12 21.43 L39.46 22.16 L38.68 22.90 L37.79 23.65 L36.80 24.40 L35.71 25.14 L34.53 25.88 L33.27 26.61 L31.94 27.31 L30.55 27.99 L29.11 28.64 L27.63 29.25 L26.12 29.83 L24.60 30.36 L23.07 30.84 L21.55 31.27 L20.05 31.64 L18.57 31.95 L17.14 32.21 L15.77 32.40 L14.45 32.53 L13.21 32.59 L12.05 32.59 L10.98 32.52 L10.01 32.39 L9.14 32.20 L8.39 31.94 L7.76 31.62 L7.25 31.24 L6.87 30.81 L6.62 30.33 L6.50 29.80 L6.51 29.22 L6.66 28.60 L6.94 27.95 L7.35 27.27 L7.88 26.57 L8.54 25.84 L9.32 25.10 L10.21 24.35 L11.20 23.60 L12.29 22.86 L13.47 22.12 L14.73 21.39 L16.06 20.69 L17.45 20.01 L18.89 19.36 L20.37 18.75 L21.88 18.17 L23.40 17.64 L24.93 17.16 L26.45 16.73 L27.95 16.36 L29.43 16.05 L30.86 15.79 L32.23 15.60 L33.55 15.47 L34.79 15.41 L35.95 15.41 L37.02 15.48 L37.99 15.61 L38.86 15.80 L39.61 16.06 L40.24 16.38 L40.75 16.76 L41.13 17.19 L41.38 17.67 Z" fill="none" stroke="url(#ring)" stroke-width="1.7" opacity="0.55"/>
+
+  <!-- planet -->
+  <circle cx="24" cy="24" r="10.6" fill="url(#body)"/>
+  <circle cx="24" cy="24" r="10.6" fill="url(#lit)"/>
+  <path d="M22.34 13.53 L23.22 13.43 L24.10 13.40 L24.98 13.45 L25.86 13.56 L26.72 13.75 L27.56 14.02 L28.38 14.35 L29.16 14.74 L29.92 15.20 L30.63 15.73 L31.29 16.31 L31.91 16.94 L32.47 17.62 L32.97 18.35 L33.41 19.11 L33.78 19.91 L34.09 20.74 L34.32 21.59 L34.49 22.46 L34.58 23.33" fill="none" stroke="#eafcff" stroke-width="1.1" stroke-linecap="round" opacity="0.75"/>
+
+  <!-- ring front -->
+  <path d="M6.62 30.33 L6.51 29.93 L6.49 29.51 L6.54 29.07 L6.66 28.60 L6.86 28.12 L7.13 27.62 L7.47 27.10 L7.88 26.57 L8.37 26.02 L8.92 25.47 L9.53 24.92 L10.21 24.35 L10.94 23.79 L11.73 23.23 L12.58 22.67 L13.47 22.12 L14.41 21.57 L15.39 21.04 L16.40 20.52 L17.45 20.01 L18.53 19.52 L19.63 19.05 L20.75 18.60 L21.88 18.17 L23.02 17.77 L24.17 17.40 L25.31 17.05 L26.45 16.73 L27.58 16.45 L28.69 16.20 L29.79 15.98 L30.86 15.79 L31.90 15.64 L32.90 15.53 L33.87 15.45 L34.79 15.41 L35.67 15.40 L36.50 15.43 L37.28 15.50 L37.99 15.61 L38.65 15.75 L39.25 15.92 L39.78 16.14 L40.24 16.38 L40.64 16.66 L40.96 16.97 L41.21 17.31 L41.38 17.67" fill="none" stroke="url(#ring)" stroke-width="2.1" stroke-linecap="round"/>
+</svg>

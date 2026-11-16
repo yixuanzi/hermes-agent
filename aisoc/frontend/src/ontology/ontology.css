@@ -1,0 +1,196 @@
+/* Ontology page styling — ontology-specific tokens & helpers.
+
+   Base tokens (backgrounds, ink, strokes, accents), glass surfaces, typography
+   (font-display, font-mono, eyebrow), gradient text, hairline and the shared
+   anim/glow helpers now live globally in src/design/tokens.css and base.css and
+   reskin automatically across the dark and light themes. This file previously
+   shipped a duplicate :root token block plus copies of those helpers hardcoded
+   for the dark theme, which clobbered the theme-aware globals app-wide once the
+   ontology chunk loaded. It now carries ONLY what is unique to the ontology
+   views — semantic status colors (scoped to .ontology-scope, never :root),
+   cards, chips, buttons, inputs, and the sub-nav layout — and points every
+   surface at the unified tokens so both themes work. */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+/* Ontology-specific semantic status colors — scoped, must not leak to :root. */
+.ontology-scope {
+  color: var(--ink-hi);
+  --st-satisfied: var(--accent-emerald);
+  --st-partial: var(--accent-amber);
+  --st-missing: var(--accent-rose);
+  --st-extra: var(--accent-violet);
+}
+
+/* Card — ontology's padded panel variant (glass base lives in base.css). */
+.card {
+  background: var(--bg-glass);
+  border: 1px solid var(--stroke-soft);
+  backdrop-filter: blur(14px) saturate(120%);
+  -webkit-backdrop-filter: blur(14px) saturate(120%);
+  border-radius: 16px;
+  padding: 1rem;
+  box-shadow: var(--shadow-panel);
+}
+.card.border-dashed { border-style: dashed; }
+
+.glass-hover { transition: border-color .2s ease, transform .2s ease, box-shadow .2s ease; }
+.glass-hover:hover {
+  border-color: var(--stroke-mid);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-float);
+}
+
+/* Status chips — translucent tint derived from the scoped status tokens so the
+   fill/border track the theme; text stays the saturated status hue. */
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; border: 1px solid transparent;
+}
+.chip-satisfied {
+  color: var(--st-satisfied);
+  background: color-mix(in srgb, var(--st-satisfied) 12%, transparent);
+  border-color: color-mix(in srgb, var(--st-satisfied) 34%, transparent);
+}
+.chip-partial {
+  color: var(--st-partial);
+  background: color-mix(in srgb, var(--st-partial) 12%, transparent);
+  border-color: color-mix(in srgb, var(--st-partial) 34%, transparent);
+}
+.chip-missing {
+  color: var(--st-missing);
+  background: color-mix(in srgb, var(--st-missing) 12%, transparent);
+  border-color: color-mix(in srgb, var(--st-missing) 34%, transparent);
+}
+.chip-extra {
+  color: var(--st-extra);
+  background: color-mix(in srgb, var(--st-extra) 12%, transparent);
+  border-color: color-mix(in srgb, var(--st-extra) 34%, transparent);
+}
+
+.btn-primary {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 9px 16px; border-radius: 12px; font-size: 14px; font-weight: 600; cursor: pointer;
+  color: var(--aisoc-on-accent, #062432); background: var(--accent-cyan);
+  border: 1px solid transparent;
+  box-shadow: var(--glow-cyan); transition: transform .15s ease, box-shadow .2s ease, filter .2s ease;
+}
+.btn-primary:hover { transform: translateY(-1px); filter: brightness(1.08); }
+.btn-primary:disabled { opacity: .6; cursor: not-allowed; transform: none; }
+
+.btn-ghost {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 14px; border-radius: 12px; font-size: 13px; font-weight: 600; cursor: pointer;
+  color: var(--ink-mid); background: var(--bg-glass); border: 1px solid var(--stroke-soft);
+  transition: color .15s ease, border-color .15s ease, background .15s ease;
+}
+.btn-ghost:hover { color: var(--ink-hi); border-color: var(--stroke-mid); background: var(--bg-glass-strong); }
+.btn-ghost[data-active="true"] {
+  color: var(--accent-cyan);
+  border-color: color-mix(in srgb, var(--accent-cyan) 45%, transparent);
+  background: var(--accent-cyan-soft);
+}
+
+@keyframes ontology-fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.anim-fade-in { animation: ontology-fadeIn .28s ease both; }
+
+/* Filter inputs / selects — aligned with the glass system, theme-aware. */
+.input {
+  width: 100%;
+  min-height: 44px;
+  border-radius: 14px;
+  border: 1px solid var(--stroke-mid);
+  background: var(--bg-elevated);
+  color: var(--ink-hi);
+  padding: 0 14px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+  outline: none;
+  transition: border-color .18s ease, box-shadow .18s ease, background .18s ease;
+}
+.input:hover { border-color: var(--stroke-mid); }
+.input:focus {
+  border-color: color-mix(in srgb, var(--accent-cyan) 45%, transparent);
+  box-shadow: 0 0 0 3px var(--accent-cyan-soft), 0 1px 0 rgba(255, 255, 255, 0.05) inset;
+}
+.input::placeholder { color: var(--ink-lo); }
+select.input { appearance: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-fade-in { animation: none; }
+}
+
+/* ── Ontology sub-nav ── 复用 AppShell 的 .side-nav 视觉，加自己作用域的折叠规则 */
+.ontology-shell {
+  display: flex;
+  flex-direction: row;
+  min-height: 100%;
+  min-width: 0;
+}
+.ontology-shell .side-nav {
+  width: 220px;
+  transition: width 180ms ease, padding 180ms ease;
+  flex-shrink: 0;
+}
+.ontology-shell.nav-collapsed .side-nav {
+  width: 68px;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+.ontology-shell.nav-collapsed .side-nav-group-label,
+.ontology-shell.nav-collapsed .nav-link-label {
+  width: 0;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.ontology-shell.nav-collapsed .side-nav-header {
+  justify-content: center;
+}
+.ontology-shell.nav-collapsed .side-nav nav a,
+.ontology-shell.nav-collapsed .side-nav nav button {
+  justify-content: center;
+  padding-left: 7px;
+  padding-right: 7px;
+  min-height: 46px;
+}
+/* 按钮版 nav item 继承 aisoc 里 <a> 的视觉；aisoc 只针对 <a> 定义，我们扩展到 <button>。
+   全部走 --aisoc-* 令牌，深/浅主题自动重着色。 */
+.ontology-shell .side-nav nav button {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  gap: calc(10px * var(--density-scale, 1));
+  min-height: calc(44px * var(--density-scale, 1));
+  border-radius: 8px;
+  color: var(--aisoc-text);
+  padding: calc(8px * var(--density-scale, 1)) calc(10px * var(--density-scale, 1));
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+.ontology-shell .side-nav nav button:hover {
+  border-color: var(--aisoc-border-strong, var(--stroke-mid));
+  background: var(--bg-glass);
+}
+.ontology-shell .side-nav nav button.active {
+  background: var(--accent-cyan-soft);
+  border-color: color-mix(in srgb, var(--accent-cyan) 40%, transparent);
+  color: var(--aisoc-accent);
+  box-shadow: inset 2px 0 0 var(--aisoc-accent, var(--accent-cyan));
+}
+.ontology-shell .side-nav nav button:hover .nav-link-icon {
+  color: var(--aisoc-accent);
+}
+.ontology-shell .ontology-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 1.5rem;
+  overflow-y: auto;
+}

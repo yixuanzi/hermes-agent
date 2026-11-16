@@ -1,0 +1,34 @@
+{
+    "name": "test_agent",
+    "description": "An agent that can perform actions and interact with the environment.",
+    "version": "1.0",
+    "supported_interfaces": [
+        {
+            "url": "http://127.0.0.1:9086/a2a",
+            "protocol_binding": "JSONRPC",
+            "protocol_version": "1.0"
+        }
+    ],
+    "capabilities": {
+        "streaming": true,
+        "push_notifications": false
+    },
+    "default_input_modes": [
+        "text/plain"
+    ],
+    "default_output_modes": [
+        "text/plain"
+    ],
+    "skills": [
+        {
+            "id": "skill1",
+            "name": "skill1",
+            "description": "this is a test skill."
+        },
+        {
+            "id": "skill2",
+            "name": "skill2",
+            "description": "this is another test skill."
+        }
+    ]
+}

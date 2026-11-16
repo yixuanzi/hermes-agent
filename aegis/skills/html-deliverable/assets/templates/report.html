@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="{{LANG}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{TITLE}}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root { --theme:#166c59; --on-theme:#fff; --page-background:#edf0ed; --page-foreground:#172029; --surface:#fbfcfa; --surface-foreground:#172029; --ink:var(--page-foreground); --muted:#5b6875; --line:#dce4e8; --paper:var(--surface); --accent:var(--theme); --accent-soft:color-mix(in srgb, var(--theme) 12%, white); --warm:#f7eddd; }
+    * { box-sizing:border-box; } body { margin:0; color:var(--page-foreground); background:var(--page-background); font:15px/1.65 Manrope,system-ui,sans-serif; }
+    main { max-width:1040px; margin:30px auto; padding:clamp(24px,5vw,64px); background:var(--paper); box-shadow:0 12px 50px #1b29201a; }
+    .eyebrow,.meta { font:500 11px/1.4 "DM Mono",monospace; letter-spacing:.1em; text-transform:uppercase; color:var(--accent); }
+    header { padding-bottom:34px; border-bottom:1px solid var(--line); } h1 { max-width:800px; margin:12px 0; font-size:clamp(34px,6vw,62px); line-height:1.04; letter-spacing:-.055em; } .lede { max-width:700px; color:var(--muted); font-size:18px; }
+    section { margin-top:46px; } h2 { margin:0 0 16px; font-size:22px; letter-spacing:-.03em; } h3 { margin:0 0 8px; font-size:16px; } .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }
+    .card { padding:20px; border:1px solid var(--line); border-radius:12px; background:#fff; } button.card,.callout,.action-button { width:100%; color:inherit; font:inherit; text-align:left; cursor:pointer; } .card p,.evidence p { margin:0; color:var(--muted); } .number { display:block; margin-bottom:6px; color:var(--accent); font-size:28px; font-weight:800; letter-spacing:-.05em; }
+    .callout { padding:24px; border:0; border-left:4px solid var(--accent); background:var(--accent-soft); font-size:17px; } .evidence { display:grid; gap:12px; }
+    .evidence article { padding:18px 0; border-top:1px solid var(--line); } ol { display:grid; gap:12px; padding-left:22px; } li::marker { color:var(--accent); font-weight:800; } .action-button { border:0; padding:0; background:transparent; }
+    footer { margin-top:56px; padding-top:18px; border-top:1px solid var(--line); color:var(--muted); font-size:12px; }
+    @media (max-width:700px) { main { margin:0; } .grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">{{REPORT_TYPE}}</div>
+      <h1>{{TITLE}}</h1>
+      <p class="lede">{{SUBTITLE}}</p>
+      <p class="meta">Prepared {{UPDATED_AT}} · {{AUTHOR_OR_TEAM}}</p>
+    </header>
+
+    <section aria-labelledby="summary-heading">
+      <h2 id="summary-heading">Executive summary</h2>
+      <button type="button" class="callout agent2ui-object" data-agent2ui-content="{{EXECUTIVE_SUMMARY}}" aria-label="Use executive summary in chat">{{EXECUTIVE_SUMMARY}}</button>
+    </section>
+
+    <section aria-labelledby="findings-heading">
+      <h2 id="findings-heading">Key findings</h2>
+      <div class="grid">
+        <button type="button" class="card agent2ui-object" data-agent2ui-content="{{FINDING_1_TITLE}}: {{FINDING_1_DETAIL}}" aria-label="Use finding one in chat"><span class="number">01</span><h3>{{FINDING_1_TITLE}}</h3><p>{{FINDING_1_DETAIL}}</p></button>
+        <button type="button" class="card agent2ui-object" data-agent2ui-content="{{FINDING_2_TITLE}}: {{FINDING_2_DETAIL}}" aria-label="Use finding two in chat"><span class="number">02</span><h3>{{FINDING_2_TITLE}}</h3><p>{{FINDING_2_DETAIL}}</p></button>
+        <button type="button" class="card agent2ui-object" data-agent2ui-content="{{FINDING_3_TITLE}}: {{FINDING_3_DETAIL}}" aria-label="Use finding three in chat"><span class="number">03</span><h3>{{FINDING_3_TITLE}}</h3><p>{{FINDING_3_DETAIL}}</p></button>
+      </div>
+    </section>
+
+    <section aria-labelledby="evidence-heading">
+      <h2 id="evidence-heading">Evidence and context</h2>
+      <div class="evidence">
+        <article><h3>{{EVIDENCE_1_TITLE}}</h3><p>{{EVIDENCE_1_DETAIL}}</p></article>
+        <article><h3>{{EVIDENCE_2_TITLE}}</h3><p>{{EVIDENCE_2_DETAIL}}</p></article>
+      </div>
+    </section>
+
+    <section aria-labelledby="actions-heading">
+      <h2 id="actions-heading">Recommended next actions</h2>
+      <ol>
+        <li><button type="button" class="action-button agent2ui-object" data-agent2ui-content="{{ACTION_1}}" aria-label="Use action one in chat">{{ACTION_1}}</button></li><li><button type="button" class="action-button agent2ui-object" data-agent2ui-content="{{ACTION_2}}" aria-label="Use action two in chat">{{ACTION_2}}</button></li><li><button type="button" class="action-button agent2ui-object" data-agent2ui-content="{{ACTION_3}}" aria-label="Use action three in chat">{{ACTION_3}}</button></li>
+      </ol>
+    </section>
+
+    <footer>{{FOOTNOTE_OR_ASSUMPTION}}</footer>
+  </main>
+  <script src="/static/skills/html-deliverable/assets/agent2ui-bridge.js"></script>
+</body>
+</html>

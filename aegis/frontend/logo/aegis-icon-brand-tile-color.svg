@@ -1,0 +1,59 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="aegisTileGradient" x1="32" y1="3" x2="32" y2="61" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2DE2F7" />
+      <stop offset="100%" stop-color="#0E58CC" />
+    </linearGradient>
+  </defs>
+
+  <path
+    d="M32 3L54 12V34L32 61L10 34V12L32 3Z"
+    fill="url(#aegisTileGradient)"
+  />
+  <path
+    d="M32 8L48 14.6V33L32 52.5L16 33V14.6L32 8Z"
+    fill="#FFFFFF"
+    opacity="0.14"
+  />
+
+  <path
+    d="M24.6 47.4L32 18.6L39.4 47.4"
+    stroke="#FFFFFF"
+    stroke-width="5.3"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M27.8 36.4H36.2"
+    stroke="#FFFFFF"
+    stroke-width="4.4"
+    stroke-linecap="round"
+  />
+
+  <path
+    d="M32 33.4V25.8"
+    stroke="#EAFBFF"
+    stroke-opacity="0.95"
+    stroke-width="1.8"
+    stroke-linecap="round"
+  />
+  <path
+    d="M32 33.4L25.6 34.2"
+    stroke="#EAFBFF"
+    stroke-opacity="0.95"
+    stroke-width="1.8"
+    stroke-linecap="round"
+  />
+  <path
+    d="M32 33.4L38.4 34.2"
+    stroke="#EAFBFF"
+    stroke-opacity="0.95"
+    stroke-width="1.8"
+    stroke-linecap="round"
+  />
+  <circle cx="32" cy="33.4" r="2.6" fill="#FFFFFF" fill-opacity="0.2" />
+  <circle cx="32" cy="33.4" r="1.1" fill="#FFFFFF" />
+  <circle cx="32" cy="25.8" r="1" fill="#FFFFFF" />
+  <circle cx="25.6" cy="34.2" r="1" fill="#FFFFFF" />
+  <circle cx="38.4" cy="34.2" r="1" fill="#FFFFFF" />
+</svg>

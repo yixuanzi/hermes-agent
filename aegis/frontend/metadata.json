@@ -1,0 +1,6 @@
+{
+  "name": "Aegis Security Coordination Hub",
+  "description": "A high-fidelity cybersecurity AI coordination and orchestration hub, including star map topology overview, live chat with visual agent chains, agent management, and routing policies.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

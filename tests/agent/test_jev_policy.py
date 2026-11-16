@@ -1,0 +1,1873 @@
+"""Settings resolution, feature gating and decisions for the Jev policy layer."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from agent import jev_policy
+from agent.jev_client import _parse_answer
+from agent.jev_policy import TierModel
+
+
+_JEV_ENV = [
+    "TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_MODEL",
+    "HERMES_JEV_TIMEOUT", "HERMES_JEV_CHANNEL_AUTOREPLY",
+    "HERMES_JEV_COMPLEXITY_ROUTING", "HERMES_JEV_BUSINESS_SCOPE",  # removed; still cleared
+    "HERMES_JEV_RELEVANCE_THRESHOLD",
+    "HERMES_JEV_MODEL_LOW", "HERMES_JEV_MODEL_MEDIUM", "HERMES_JEV_MODEL_HIGH",
+    "HERMES_JEV_PROVIDER_LOW", "HERMES_JEV_PROVIDER_MEDIUM", "HERMES_JEV_PROVIDER_HIGH",
+    "HERMES_JEV_REASONING_LOW", "HERMES_JEV_REASONING_MEDIUM", "HERMES_JEV_REASONING_HIGH",
+    "HERMES_JEV_AGENT_DESCRIPTION", "HERMES_JEV_REMOTE_AGENTS",
+    "HERMES_JEV_AUTOREPLY", "HERMES_JEV_THREAD_AUTOREPLY",
+    "HERMES_JEV_CRITERIA_LOW", "HERMES_JEV_CRITERIA_MEDIUM", "HERMES_JEV_CRITERIA_HIGH",
+]
+
+
+@pytest.fixture
+def jev_env(monkeypatch):
+    """No Jev env and no Jev config.yaml section unless a test supplies one."""
+    for name in _JEV_ENV:
+        monkeypatch.delenv(name, raising=False)
+    config: dict = {}
+    monkeypatch.setattr(jev_policy, "_jev_config", lambda: config)
+    return config
+
+
+def _noul(probability: float):
+    return _parse_answer("noul", {"type": "noul", "noul": probability})
+
+
+def _admission(in_scope=0.0, wants_answer=0.0, *, delegatable=None, addressed=0.0):
+    """A COMPLETE admission response; unnamed propositions answer "no".
+
+    Admission asks three or four nouls in one pass, and a missing answer is
+    UNDECIDED rather than a default — so a test that names only the dimension
+    it cares about still has to send the rest.
+    """
+    answers = {
+        "in_scope": _noul(in_scope),
+        "addressed": _noul(addressed),
+        "wants_answer": _noul(wants_answer),
+    }
+    if delegatable is not None:
+        answers["delegatable"] = _noul(delegatable)
+    return answers
+
+
+def _band(label: str, confidence: float):
+    """A complexity answer as Jev returns it: a choice over the four options."""
+    return _parse_answer(
+        "choice",
+        {
+            "type": "choice",
+            "choice": label,
+            "probabilities": {
+                name: (1.0 if name == label else 0.0)
+                for name in jev_policy.COMPLEXITY_CHOICES
+            },
+            "confidence": confidence,
+        },
+    )
+
+
+class _StubClient:
+    """Stands in for JevClient; records the questions it was asked."""
+
+    def __init__(self, answers):
+        self._answers = answers
+        self.asked = []
+
+    def ask(self, state, questions, **_kwargs):
+        self.asked.append((state, dict(questions)))
+        if self._answers is None:
+            return None
+        return {name: self._answers[name] for name in questions if name in self._answers}
+
+
+# --- settings resolution ---------------------------------------------------
+
+
+def test_defaults_apply_with_no_env_and_no_config(jev_env):
+    settings = jev_policy.load_jev_settings()
+    assert settings.api_key == ""
+    assert settings.configured is False
+    assert settings.base_url == jev_policy.DEFAULT_JEV_BASE_URL
+    assert settings.model == jev_policy.DEFAULT_JEV_MODEL
+    assert settings.channel_autoreply is False
+    assert settings.complexity_routing is False
+    assert settings.relevance_threshold == pytest.approx(0.7)
+    assert settings.tier_models == {}
+
+
+def test_config_yaml_supplies_settings_when_no_env_is_set(jev_env):
+    jev_env.update(
+        {
+            "base_url": "https://cfg.test",
+            "model": "jev-cfg",
+            "timeout": 3,
+            "channel_autoreply": True,
+            "complexity_routing": True,
+            "agent_description": "from config",
+            "relevance_threshold": 0.9,
+            "models": {"low": "cfg-low", "high": {"model": "cfg-high", "provider": "openai"}},
+        }
+    )
+    settings = jev_policy.load_jev_settings()
+    assert settings.base_url == "https://cfg.test"
+    assert settings.model == "jev-cfg"
+    assert settings.timeout == pytest.approx(3.0)
+    assert settings.channel_autoreply is True
+    assert settings.complexity_routing is True
+    assert settings.agent_description == "from config"
+    assert settings.relevance_threshold == pytest.approx(0.9)
+    assert settings.tier_models["low"] == TierModel(model="cfg-low")
+    assert settings.tier_models["high"] == TierModel(model="cfg-high", provider="openai")
+    assert "medium" not in settings.tier_models
+
+
+def test_env_wins_over_config_yaml(jev_env, monkeypatch):
+    jev_env.update(
+        {
+            "base_url": "https://cfg.test",
+            "channel_autoreply": False,
+            "agent_description": "from config",
+            "models": {"high": "cfg-high"},
+        }
+    )
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "https://env.test")
+    monkeypatch.setenv("HERMES_JEV_CHANNEL_AUTOREPLY", "true")
+    monkeypatch.setenv("HERMES_JEV_AGENT_DESCRIPTION", "from env")
+    monkeypatch.setenv("HERMES_JEV_MODEL_HIGH", "env-high")
+
+    settings = jev_policy.load_jev_settings()
+    assert settings.base_url == "https://env.test"
+    assert settings.channel_autoreply is True
+    assert settings.agent_description == "from env"
+    assert settings.tier_models["high"] == TierModel(model="env-high")
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [("true", True), ("1", True), ("yes", True), ("on", True),
+     ("false", False), ("0", False), ("off", False), ("", False), ("garbage", False)],
+)
+def test_flag_parsing(jev_env, monkeypatch, raw, expected):
+    monkeypatch.setenv("HERMES_JEV_COMPLEXITY_ROUTING", raw)
+    assert jev_policy.load_jev_settings().complexity_routing is expected
+
+
+def test_a_malformed_threshold_falls_back_to_the_default(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_RELEVANCE_THRESHOLD", "not-a-number")
+    assert jev_policy.load_jev_settings().relevance_threshold == pytest.approx(0.7)
+
+
+def test_an_unreadable_config_yields_an_empty_section_rather_than_raising(monkeypatch):
+    import hermes_cli.config as hermes_config
+
+    def _boom():
+        raise RuntimeError("config.yaml is unreadable")
+
+    monkeypatch.setattr(hermes_config, "load_config_readonly", _boom)
+    assert jev_policy._jev_config() == {}
+
+
+def test_a_non_dict_jev_section_is_ignored(monkeypatch):
+    import hermes_cli.config as hermes_config
+
+    monkeypatch.setattr(hermes_config, "load_config_readonly", lambda: {"jev": "nope"})
+    assert jev_policy._jev_config() == {}
+
+
+def test_settings_still_resolve_when_the_config_file_is_unreadable(monkeypatch):
+    import hermes_cli.config as hermes_config
+
+    for name in _JEV_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+    def _boom():
+        raise RuntimeError("config.yaml is unreadable")
+
+    monkeypatch.setattr(hermes_config, "load_config_readonly", _boom)
+    settings = jev_policy.load_jev_settings()
+    assert settings.configured is False
+    assert settings.channel_autoreply is False
+    assert settings.complexity_routing is False
+
+
+# --- feature gates ---------------------------------------------------------
+
+
+def test_channel_autoreply_needs_flag_key_and_scope(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_CHANNEL_AUTOREPLY", "true")
+    assert jev_policy.channel_autoreply_active() is False, "no API key"
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    assert jev_policy.channel_autoreply_active() is False, "no agent description"
+
+    monkeypatch.setenv("HERMES_JEV_AGENT_DESCRIPTION", "security operations")
+    assert jev_policy.channel_autoreply_active() is True
+
+
+def test_channel_autoreply_stays_off_while_the_flag_is_off(jev_env, monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    monkeypatch.setenv("HERMES_JEV_AGENT_DESCRIPTION", "security operations")
+    assert jev_policy.channel_autoreply_active() is False
+
+
+def test_complexity_routing_needs_flag_key_and_at_least_one_band(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_COMPLEXITY_ROUTING", "true")
+    assert jev_policy.complexity_routing_active() is False, "no API key"
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    assert jev_policy.complexity_routing_active() is False, "no band model"
+
+    monkeypatch.setenv("HERMES_JEV_MODEL_HIGH", "big-model")
+    assert jev_policy.complexity_routing_active() is True
+
+
+def test_build_client_returns_none_without_a_key(jev_env):
+    assert jev_policy.build_client() is None
+
+
+def test_build_client_carries_the_resolved_settings(jev_env, monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "https://env.test")
+    monkeypatch.setenv("TYPESAFE_MODEL", "jev-x")
+    client = jev_policy.build_client()
+    assert (client.api_key, client.base_url, client.model) == ("k", "https://env.test", "jev-x")
+
+
+# --- channel relevance -----------------------------------------------------
+
+
+def _settings(**overrides):
+    base = dict(
+        api_key="k",
+        agent_description="A security operations assistant.",
+        channel_autoreply=True,
+    )
+    base.update(overrides)
+    return jev_policy.JevSettings(**base)
+
+
+def test_a_message_is_admitted_only_when_both_propositions_clear_the_threshold():
+    client = _StubClient(_admission(0.98, 0.97))
+    assert jev_policy.judge_channel_relevance("…", settings=_settings(), client=client) is True
+
+
+def test_an_in_scope_statement_that_asks_nothing_is_not_answered():
+    client = _StubClient(_admission(0.97, 0.04))
+    assert jev_policy.judge_channel_relevance("…", settings=_settings(), client=client) is False
+
+
+def test_an_off_topic_question_is_not_answered():
+    client = _StubClient(_admission(0.17, 0.96))
+    assert jev_policy.judge_channel_relevance("…", settings=_settings(), client=client) is False
+
+
+def test_the_threshold_moves_the_admission_bar():
+    client = _StubClient(_admission(0.8, 0.8))
+    assert jev_policy.judge_channel_relevance("…", settings=_settings(), client=client) is True
+    client = _StubClient(_admission(0.8, 0.8))
+    strict = _settings(relevance_threshold=0.95)
+    assert jev_policy.judge_channel_relevance("…", settings=strict, client=client) is False
+
+
+def test_every_proposition_rides_in_one_request():
+    client = _StubClient(_admission(0.9, 0.9))
+    jev_policy.judge_channel_relevance(
+        "hello", settings=_settings(), client=client, channel_name="ops", sender_name="zhang",
+    )
+    assert len(client.asked) == 1
+    state, questions = client.asked[0]
+    assert set(questions) == {"in_scope", "addressed", "wants_answer"}
+    assert state["agent"] == "A security operations assistant."
+    assert state["message"] == "hello"
+    assert state["channel"] == "ops"
+    assert state["sender"] == "zhang"
+    assert "remote_agents" not in state
+
+
+@pytest.mark.parametrize("missing", ["in_scope", "addressed", "wants_answer"])
+def test_a_partial_answer_is_undecided_not_a_yes(missing):
+    # Every proposition is load-bearing: a response short one of them is
+    # UNDECIDED, never "assume no" — the disjuncts would each read as a
+    # silent false and the AND term as a silent true.
+    answers = _admission(0.99, 0.99)
+    answers.pop(missing)
+    client = _StubClient(answers)
+    assert jev_policy.judge_channel_relevance("…", settings=_settings(), client=client) is None
+
+
+def test_an_unreachable_service_is_undecided():
+    assert (
+        jev_policy.judge_channel_relevance("…", settings=_settings(), client=_StubClient(None))
+        is None
+    )
+
+
+def test_empty_text_is_never_sent_for_judgement():
+    client = _StubClient(_admission(0.9, 0.9))
+    assert jev_policy.judge_channel_relevance("   ", settings=_settings(), client=client) is None
+    assert client.asked == []
+
+
+@pytest.mark.asyncio
+async def test_judge_channel_relevance_async_mirrors_the_sync_call():
+    client = _StubClient(_admission(0.98, 0.97))
+    verdict = await jev_policy.judge_channel_relevance_async(
+        "…", settings=_settings(), client=client
+    )
+    assert verdict is True
+
+
+# --- complexity ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("band", ["low", "medium", "high"])
+def test_a_confident_band_is_returned(band):
+    client = _StubClient({"complexity": _band(band, 0.9)})
+    settings = jev_policy.JevSettings(api_key="k")
+    assert jev_policy.judge_complexity("…", settings=settings, client=client) == band
+
+
+@pytest.mark.parametrize("confidence", [0.99, 0.5, 0.26, 0.01, 0.0])
+def test_there_is_no_confidence_floor(confidence):
+    # `other` is how the model says "I cannot place this" now. A thin-spread
+    # answer is still a pick, and discarding it was throwing away CORRECT
+    # bands whose mass had split with the residual — measured, a report-layout
+    # task banded `medium` at 0.30.
+    client = _StubClient({"complexity": _band("high", confidence)})
+    settings = jev_policy.JevSettings(api_key="k")
+    assert jev_policy.judge_complexity("…", settings=settings, client=client) == "high"
+
+
+def test_the_settings_no_longer_carry_a_confidence_floor():
+    assert not hasattr(jev_policy.JevSettings(), "min_confidence")
+
+
+def test_the_min_confidence_environment_variable_is_no_longer_read(
+    jev_env, monkeypatch
+):
+    monkeypatch.setenv("HERMES_JEV_MIN_CONFIDENCE", "0.9")
+    jev_env["min_confidence"] = 0.9
+    settings = jev_policy.load_jev_settings()
+    assert not hasattr(settings, "min_confidence")
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    client = _StubClient({"complexity": _band("high", 0.05)})
+    assert jev_policy.judge_complexity(
+        "…", settings=jev_policy.load_jev_settings(), client=client,
+    ) == "high"
+
+
+def test_an_unreachable_service_yields_no_band():
+    settings = jev_policy.JevSettings(api_key="k")
+    assert jev_policy.judge_complexity("…", settings=settings, client=_StubClient(None)) is None
+
+
+def test_empty_text_is_not_classified():
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    settings = jev_policy.JevSettings(api_key="k")
+    assert jev_policy.judge_complexity("  ", settings=settings, client=client) is None
+    assert client.asked == []
+
+
+@pytest.mark.asyncio
+async def test_judge_complexity_async_mirrors_the_sync_call():
+    client = _StubClient({"complexity": _band("medium", 0.9)})
+    settings = jev_policy.JevSettings(api_key="k")
+    assert await jev_policy.judge_complexity_async("…", settings=settings, client=client) == "medium"
+
+
+# --- the fourth option: `other` --------------------------------------------
+#
+# The three bands' criteria are configurable, so they will not cover everything
+# that arrives. Asked as a `score` the model had to place every request on the
+# low→high line and an out-of-criteria request still got routed by whichever
+# band it was forced onto. `other` gives it somewhere honest to go.
+
+
+def test_other_is_returned_as_a_real_answer():
+    client = _StubClient({"complexity": _band("other", 0.95)})
+    settings = jev_policy.JevSettings(api_key="k")
+    assert jev_policy.judge_complexity("…", settings=settings, client=client) == "other"
+
+
+def test_other_routes_to_the_default_model():
+    settings = jev_policy.JevSettings(
+        api_key="k",
+        tier_models={t: jev_policy.TierModel(model=f"{t}-model")
+                     for t in jev_policy.COMPLEXITY_TIERS},
+    )
+    assert jev_policy.resolve_tier_model("other", settings) is None
+
+
+def test_a_models_entry_named_other_cannot_create_a_fourth_band():
+    # `other` means "the default model". A stray jev.models.other must not
+    # quietly turn the residual into a routable band.
+    settings = jev_policy.JevSettings(
+        api_key="k", tier_models={"other": jev_policy.TierModel(model="sneaky")},
+    )
+    assert jev_policy.resolve_tier_model("other", settings) is None
+
+
+def test_other_is_not_gated_on_confidence_either():
+    client = _StubClient({"complexity": _band("other", 0.2)})
+    settings = jev_policy.JevSettings(api_key="k")
+    assert jev_policy.judge_complexity("…", settings=settings, client=client) == "other"
+
+
+def test_an_answer_outside_the_four_options_is_undecided():
+    client = _StubClient({"complexity": _band("gigantic", 0.99)})
+    settings = jev_policy.JevSettings(api_key="k")
+    assert jev_policy.judge_complexity("…", settings=settings, client=client) is None
+
+
+def test_other_says_so_in_the_log(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient({"complexity": _band("other", 0.95)})
+    settings = jev_policy.JevSettings(api_key="k")
+    jev_policy.judge_complexity("…", settings=settings, client=client)
+
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "OTHER" in line
+    assert "default model" in line
+    assert "ms" in line
+
+
+# --- what each band MEANS is configurable ----------------------------------
+
+
+def test_the_four_options_reach_the_wire_with_their_criteria():
+    client = _StubClient({"complexity": _band("low", 0.9)})
+    settings = jev_policy.JevSettings(api_key="k")
+    jev_policy.judge_complexity("…", settings=settings, client=client)
+
+    _, questions = client.asked[0]
+    question = questions["complexity"]
+    assert question["type"] == "choice"
+    assert list(question["criteria"]) == list(jev_policy.COMPLEXITY_CHOICES)
+    assert all(question["criteria"].values()), "every option must carry a criterion"
+
+
+def test_the_instructions_do_not_also_define_the_bands():
+    # The definitions live in `criteria` precisely so an override REPLACES
+    # them. Instructions that defined them too would contradict the override.
+    for band, criterion in jev_policy.DEFAULT_COMPLEXITY_CRITERIA.items():
+        assert criterion not in jev_policy._COMPLEXITY_QUESTION, band
+
+
+def test_an_unconfigured_band_uses_the_built_in_criterion():
+    criteria = jev_policy._complexity_criteria(jev_policy.JevSettings())
+    for band in jev_policy.COMPLEXITY_TIERS:
+        assert criteria[band] == jev_policy.DEFAULT_COMPLEXITY_CRITERIA[band]
+    assert criteria["other"] == jev_policy._OTHER_CRITERION
+
+
+def test_a_configured_band_replaces_only_its_own_criterion():
+    settings = jev_policy.JevSettings(
+        complexity_criteria={"high": "A fleet-wide campaign."},
+    )
+    criteria = jev_policy._complexity_criteria(settings)
+    assert criteria["high"] == "A fleet-wide campaign."
+    assert criteria["low"] == jev_policy.DEFAULT_COMPLEXITY_CRITERIA["low"]
+    assert criteria["medium"] == jev_policy.DEFAULT_COMPLEXITY_CRITERIA["medium"]
+
+
+def test_a_blank_criterion_falls_back_rather_than_sending_nothing():
+    # An empty option description is worse than a default one: it strips the
+    # calibration the answer is then gated on.
+    settings = jev_policy.JevSettings(complexity_criteria={"low": "   ", "medium": ""})
+    criteria = jev_policy._complexity_criteria(settings)
+    assert criteria["low"] == jev_policy.DEFAULT_COMPLEXITY_CRITERIA["low"]
+    assert criteria["medium"] == jev_policy.DEFAULT_COMPLEXITY_CRITERIA["medium"]
+
+
+def test_the_residual_criterion_is_not_configurable():
+    settings = jev_policy.JevSettings(
+        complexity_criteria={"other": "anything I feel like"},
+    )
+    assert jev_policy._complexity_criteria(settings)["other"] == jev_policy._OTHER_CRITERION
+
+
+def test_criteria_come_from_config(jev_env):
+    jev_env["criteria"] = {"low": "from config"}
+    assert jev_policy.load_jev_settings().complexity_criteria == {"low": "from config"}
+
+
+def test_criteria_come_from_the_environment(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_CRITERIA_MEDIUM", "from env")
+    assert jev_policy.load_jev_settings().complexity_criteria == {"medium": "from env"}
+
+
+def test_the_environment_wins_per_band(jev_env, monkeypatch):
+    # Same rule as the band models: env overrides config per FIELD, so setting
+    # one band's criterion in the environment leaves the others as configured.
+    jev_env["criteria"] = {"low": "config low", "high": "config high"}
+    monkeypatch.setenv("HERMES_JEV_CRITERIA_LOW", "env low")
+    resolved = jev_policy.load_jev_settings().complexity_criteria
+    assert resolved == {"low": "env low", "high": "config high"}
+
+
+def test_configured_criteria_reach_the_wire(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_CRITERIA_HIGH", "A fleet-wide campaign.")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    jev_policy.judge_complexity(
+        "…", settings=jev_policy.load_jev_settings(), client=client,
+    )
+    _, questions = client.asked[0]
+    assert questions["complexity"]["criteria"]["high"] == "A fleet-wide campaign."
+
+
+# --- band → model ----------------------------------------------------------
+
+
+def test_resolve_tier_model_returns_none_for_an_unconfigured_band():
+    settings = jev_policy.JevSettings(tier_models={"high": TierModel(model="big")})
+    assert jev_policy.resolve_tier_model("high", settings).model == "big"
+    assert jev_policy.resolve_tier_model("low", settings) is None
+    assert jev_policy.resolve_tier_model(None, settings) is None
+
+
+def test_route_model_for_request_is_a_no_op_while_routing_is_off(jev_env):
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    assert jev_policy.route_model_for_request("…", client=client) is None
+    assert client.asked == []
+
+
+def test_route_model_for_request_returns_the_band_model():
+    settings = jev_policy.JevSettings(
+        api_key="k",
+        complexity_routing=True,
+        tier_models={"high": TierModel(model="big-model")},
+    )
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    assert jev_policy.route_model_for_request("…", settings=settings, client=client).model == "big-model"
+
+
+def test_a_band_with_no_configured_model_keeps_the_default():
+    settings = jev_policy.JevSettings(
+        api_key="k",
+        complexity_routing=True,
+        tier_models={"high": TierModel(model="big-model")},
+    )
+    client = _StubClient({"complexity": _band("low", 0.9)})
+    assert jev_policy.route_model_for_request("…", settings=settings, client=client) is None
+
+
+# --- applying a band to a long-lived agent ---------------------------------
+
+
+def _switchable(*, model, requested_provider, base_url="https://base.test"):
+    """A stand-in agent implementing the AIAgent.switch_model contract."""
+
+    class _Agent(SimpleNamespace):
+        def switch_model(self, *, new_model, new_provider, api_key="", base_url="",
+                         api_mode=""):
+            self.model = new_model
+            self.provider = new_provider
+            self.requested_provider = new_provider
+            self.api_key = api_key
+            self.base_url = base_url
+            self.api_mode = api_mode
+
+    return _Agent(model=model, provider=requested_provider.split(":")[0],
+                  requested_provider=requested_provider, api_key="k",
+                  base_url=base_url, api_mode="openai_chat")
+
+
+def _stub_credentials(monkeypatch, by_provider):
+    """Make resolve_runtime_provider return a base_url per provider id."""
+    import hermes_cli.runtime_provider as rp
+
+    def _resolve(*, requested=None, target_model=None, **_kwargs):
+        if requested not in by_provider:
+            raise RuntimeError(f"no credentials for {requested}")
+        return {
+            "provider": requested.split(":")[0],
+            "api_key": f"k-{requested}",
+            "base_url": by_provider[requested],
+            "api_mode": "openai_chat",
+        }
+
+    monkeypatch.setattr(rp, "resolve_runtime_provider", _resolve)
+
+
+
+def test_the_agent_model_is_swapped_for_the_band():
+    agent = SimpleNamespace(model="default-model", provider="openai")
+    assert jev_policy.apply_tier_to_agent(agent, TierModel(model="big")) == "big"
+    assert agent.model == "big"
+
+
+def test_no_band_restores_the_agents_own_model():
+    agent = SimpleNamespace(model="default-model", provider="openai")
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big"))
+    jev_policy.apply_tier_to_agent(agent, None)
+    assert agent.model == "default-model"
+
+
+def test_the_baseline_is_captured_once_and_survives_repeated_banding():
+    agent = SimpleNamespace(model="default-model", provider="openai")
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big"))
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="small"))
+    assert agent.model == "small"
+    jev_policy.apply_tier_to_agent(agent, None)
+    assert agent.model == "default-model"
+
+
+def test_a_band_pinned_to_another_provider_switches_the_agent(monkeypatch):
+    agent = _switchable(model="default-model", requested_provider="openai")
+    _stub_credentials(monkeypatch, {"anthropic": "https://anthropic.test"})
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", provider="anthropic"))
+    assert agent.model == "big"
+    assert agent.requested_provider == "anthropic"
+    assert agent.base_url == "https://anthropic.test"
+
+
+def test_a_cross_provider_band_whose_credentials_fail_leaves_the_agent_alone(monkeypatch):
+    import hermes_cli.runtime_provider as rp
+
+    def _boom(**_kwargs):
+        raise RuntimeError("no credentials for anthropic")
+
+    monkeypatch.setattr(rp, "resolve_runtime_provider", _boom)
+    agent = _switchable(model="default-model", requested_provider="openai")
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", provider="anthropic"))
+    assert agent.model == "default-model"
+    assert agent.requested_provider == "openai"
+
+
+def test_a_failing_switch_leaves_the_agent_on_its_current_runtime(monkeypatch):
+    agent = _switchable(model="default-model", requested_provider="openai")
+    _stub_credentials(monkeypatch, {"anthropic": "https://anthropic.test"})
+
+    def _boom(**_kwargs):
+        raise RuntimeError("client rebuild failed")
+
+    agent.switch_model = _boom
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", provider="anthropic"))
+    assert agent.model == "default-model"
+    assert agent.requested_provider == "openai"
+
+
+def test_an_agent_without_switch_model_is_left_alone(monkeypatch):
+    _stub_credentials(monkeypatch, {"anthropic": "https://anthropic.test"})
+    agent = SimpleNamespace(model="default-model", provider="openai",
+                            requested_provider="openai")
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", provider="anthropic"))
+    assert agent.model == "default-model"
+
+
+def test_no_band_restores_the_profile_provider_too(monkeypatch):
+    agent = _switchable(model="default-model", requested_provider="openai",
+                        base_url="https://openai.test")
+    _stub_credentials(monkeypatch, {"anthropic": "https://anthropic.test"})
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", provider="anthropic"))
+    assert agent.requested_provider == "anthropic"
+
+    jev_policy.apply_tier_to_agent(agent, None)
+    assert agent.model == "default-model"
+    assert agent.requested_provider == "openai"
+    assert agent.base_url == "https://openai.test"
+
+
+def test_switching_back_and_forth_keeps_the_original_baseline(monkeypatch):
+    agent = _switchable(model="default-model", requested_provider="openai",
+                        base_url="https://openai.test")
+    _stub_credentials(monkeypatch, {"anthropic": "https://anthropic.test",
+                                    "xai": "https://xai.test"})
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="a", provider="anthropic"))
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="b", provider="xai"))
+    jev_policy.apply_tier_to_agent(agent, None)
+    assert (agent.model, agent.requested_provider, agent.base_url) == (
+        "default-model", "openai", "https://openai.test",
+    )
+
+
+def test_a_band_pinned_to_the_agents_own_provider_still_applies():
+    agent = SimpleNamespace(model="default-model", provider="OpenAI")
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", provider="openai"))
+    assert agent.model == "big"
+
+
+# --- provider identity: full id vs canonicalized namespace ------------------
+#
+# A profile requests `custom:glm`; the runtime canonicalizes that to the bare
+# `custom` namespace on `agent.provider`. Comparing a band's full id against
+# the namespace rejects a band pinned to the provider the agent is ALREADY on,
+# which silently disabled every custom-provider band on this surface.
+
+
+@pytest.mark.parametrize(
+    "configured, pinned, expected",
+    [
+        ("custom:glm", "custom:glm", True),
+        ("glm", "custom:glm", True),           # bare name is the same provider
+        ("custom:glm", "glm", True),
+        ("CUSTOM:GLM", "custom:glm", True),    # case-insensitive
+        ("custom:glm", "custom:chatai", False),
+        ("custom", "custom:glm", False),       # namespace alone names no provider
+        ("custom:glm", "custom", False),
+        ("openai", "openai", True),
+        ("openai", "anthropic", False),
+        (None, "custom:glm", False),
+        ("custom:glm", None, False),
+        ("", "", False),
+    ],
+)
+def test_provider_ids_match(configured, pinned, expected):
+    assert jev_policy._provider_ids_match(configured, pinned) is expected
+
+
+def test_a_custom_provider_band_applies_when_the_agent_is_on_that_provider():
+    # The regression: agent.provider is the canonicalized namespace, so the
+    # band must be matched against requested_provider instead.
+    agent = SimpleNamespace(
+        model="glm-5.3-flash", provider="custom", requested_provider="custom:glm",
+    )
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="glm-5.3", provider="custom:glm"))
+    assert agent.model == "glm-5.3"
+
+
+def test_a_custom_provider_band_for_a_different_custom_entry_is_still_skipped():
+    agent = SimpleNamespace(
+        model="glm-5.3-flash", provider="custom", requested_provider="custom:glm",
+    )
+    jev_policy.apply_tier_to_agent(
+        agent, TierModel(model="gpt-5.6-sol", provider="custom:chatai")
+    )
+    assert agent.model == "glm-5.3-flash"
+
+
+def test_without_requested_provider_a_bare_custom_namespace_cannot_be_verified():
+    # Nothing identifies WHICH custom provider the agent uses, so the safe
+    # answer is to keep the profile's model rather than guess an endpoint.
+    agent = SimpleNamespace(model="glm-5.3-flash", provider="custom")
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="glm-5.3", provider="custom:glm"))
+    assert agent.model == "glm-5.3-flash"
+
+
+def test_a_cross_provider_switch_is_logged_with_both_sides(monkeypatch, caplog):
+    caplog.set_level("INFO")
+    _stub_credentials(monkeypatch, {"custom:chatai": "https://chatai.test"})
+    agent = _switchable(model="glm-5.3-flash", requested_provider="custom:glm")
+    jev_policy.apply_tier_to_agent(
+        agent, TierModel(model="gpt-5.6-sol", provider="custom:chatai")
+    )
+    line = [r.getMessage() for r in caplog.records if "[Jev]" in r.getMessage()][-1]
+    assert "gpt-5.6-sol" in line and "custom:chatai" in line
+    assert "glm-5.3-flash" in line and "custom:glm" in line
+    assert agent.model == "gpt-5.6-sol"
+
+
+def test_applying_a_band_to_nothing_is_harmless():
+    assert jev_policy.apply_tier_to_agent(None, TierModel(model="big")) is None
+
+
+# --- decision logging ------------------------------------------------------
+#
+# Operators diagnose "why didn't the bot reply?" and "why is this turn on the
+# expensive model?" from these lines, so each decision has to state its outcome
+# and how long it took -- including the paths that return no decision at all.
+
+
+def _jev_records(caplog):
+    return [r for r in caplog.records if "[Jev]" in r.getMessage()]
+
+
+def test_an_admission_logs_its_verdict_and_latency(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient(_admission(0.98, 0.97))
+    jev_policy.judge_channel_relevance(
+        "…", settings=_settings(), client=client, channel_name="ops",
+    )
+
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "ANSWER" in line
+    assert "ms" in line
+    assert "in_scope=0.98" in line and "wants_answer=0.97" in line
+    assert "threshold=0.70" in line
+
+
+def test_staying_quiet_is_logged_just_as_loudly(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient(_admission(0.02, 0.40))
+    jev_policy.judge_channel_relevance("…", settings=_settings(), client=client)
+
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "STAY QUIET" in line
+    assert "ms" in line
+
+
+def test_an_undecided_admission_warns_rather_than_passing_silently(caplog):
+    caplog.set_level("INFO")
+    jev_policy.judge_channel_relevance("…", settings=_settings(), client=_StubClient(None))
+
+    record = _jev_records(caplog)[-1]
+    assert record.levelname == "WARNING"
+    assert "UNDECIDED" in record.getMessage()
+    assert "ms" in record.getMessage()
+
+
+def test_a_band_logs_its_label_confidence_and_latency(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    settings = jev_policy.JevSettings(api_key="k")
+    jev_policy.judge_complexity("…", settings=settings, client=client)
+
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "high" in line
+    assert "confidence=0.90" in line
+    assert "ms" in line
+
+
+def test_a_thin_band_is_applied_but_its_confidence_is_still_logged(caplog):
+    # The number is no longer a gate, but it is the thing an operator reads to
+    # decide whether a band criterion needs rewriting — so it stays on the line.
+    caplog.set_level("INFO")
+    client = _StubClient({"complexity": _band("high", 0.22)})
+    settings = jev_policy.JevSettings(api_key="k")
+    assert jev_policy.judge_complexity("…", settings=settings, client=client) == "high"
+
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "confidence=0.22" in line
+    assert "REJECTED" not in line
+
+
+def test_an_undecided_band_warns_rather_than_passing_silently(caplog):
+    caplog.set_level("INFO")
+    settings = jev_policy.JevSettings(api_key="k")
+    jev_policy.judge_complexity("…", settings=settings, client=_StubClient(None))
+
+    record = _jev_records(caplog)[-1]
+    assert record.levelname == "WARNING"
+    assert "UNDECIDED" in record.getMessage()
+
+
+def test_skipped_decisions_stay_at_debug(caplog):
+    # Empty text and an unconfigured client are ordinary, not noteworthy --
+    # they must not fill an operator's log at INFO.
+    caplog.set_level("DEBUG")
+    settings = jev_policy.JevSettings(api_key="k")
+    jev_policy.judge_complexity("   ", settings=settings, client=_StubClient(None))
+    jev_policy.judge_channel_relevance("   ", settings=_settings(), client=_StubClient(None))
+
+    records = _jev_records(caplog)
+    assert records, "expected a debug trail"
+    assert all(r.levelname == "DEBUG" for r in records)
+
+
+def test_a_client_without_ask_detailed_is_still_timed(caplog):
+    # _StubClient implements only the minimal ``ask`` contract; the policy
+    # layer times it itself so the log line is never missing its latency.
+    caplog.set_level("INFO")
+    client = _StubClient({"complexity": _band("low", 0.9)})
+    assert not hasattr(client, "ask_detailed")
+    settings = jev_policy.JevSettings(api_key="k")
+    jev_policy.judge_complexity("…", settings=settings, client=client)
+
+    assert "ms" in _jev_records(caplog)[-1].getMessage()
+
+
+# --- complexity scope: how often a session is rated -------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clear_session_bands():
+    """Each test starts with no session remembered."""
+    jev_policy._session_bands.clear()
+    yield
+    jev_policy._session_bands.clear()
+
+
+def test_the_scope_defaults_to_session(jev_env):
+    assert jev_policy.load_jev_settings().complexity_scope == "session"
+
+
+@pytest.mark.parametrize("raw, expected", [("session", "session"), ("turn", "turn"),
+                                           ("TURN", "turn"), ("  session  ", "session")])
+def test_the_scope_is_parsed_case_and_space_insensitively(jev_env, monkeypatch, raw, expected):
+    monkeypatch.setenv("HERMES_JEV_COMPLEXITY_SCOPE", raw)
+    assert jev_policy.load_jev_settings().complexity_scope == expected
+
+
+def test_an_unknown_scope_falls_back_to_session_with_a_warning(jev_env, monkeypatch, caplog):
+    caplog.set_level("WARNING")
+    monkeypatch.setenv("HERMES_JEV_COMPLEXITY_SCOPE", "hourly")
+    assert jev_policy.load_jev_settings().complexity_scope == "session"
+    assert any("complexity scope" in r.getMessage() for r in caplog.records)
+
+
+def test_the_scope_comes_from_config_yaml_when_no_env_is_set(jev_env):
+    jev_env["complexity_scope"] = "turn"
+    assert jev_policy.load_jev_settings().complexity_scope == "turn"
+
+
+def _routing_settings(scope="session"):
+    return jev_policy.JevSettings(
+        api_key="k",
+        complexity_routing=True,
+        complexity_scope=scope,
+        tier_models={t: TierModel(model=f"{t}-model") for t in jev_policy.COMPLEXITY_TIERS},
+    )
+
+
+def test_session_scope_rates_once_and_reuses_the_band():
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    settings = _routing_settings("session")
+
+    first = jev_policy.route_model_for_request("big task", settings=settings,
+                                               client=client, session_key="sess-1")
+    second = jev_policy.route_model_for_request("thanks", settings=settings,
+                                                client=client, session_key="sess-1")
+    assert first.model == second.model == "high-model"
+    assert len(client.asked) == 1, "the follow-up must not be classified again"
+
+
+def test_session_scope_remembers_other_too():
+    # `other` is a confident answer that happens to route to the default model.
+    # Not remembering it would make a session whose first turn falls outside
+    # every band pay for a classification on every single turn, to be told the
+    # same thing each time.
+    client = _StubClient({"complexity": _band("other", 0.95)})
+    settings = _routing_settings("session")
+
+    first = jev_policy.route_model_for_request("a poem please", settings=settings,
+                                               client=client, session_key="sess-o")
+    second = jev_policy.route_model_for_request("another one", settings=settings,
+                                                client=client, session_key="sess-o")
+    assert first is second is None, "other keeps the default model"
+    assert len(client.asked) == 1
+
+
+def test_an_undecided_turn_is_still_not_remembered():
+    # The contrast with `other`: a transient failure must not pin a session to
+    # the default model, so the next turn tries again.
+    settings = _routing_settings("session")
+    jev_policy.route_model_for_request("big task", settings=settings,
+                                       client=_StubClient(None), session_key="sess-u")
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    again = jev_policy.route_model_for_request("big task", settings=settings,
+                                               client=client, session_key="sess-u")
+    assert again.model == "high-model"
+    assert len(client.asked) == 1, "the retry really did reach the classifier"
+
+
+def test_turn_scope_rates_every_turn():
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    settings = _routing_settings("turn")
+
+    jev_policy.route_model_for_request("big task", settings=settings,
+                                       client=client, session_key="sess-1")
+    jev_policy.route_model_for_request("thanks", settings=settings,
+                                       client=client, session_key="sess-1")
+    assert len(client.asked) == 2
+
+
+def test_turn_scope_can_move_a_conversation_between_bands():
+    settings = _routing_settings("turn")
+    high = _StubClient({"complexity": _band("high", 0.9)})
+    low = _StubClient({"complexity": _band("low", 0.9)})
+
+    assert jev_policy.route_model_for_request("big", settings=settings,
+                                              client=high, session_key="s").model == "high-model"
+    assert jev_policy.route_model_for_request("hi", settings=settings,
+                                              client=low, session_key="s").model == "low-model"
+
+
+def test_session_scope_keeps_the_first_band_even_when_the_work_changes():
+    settings = _routing_settings("session")
+    high = _StubClient({"complexity": _band("high", 0.9)})
+    low = _StubClient({"complexity": _band("low", 0.9)})
+
+    assert jev_policy.route_model_for_request("big", settings=settings,
+                                              client=high, session_key="s").model == "high-model"
+    # A second client that would rate `low` is never consulted.
+    assert jev_policy.route_model_for_request("hi", settings=settings,
+                                              client=low, session_key="s").model == "high-model"
+    assert low.asked == []
+
+
+def test_each_session_is_rated_independently():
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    settings = _routing_settings("session")
+
+    jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s1")
+    jev_policy.route_model_for_request("b", settings=settings, client=client, session_key="s2")
+    assert len(client.asked) == 2
+
+
+def test_session_scope_without_a_session_key_degrades_to_per_turn():
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    settings = _routing_settings("session")
+
+    jev_policy.route_model_for_request("a", settings=settings, client=client)
+    jev_policy.route_model_for_request("b", settings=settings, client=client)
+    assert len(client.asked) == 2
+
+
+def test_an_undecided_turn_is_not_remembered_so_the_next_turn_retries():
+    # One transient failure must not pin a whole session to the default model.
+    settings = _routing_settings("session")
+    broken = _StubClient(None)
+    assert jev_policy.route_model_for_request("a", settings=settings,
+                                              client=broken, session_key="s") is None
+
+    working = _StubClient({"complexity": _band("high", 0.9)})
+    assert jev_policy.route_model_for_request("b", settings=settings,
+                                              client=working, session_key="s").model == "high-model"
+
+
+def test_a_thin_band_is_remembered_like_any_other():
+    # There is no confidence floor, so a thin answer is a decision: it bands
+    # the turn AND pins the session, exactly as a confident one would.
+    settings = _routing_settings("session")
+    unsure = _StubClient({"complexity": _band("high", 0.1)})
+    assert jev_policy.route_model_for_request("a", settings=settings,
+                                              client=unsure, session_key="s").model == "high-model"
+
+    never_asked = _StubClient({"complexity": _band("low", 0.9)})
+    assert jev_policy.route_model_for_request("b", settings=settings,
+                                              client=never_asked, session_key="s").model == "high-model"
+    assert never_asked.asked == []
+
+
+def test_forgetting_a_session_makes_the_next_turn_rate_again():
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    settings = _routing_settings("session")
+
+    jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s")
+    jev_policy.forget_session_band("s")
+    jev_policy.route_model_for_request("b", settings=settings, client=client, session_key="s")
+    assert len(client.asked) == 2
+
+
+def test_forgetting_nothing_is_harmless():
+    jev_policy.forget_session_band(None)
+    jev_policy.forget_session_band("")
+
+
+def test_a_reused_band_is_logged_with_its_scope(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    settings = _routing_settings("session")
+
+    jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s")
+    caplog.clear()
+    jev_policy.route_model_for_request("b", settings=settings, client=client, session_key="s")
+
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "reused" in line and "scope=session" in line and "high" in line
+
+
+def test_a_remembered_band_still_honors_the_current_band_model():
+    # The band is remembered, not the model: re-pointing a band at another
+    # model must take effect on the next turn of an existing session.
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    settings = _routing_settings("session")
+    jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s")
+
+    repointed = jev_policy.JevSettings(
+        api_key="k", complexity_routing=True, complexity_scope="session",
+        tier_models={"high": TierModel(model="new-high-model")},
+    )
+    result = jev_policy.route_model_for_request("b", settings=repointed,
+                                                client=client, session_key="s")
+    assert result.model == "new-high-model"
+
+
+def test_the_session_memo_is_bounded():
+    settings = _routing_settings("session")
+    client = _StubClient({"complexity": _band("low", 0.9)})
+    for i in range(jev_policy._SESSION_BAND_MAX_ENTRIES + 10):
+        jev_policy.route_model_for_request("x", settings=settings,
+                                           client=client, session_key=f"s{i}")
+    assert len(jev_policy._session_bands._entries) <= jev_policy._SESSION_BAND_MAX_ENTRIES
+
+
+def test_a_remembered_band_expires():
+    import agent.jev_policy as jp
+
+    settings = _routing_settings("session")
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    now = [1000.0]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(jp.time, "monotonic", lambda: now[0])
+        jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s")
+        now[0] += jp._SESSION_BAND_TTL_SECONDS + 1
+        jev_policy.route_model_for_request("b", settings=settings, client=client, session_key="s")
+    assert len(client.asked) == 2
+
+
+# --- band resolution: env and config.yaml express the same thing -----------
+#
+# HERMES_JEV_MODEL_<BAND> / HERMES_JEV_PROVIDER_<BAND> override
+# jev.models.<band> per FIELD, so neither surface silently erases the other.
+
+
+def test_a_band_provider_can_come_from_the_environment(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_MODEL_LOW", "env-low")
+    monkeypatch.setenv("HERMES_JEV_PROVIDER_LOW", "openai")
+    assert jev_policy.load_jev_settings().tier_models["low"] == TierModel(
+        model="env-low", provider="openai"
+    )
+
+
+def test_a_model_env_var_keeps_a_provider_configured_in_yaml(jev_env, monkeypatch):
+    jev_env["models"] = {"low": {"model": "cfg-low", "provider": "anthropic"}}
+    monkeypatch.setenv("HERMES_JEV_MODEL_LOW", "env-low")
+    assert jev_policy.load_jev_settings().tier_models["low"] == TierModel(
+        model="env-low", provider="anthropic"
+    )
+
+
+def test_a_provider_env_var_keeps_a_model_configured_in_yaml(jev_env, monkeypatch):
+    jev_env["models"] = {"low": {"model": "cfg-low", "provider": "anthropic"}}
+    monkeypatch.setenv("HERMES_JEV_PROVIDER_LOW", "openai")
+    assert jev_policy.load_jev_settings().tier_models["low"] == TierModel(
+        model="cfg-low", provider="openai"
+    )
+
+
+def test_a_provider_env_var_applies_to_the_shorthand_yaml_form(jev_env, monkeypatch):
+    jev_env["models"] = {"medium": "cfg-medium"}
+    monkeypatch.setenv("HERMES_JEV_PROVIDER_MEDIUM", "xai")
+    assert jev_policy.load_jev_settings().tier_models["medium"] == TierModel(
+        model="cfg-medium", provider="xai"
+    )
+
+
+def test_each_band_resolves_independently(jev_env, monkeypatch):
+    jev_env["models"] = {"low": "cfg-low", "high": {"model": "cfg-high", "provider": "a"}}
+    monkeypatch.setenv("HERMES_JEV_PROVIDER_LOW", "openai")
+    bands = jev_policy.load_jev_settings().tier_models
+    assert bands["low"] == TierModel(model="cfg-low", provider="openai")
+    assert bands["high"] == TierModel(model="cfg-high", provider="a")
+    assert "medium" not in bands
+
+
+def test_a_provider_with_no_model_is_ignored_with_a_warning(jev_env, monkeypatch, caplog):
+    caplog.set_level("WARNING")
+    monkeypatch.setenv("HERMES_JEV_PROVIDER_HIGH", "openai")
+    assert "high" not in jev_policy.load_jev_settings().tier_models
+    assert any("no model" in r.getMessage() for r in caplog.records)
+
+
+def test_an_empty_provider_env_var_is_not_a_provider(jev_env, monkeypatch):
+    jev_env["models"] = {"low": {"model": "cfg-low", "provider": "anthropic"}}
+    monkeypatch.setenv("HERMES_JEV_PROVIDER_LOW", "   ")
+    assert jev_policy.load_jev_settings().tier_models["low"].provider == "anthropic"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("plain-model", ("plain-model", None, None)),
+        ({"model": "m", "provider": "p"}, ("m", "p", None)),
+        ({"model": "m"}, ("m", None, None)),
+        ({"provider": "p"}, ("", "p", None)),
+        ({"model": "m", "reasoning_effort": "high"}, ("m", None, "high")),
+        ({"reasoning_effort": False}, ("", None, False)),  # raw: YAML false survives
+        ({}, ("", None, None)),
+        (None, ("", None, None)),
+        (123, ("", None, None)),
+    ],
+)
+def test_a_yaml_band_entry_is_read_in_both_forms(raw, expected):
+    assert jev_policy._configured_tier(raw) == expected
+
+
+# --- complexity context: what the agent is -------------------------------
+#
+# Complexity is a property of the task AS THIS AGENT WOULD DO IT. `agent` is
+# stable per agent (unlike channel/sender), so it cannot make the same request
+# band differently from one room to the next.
+
+
+def test_the_complexity_state_is_just_the_request_when_nothing_is_configured():
+    state, question, _ = jev_policy._complexity_request("x", jev_policy.JevSettings())
+    assert state == {"request": "x"}
+    assert question == jev_policy._COMPLEXITY_QUESTION
+
+
+def test_the_agent_description_joins_the_complexity_state():
+    settings = jev_policy.JevSettings(agent_description="A SOC assistant.")
+    state, question, _ = jev_policy._complexity_request("x", settings)
+    assert state == {"request": "x", "agent": "A SOC assistant."}
+    assert "`agent`" in question
+
+
+@pytest.mark.parametrize(
+    "agent_description, expect_agent",
+    [("A SOC assistant.", True), ("", False), ("   ", False), (None, False)],
+)
+def test_the_question_names_only_the_fields_actually_sent(
+    agent_description, expect_agent
+):
+    # A question referencing a state key the request does not carry is worse
+    # than no context at all.
+    settings = jev_policy.JevSettings(agent_description=agent_description or "")
+    state, question, _ = jev_policy._complexity_request("x", settings)
+    assert ("agent" in state) is expect_agent
+    assert ("`agent`" in question) is expect_agent
+
+
+def test_the_complexity_state_carries_nothing_but_request_and_agent():
+    # The state is a closed set, asserted as such: anything else added here
+    # either duplicates `agent` or varies per room, and both make the same
+    # request band differently from one turn to the next.
+    settings = jev_policy.JevSettings(
+        api_key="k",
+        agent_description="A SOC assistant.",
+        remote_agents={"avgc": "vuln scanning"},
+        complexity_criteria={"high": "A campaign."},
+    )
+    state, _, _ = jev_policy._complexity_request("scan this subnet", settings)
+    assert set(state) == {"request", "agent"}
+
+
+@pytest.mark.parametrize("stale", ["tools", "business_scope", "remote_agents"])
+def test_no_tool_inventory_reaches_the_complexity_request(stale):
+    # `tools` was a second, hand-maintained copy of what the agent can do. It
+    # drifted from the live toolset and duplicated what `agent` already says;
+    # a band criterion is the supported way to tell Jev that a kind of request
+    # is cheap for this deployment.
+    settings = jev_policy.JevSettings(
+        api_key="k", agent_description="A SOC assistant.",
+        remote_agents={"avgc": "vuln scanning"},
+    )
+    state, question, _ = jev_policy._complexity_request("x", settings)
+    assert stale not in state
+    assert f"`{stale}`" not in question
+
+
+def test_the_settings_no_longer_carry_a_tool_inventory():
+    assert not hasattr(jev_policy.JevSettings(), "tools")
+
+
+def test_the_tools_environment_variable_is_no_longer_read(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_TOOLS", "threat_intel: x")
+    jev_env["tools"] = {"threat_intel": "x"}
+    settings = jev_policy.load_jev_settings()
+    assert not hasattr(settings, "tools")
+    state, question, _ = jev_policy._complexity_request("x", settings)
+    assert state == {"request": "x"}
+    assert question == jev_policy._COMPLEXITY_QUESTION
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("a: x; b: y", "a: x; b: y"),
+        ({"a": "x", "b": "y"}, "a: x\nb: y"),
+        ({"a": "", "b": None}, "a\nb"),
+        (["a", "b"], "a\nb"),
+        ([{"name": "a", "description": "x"}, {"name": "b"}], "a: x\nb"),
+        ([{"name": "a", "desc": "x"}], "a: x"),
+        ([{"description": "no name"}], ""),
+        ({}, ""),
+        ([], ""),
+        (None, ""),
+        ("  spaced  ", "spaced"),
+    ],
+)
+def test_inventory_forms(raw, expected):
+    # Still exercised: `remote_agents` accepts exactly these forms.
+    assert jev_policy._normalize_inventory(raw) == expected
+
+
+def test_the_agent_description_comes_from_env_and_config(jev_env, monkeypatch):
+    jev_env["agent_description"] = "from config"
+    assert jev_policy.load_jev_settings().agent_description == "from config"
+
+    monkeypatch.setenv("HERMES_JEV_AGENT_DESCRIPTION", "from env")
+    assert jev_policy.load_jev_settings().agent_description == "from env"
+
+
+def test_the_context_reaches_the_request_judge_complexity_sends():
+    client = _StubClient({"complexity": _band("low", 0.9)})
+    settings = jev_policy.JevSettings(
+        api_key="k", agent_description="A SOC assistant.",
+    )
+    jev_policy.judge_complexity("look up an IP", settings=settings, client=client)
+
+    state, questions = client.asked[0]
+    assert state["agent"] == "A SOC assistant."
+    assert "`agent`" in questions["complexity"]["instructions"]
+
+
+# --- admission scope: the agent, plus what it can delegate to --------------
+
+
+def test_admission_is_judged_against_the_agent_description():
+    settings = jev_policy.JevSettings(agent_description="A SOC assistant.")
+    state, _questions = jev_policy._relevance_request("hi", settings)
+    assert state["agent"] == "A SOC assistant."
+    assert "business_scope" not in state
+
+
+def test_the_legacy_business_scope_is_no_longer_read(jev_env, monkeypatch):
+    # It was the older name for agent_description and carried the same meaning.
+    # Neither surface feeds the gate any more.
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    monkeypatch.setenv("HERMES_JEV_CHANNEL_AUTOREPLY", "true")
+    monkeypatch.setenv("HERMES_JEV_BUSINESS_SCOPE", "legacy")
+    jev_env["business_scope"] = "legacy"
+
+    settings = jev_policy.load_jev_settings()
+    assert not hasattr(settings, "business_scope")
+    assert settings.agent_description == ""
+    assert jev_policy.channel_autoreply_active() is False
+
+    monkeypatch.setenv("HERMES_JEV_AGENT_DESCRIPTION", "A SOC assistant.")
+    assert jev_policy.channel_autoreply_active() is True
+
+
+def test_a_leftover_business_scope_is_named_in_the_warning(jev_env, monkeypatch, caplog):
+    # Removing it silently would turn a working gate into a quiet bot with no
+    # signal. The warning that fires when there is nothing to judge against
+    # says WHY, so the fix is a rename rather than an investigation.
+    caplog.set_level("WARNING")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    monkeypatch.setenv("HERMES_JEV_CHANNEL_AUTOREPLY", "true")
+    monkeypatch.setenv("HERMES_JEV_BUSINESS_SCOPE", "legacy")
+
+    assert jev_policy.channel_autoreply_active() is False
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "HERMES_JEV_BUSINESS_SCOPE" in line
+    assert "HERMES_JEV_AGENT_DESCRIPTION" in line
+
+
+def test_the_warning_stays_quiet_about_a_key_that_was_never_set(jev_env, monkeypatch, caplog):
+    caplog.set_level("WARNING")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    monkeypatch.setenv("HERMES_JEV_CHANNEL_AUTOREPLY", "true")
+
+    assert jev_policy.channel_autoreply_active() is False
+    assert "HERMES_JEV_BUSINESS_SCOPE" not in _jev_records(caplog)[-1].getMessage()
+
+
+def test_remote_agents_add_a_fourth_proposition():
+    # Asked separately, NOT folded into the scope question with an "or":
+    # the compound form collapsed the separation from ~0.85 to ~0.2.
+    settings = jev_policy.JevSettings(
+        agent_description="A SOC assistant.",
+        remote_agents={"avgc": "vulnerability scanning"},
+    )
+    state, questions = jev_policy._relevance_request("scan this subnet", settings)
+    assert state["remote_agents"] == "avgc: vulnerability scanning"
+    assert set(questions) == {"in_scope", "addressed", "wants_answer", "delegatable"}
+    assert "`remote_agents`" in questions["delegatable"]["instructions"]
+    assert "`remote_agents`" not in questions["in_scope"]["instructions"]
+
+
+def test_without_remote_agents_delegation_is_not_asked():
+    settings = jev_policy.JevSettings(agent_description="A SOC assistant.")
+    _state, questions = jev_policy._relevance_request("hi", settings)
+    assert set(questions) == {"in_scope", "addressed", "wants_answer"}
+
+
+def _remote_settings(**overrides):
+    base = dict(
+        api_key="k",
+        agent_description="An alert-triage assistant.",
+        remote_agents={"avgc": "vulnerability scanning"},
+        channel_autoreply=True,
+    )
+    base.update(overrides)
+    return jev_policy.JevSettings(**base)
+
+
+# --- being asked for by name --------------------------------------------
+#
+# The verdict is (in_scope OR delegatable OR addressed) AND wants_answer.
+# Someone who types the assistant's name has addressed it as deliberately as an
+# @-mention, so refusing on topic grounds reads as the bot ignoring them.
+# Measured in one forward pass against the live endpoint: an off-topic request
+# naming the assistant scored in_scope 0.13 / addressed 0.89, an on-topic
+# request naming nobody scored 0.87 / 0.10, and a request naming a DIFFERENT
+# assistant scored addressed 0.22 — close to orthogonal, which is why it is a
+# fourth noul rather than a clause on the scope question.
+
+
+def test_a_message_that_asks_for_us_by_name_is_admitted_off_topic():
+    client = _StubClient(_admission(0.13, 0.87, addressed=0.89))
+    assert jev_policy.judge_channel_relevance(
+        "…", settings=_settings(), client=client) is True
+
+
+def test_being_named_does_not_excuse_a_message_that_asks_nothing():
+    # "我觉得 aegis 这个项目做得不错" — measured addressed 0.31, wants_answer
+    # 0.06. Being mentioned in passing must not start a conversation, which is
+    # why wants_answer is ANDed rather than being a fourth disjunct.
+    client = _StubClient(_admission(0.67, 0.06, addressed=0.95))
+    assert jev_policy.judge_channel_relevance(
+        "…", settings=_settings(), client=client) is False
+
+
+def test_an_on_topic_message_still_needs_no_name():
+    client = _StubClient(_admission(0.87, 0.96, addressed=0.10))
+    assert jev_policy.judge_channel_relevance(
+        "…", settings=_settings(), client=client) is True
+
+
+def test_naming_a_different_assistant_is_not_being_addressed():
+    # "AISOC 帮我跑个应急响应" — addressed 0.22 for THIS agent. It is admitted
+    # here on delegation, not on being named.
+    client = _StubClient(_admission(0.20, 0.90, addressed=0.22, delegatable=0.97))
+    settings = _settings(remote_agents={"aisoc": "incident response"})
+    assert jev_policy.judge_channel_relevance(
+        "…", settings=settings, client=client) is True
+
+    # Same message, nothing to delegate to: no disjunct clears.
+    bare = _StubClient(_admission(0.20, 0.90, addressed=0.22))
+    assert jev_policy.judge_channel_relevance(
+        "…", settings=_settings(), client=bare) is False
+
+
+@pytest.mark.parametrize(
+    "in_scope, delegatable, addressed, expected",
+    [
+        (0.95, 0.02, 0.02, True),   # ours
+        (0.02, 0.95, 0.02, True),   # ours to hand off
+        (0.02, 0.02, 0.95, True),   # asked for by name
+        (0.95, 0.95, 0.95, True),   # all three
+        (0.69, 0.69, 0.69, False),  # each just under the threshold
+        (0.02, 0.02, 0.02, False),  # none of them
+    ],
+)
+def test_any_one_disjunct_is_enough(in_scope, delegatable, addressed, expected):
+    client = _StubClient(
+        _admission(in_scope, 0.95, delegatable=delegatable, addressed=addressed)
+    )
+    settings = _settings(remote_agents={"avgc": "vuln scanning"})
+    assert jev_policy.judge_channel_relevance(
+        "…", settings=settings, client=client) is expected
+
+
+def test_the_addressed_question_reads_the_name_out_of_agent():
+    # There is no separate name setting: the question points at `agent`, so a
+    # description that never names the assistant leaves nothing to match.
+    settings = jev_policy.JevSettings(agent_description="Aegis, a SOC assistant.")
+    state, questions = jev_policy._relevance_request("aegis?", settings)
+    assert "`agent`" in questions["addressed"]["instructions"]
+    assert state["agent"] == "Aegis, a SOC assistant."
+
+
+def test_the_addressed_probability_is_logged(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient(_admission(0.13, 0.87, addressed=0.89))
+    jev_policy.judge_channel_relevance("…", settings=_settings(), client=client)
+
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "addressed=0.89" in line
+    assert "ANSWER" in line
+
+
+def test_a_delegatable_request_is_admitted_even_when_out_of_the_agents_own_scope():
+    client = _StubClient(_admission(0.07, 0.98, delegatable=0.97))
+    assert jev_policy.judge_channel_relevance(
+        "scan this subnet", settings=_remote_settings(), client=client,
+    ) is True
+
+
+def test_a_request_in_the_agents_own_scope_is_admitted_without_delegation():
+    client = _StubClient(_admission(0.95, 0.97, delegatable=0.41))
+    assert jev_policy.judge_channel_relevance(
+        "is this alert a false positive?", settings=_remote_settings(), client=client,
+    ) is True
+
+
+def test_neither_ours_nor_delegatable_stays_quiet():
+    client = _StubClient(_admission(0.02, 0.90, delegatable=0.02))
+    assert jev_policy.judge_channel_relevance(
+        "what's for dinner?", settings=_remote_settings(), client=client,
+    ) is False
+
+
+def test_delegatable_alone_is_not_enough_without_a_request_for_action():
+    client = _StubClient(_admission(0.10, 0.04, delegatable=0.95))
+    assert jev_policy.judge_channel_relevance(
+        "we already scanned that subnet", settings=_remote_settings(), client=client,
+    ) is False
+
+
+def test_a_missing_delegatable_answer_is_undecided_not_a_fallback():
+    # The question was asked, so an absent answer means the response was
+    # incomplete — that is undecided, not "no delegation".
+    client = _StubClient(_admission(0.95, 0.97))
+    assert jev_policy.judge_channel_relevance(
+        "hi", settings=_remote_settings(), client=client,
+    ) is None
+
+
+def test_the_admission_log_reports_the_delegation_probability(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient(_admission(0.07, 0.98, delegatable=0.97))
+    jev_policy.judge_channel_relevance("scan", settings=_remote_settings(), client=client)
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "delegatable=0.97" in line and "ANSWER" in line
+
+
+def test_the_log_omits_delegation_when_it_was_not_asked(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient(_admission(0.9, 0.9))
+    jev_policy.judge_channel_relevance("hi", settings=_settings(), client=client)
+    assert "delegatable" not in _jev_records(caplog)[-1].getMessage()
+
+
+def test_remote_agents_accept_every_inventory_form(jev_env, monkeypatch):
+    jev_env["remote_agents"] = [{"name": "avgc", "description": "vuln scanning"}]
+    assert jev_policy.load_jev_settings().remote_agents == "avgc: vuln scanning"
+
+    monkeypatch.setenv("HERMES_JEV_REMOTE_AGENTS", "aegis: compliance Q&A")
+    assert jev_policy.load_jev_settings().remote_agents == "aegis: compliance Q&A"
+
+
+def test_remote_agents_do_not_reach_the_complexity_request():
+    # Delegation changes whether a message is OURS, not how hard the work is.
+    settings = jev_policy.JevSettings(
+        agent_description="A SOC assistant.", remote_agents={"avgc": "vuln scanning"},
+    )
+    state, _, _ = jev_policy._complexity_request("scan this subnet", settings)
+    assert "remote_agents" not in state
+
+
+# --- the master switch gates the whole layer; sub-switches only narrow it --
+
+
+@pytest.mark.parametrize(
+    "master, channel, thread, in_thread, expected",
+    [
+        # Master off: Jev is never asked, whatever the sub-switches say.
+        (False, False, False, False, jev_policy.NORMAL),
+        (False, True, False, False, jev_policy.NORMAL),
+        (False, True, False, True, jev_policy.NORMAL),
+        (False, True, True, True, jev_policy.NORMAL),
+        (False, False, True, False, jev_policy.NORMAL),
+        # Master on: the sub-switches pick what is eligible; the rest is silence.
+        (True, False, False, False, jev_policy.SILENCE),
+        (True, True, False, False, jev_policy.JUDGE),
+        (True, True, False, True, jev_policy.SILENCE),
+        (True, True, True, True, jev_policy.JUDGE),
+        (True, False, True, False, jev_policy.SILENCE),
+    ],
+)
+def test_channel_admission_mode(master, channel, thread, in_thread, expected):
+    settings = jev_policy.JevSettings(
+        api_key="k", agent_description="A SOC assistant.",
+        autoreply_gate=master, channel_autoreply=channel, thread_autoreply=thread,
+    )
+    assert jev_policy.channel_admission_mode(settings, in_thread=in_thread) == expected
+
+
+@pytest.mark.parametrize(
+    "api_key, agent_description",
+    [("", "A SOC assistant."), ("k", ""), ("", "")],
+)
+def test_a_misconfigured_gate_is_silence_under_the_master_switch(
+    api_key, agent_description
+):
+    # The point of the master switch: a config mistake must not quietly turn
+    # into "answer everything", which is what falling through would mean.
+    settings = jev_policy.JevSettings(
+        api_key=api_key, agent_description=agent_description,
+        autoreply_gate=True, channel_autoreply=True,
+    )
+    assert jev_policy.channel_admission_mode(settings) == jev_policy.SILENCE
+
+
+@pytest.mark.parametrize(
+    "api_key, agent_description",
+    [("", "A SOC assistant."), ("k", ""), ("", "")],
+)
+def test_the_same_misconfiguration_is_normal_without_the_master_switch(
+    api_key, agent_description
+):
+    settings = jev_policy.JevSettings(
+        api_key=api_key, agent_description=agent_description,
+        autoreply_gate=False, channel_autoreply=True,
+    )
+    assert jev_policy.channel_admission_mode(settings) == jev_policy.NORMAL
+
+
+def test_the_master_switch_is_checked_before_anything_else(monkeypatch):
+    # Master off must not even consult the sub-switch path: the verdict would
+    # be discarded, so asking for it is latency and an API call spent on
+    # nothing. Guard it by making that path fatal.
+    def _boom(*_a, **_kw):
+        raise AssertionError("channel_autoreply_active must not be reached")
+
+    monkeypatch.setattr(jev_policy, "channel_autoreply_active", _boom)
+    settings = jev_policy.JevSettings(
+        api_key="k", agent_description="A SOC assistant.",
+        autoreply_gate=False, channel_autoreply=True, thread_autoreply=True,
+    )
+    assert jev_policy.channel_admission_mode(settings) == jev_policy.NORMAL
+    assert jev_policy.channel_admission_mode(settings, in_thread=True) == jev_policy.NORMAL
+
+
+def test_the_master_switch_is_read_from_env_and_config(jev_env, monkeypatch):
+    assert jev_policy.load_jev_settings().autoreply_gate is False
+    jev_env["autoreply"] = True
+    assert jev_policy.load_jev_settings().autoreply_gate is True
+    monkeypatch.setenv("HERMES_JEV_AUTOREPLY", "false")
+    assert jev_policy.load_jev_settings().autoreply_gate is False
+
+
+# --- per-band reasoning effort ----------------------------------------------
+#
+# jev.models.<band>.reasoning_effort / HERMES_JEV_REASONING_<BAND> use the same
+# vocabulary as agent.reasoning_effort and merge per field like model/provider.
+# A band may carry an effort and no model: same model, different depth.
+
+
+def test_a_band_effort_comes_from_config_yaml(jev_env):
+    jev_env["models"] = {"high": {"model": "big", "reasoning_effort": "xhigh"}}
+    assert jev_policy.load_jev_settings().tier_models["high"] == TierModel(
+        model="big", reasoning_effort="xhigh"
+    )
+
+
+def test_a_band_effort_comes_from_the_environment(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_MODEL_LOW", "small")
+    monkeypatch.setenv("HERMES_JEV_REASONING_LOW", "minimal")
+    assert jev_policy.load_jev_settings().tier_models["low"] == TierModel(
+        model="small", reasoning_effort="minimal"
+    )
+
+
+def test_an_effort_env_var_keeps_the_model_and_provider_from_yaml(jev_env, monkeypatch):
+    jev_env["models"] = {
+        "high": {"model": "big", "provider": "anthropic", "reasoning_effort": "high"},
+    }
+    monkeypatch.setenv("HERMES_JEV_REASONING_HIGH", "max")
+    assert jev_policy.load_jev_settings().tier_models["high"] == TierModel(
+        model="big", provider="anthropic", reasoning_effort="max"
+    )
+
+
+def test_a_model_env_var_keeps_the_effort_from_yaml(jev_env, monkeypatch):
+    jev_env["models"] = {"high": {"model": "big", "reasoning_effort": "high"}}
+    monkeypatch.setenv("HERMES_JEV_MODEL_HIGH", "bigger")
+    assert jev_policy.load_jev_settings().tier_models["high"] == TierModel(
+        model="bigger", reasoning_effort="high"
+    )
+
+
+def test_an_effort_only_band_is_a_band(jev_env):
+    jev_env["models"] = {"medium": {"reasoning_effort": "medium"}}
+    band = jev_policy.load_jev_settings().tier_models["medium"]
+    assert band == TierModel(model="", reasoning_effort="medium")
+    assert band.reasoning_config == {"enabled": True, "effort": "medium"}
+
+
+def test_an_effort_alone_switches_routing_on(jev_env, monkeypatch):
+    monkeypatch.setenv("HERMES_JEV_COMPLEXITY_ROUTING", "true")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    assert jev_policy.complexity_routing_active() is False
+    monkeypatch.setenv("HERMES_JEV_REASONING_HIGH", "xhigh")
+    assert jev_policy.complexity_routing_active() is True
+
+
+@pytest.mark.parametrize("raw", [False, "none", "false", "disabled", "NONE"])
+def test_a_band_can_turn_thinking_off(jev_env, raw):
+    jev_env["models"] = {"low": {"model": "small", "reasoning_effort": raw}}
+    band = jev_policy.load_jev_settings().tier_models["low"]
+    assert band.reasoning_effort == "none"
+    assert band.reasoning_config == {"enabled": False}
+
+
+def test_a_band_effort_is_normalized(jev_env):
+    jev_env["models"] = {"high": {"model": "big", "reasoning_effort": "  XHigh "}}
+    assert jev_policy.load_jev_settings().tier_models["high"].reasoning_effort == "xhigh"
+
+
+@pytest.mark.parametrize("raw", ["", "   ", None])
+def test_a_blank_effort_is_unset(jev_env, raw):
+    jev_env["models"] = {"high": {"model": "big", "reasoning_effort": raw}}
+    band = jev_policy.load_jev_settings().tier_models["high"]
+    assert band.reasoning_effort is None
+    assert band.reasoning_config is None
+
+
+def test_an_unknown_effort_is_ignored_with_a_warning(jev_env, caplog):
+    caplog.set_level("WARNING")
+    jev_env["models"] = {"high": {"model": "big", "reasoning_effort": "hihg"}}
+    assert jev_policy.load_jev_settings().tier_models["high"].reasoning_effort is None
+    assert any("hihg" in r.getMessage() for r in caplog.records)
+
+
+def test_an_unknown_effort_with_no_model_is_no_band(jev_env, caplog):
+    caplog.set_level("WARNING")
+    jev_env["models"] = {"high": {"reasoning_effort": "turbo"}}
+    assert "high" not in jev_policy.load_jev_settings().tier_models
+
+
+def test_an_unknown_effort_env_var_falls_back_to_yaml(jev_env, monkeypatch, caplog):
+    caplog.set_level("WARNING")
+    jev_env["models"] = {"high": {"model": "big", "reasoning_effort": "high"}}
+    monkeypatch.setenv("HERMES_JEV_REASONING_HIGH", "hihg")
+    assert jev_policy.load_jev_settings().tier_models["high"].reasoning_effort == "high"
+    assert any("HERMES_JEV_REASONING_HIGH" in r.getMessage() for r in caplog.records)
+
+
+def test_a_provider_without_a_model_is_dropped_from_an_effort_band(
+    jev_env, monkeypatch, caplog,
+):
+    caplog.set_level("WARNING")
+    jev_env["models"] = {"high": {"provider": "anthropic", "reasoning_effort": "high"}}
+    band = jev_policy.load_jev_settings().tier_models["high"]
+    assert band == TierModel(model="", provider=None, reasoning_effort="high")
+    assert any("no model" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "tier_model, expected",
+    [
+        (None, "default model"),
+        (TierModel(model="big"), "big"),
+        (TierModel(model="big", provider="anthropic"), "big via anthropic"),
+        (TierModel(model="big", reasoning_effort="high"), "big (reasoning_effort=high)"),
+        (TierModel(reasoning_effort="none"), "default model (reasoning_effort=none)"),
+    ],
+)
+def test_describe_tier(tier_model, expected):
+    assert jev_policy.describe_tier(tier_model) == expected
+
+
+def test_a_reused_band_names_its_effort(caplog):
+    caplog.set_level("INFO")
+    client = _StubClient({"complexity": _band("high", 0.9)})
+    settings = jev_policy.JevSettings(
+        api_key="k", complexity_routing=True, complexity_scope="session",
+        tier_models={"high": TierModel(model="big", reasoning_effort="xhigh")},
+    )
+    jev_policy.route_model_for_request("a", settings=settings, client=client, session_key="s")
+    caplog.clear()
+    result = jev_policy.route_model_for_request(
+        "b", settings=settings, client=client, session_key="s",
+    )
+    assert result.reasoning_effort == "xhigh"
+    line = _jev_records(caplog)[-1].getMessage()
+    assert "reused" in line and "reasoning_effort=xhigh" in line
+
+
+# --- per-band effort on a long-lived agent (A2A) -----------------------------
+
+
+def _reasoning_agent(reasoning_config=None):
+    return SimpleNamespace(
+        model="default-model", provider="openai", reasoning_config=reasoning_config,
+    )
+
+
+def test_a_band_effort_is_applied_with_the_band_model():
+    agent = _reasoning_agent()
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", reasoning_effort="high"))
+    assert agent.model == "big"
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+
+def test_an_effort_only_band_keeps_the_profile_model():
+    agent = _reasoning_agent()
+    assert jev_policy.apply_tier_to_agent(
+        agent, TierModel(reasoning_effort="xhigh")
+    ) == "default-model"
+    assert agent.model == "default-model"
+    assert agent.reasoning_config == {"enabled": True, "effort": "xhigh"}
+
+
+def test_an_effort_only_band_after_a_model_band_restores_the_profile_model():
+    agent = _reasoning_agent()
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big"))
+    jev_policy.apply_tier_to_agent(agent, TierModel(reasoning_effort="low"))
+    assert agent.model == "default-model"
+    assert agent.reasoning_config == {"enabled": True, "effort": "low"}
+
+
+def test_no_band_restores_the_profile_reasoning():
+    profile = {"enabled": True, "effort": "medium"}
+    agent = _reasoning_agent(profile)
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", reasoning_effort="max"))
+    jev_policy.apply_tier_to_agent(agent, None)
+    assert agent.model == "default-model"
+    assert agent.reasoning_config == profile
+
+
+def test_no_band_restores_a_profile_with_no_reasoning_config():
+    agent = _reasoning_agent(None)
+    jev_policy.apply_tier_to_agent(agent, TierModel(reasoning_effort="high"))
+    jev_policy.apply_tier_to_agent(agent, None)
+    assert agent.reasoning_config is None
+
+
+def test_a_band_without_an_effort_keeps_the_profile_reasoning():
+    profile = {"enabled": True, "effort": "medium"}
+    agent = _reasoning_agent(profile)
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", reasoning_effort="max"))
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="other-big"))
+    assert agent.reasoning_config == profile
+
+
+def test_a_cross_provider_switch_does_not_leak_its_own_reasoning(monkeypatch):
+    # switch_model re-resolves reasoning for the new model on its own; without
+    # a band effort, the agent must still run on its profile reasoning.
+    agent = _switchable(model="default-model", requested_provider="openai")
+    agent.reasoning_config = {"enabled": True, "effort": "medium"}
+    original_switch = agent.switch_model
+
+    def _switch_and_reresolve(**kwargs):
+        original_switch(**kwargs)
+        agent.reasoning_config = {"enabled": True, "effort": "ultra"}
+
+    agent.switch_model = _switch_and_reresolve
+    _stub_credentials(monkeypatch, {"anthropic": "https://anthropic.test"})
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="big", provider="anthropic"))
+    assert agent.model == "big"
+    assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
+
+
+def test_a_band_effort_applies_even_when_its_provider_is_unreachable(monkeypatch):
+    import hermes_cli.runtime_provider as rp
+
+    def _boom(**_kwargs):
+        raise RuntimeError("no credentials for anthropic")
+
+    monkeypatch.setattr(rp, "resolve_runtime_provider", _boom)
+    agent = _switchable(model="default-model", requested_provider="openai")
+    agent.reasoning_config = None
+    jev_policy.apply_tier_to_agent(
+        agent, TierModel(model="big", provider="anthropic", reasoning_effort="high"),
+    )
+    assert agent.model == "default-model"
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+
+def test_a_band_can_turn_thinking_off_on_the_agent():
+    agent = _reasoning_agent({"enabled": True, "effort": "medium"})
+    jev_policy.apply_tier_to_agent(agent, TierModel(model="small", reasoning_effort="none"))
+    assert agent.reasoning_config == {"enabled": False}
+
+
+def test_the_profile_reasoning_baseline_is_captured_once():
+    agent = _reasoning_agent({"enabled": True, "effort": "medium"})
+    jev_policy.apply_tier_to_agent(agent, TierModel(reasoning_effort="high"))
+    jev_policy.apply_tier_to_agent(agent, TierModel(reasoning_effort="low"))
+    jev_policy.apply_tier_to_agent(agent, None)
+    assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
+
+
+def test_the_profile_reasoning_baseline_is_a_copy():
+    profile = {"enabled": True, "effort": "medium"}
+    agent = _reasoning_agent(profile)
+    jev_policy.apply_tier_to_agent(agent, None)
+    profile["effort"] = "ultra"  # mutated in place after capture
+    jev_policy.apply_tier_to_agent(agent, TierModel(reasoning_effort="high"))
+    jev_policy.apply_tier_to_agent(agent, None)
+    assert agent.reasoning_config == {"enabled": True, "effort": "medium"}

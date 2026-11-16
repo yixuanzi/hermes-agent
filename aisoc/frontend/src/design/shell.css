@@ -1,0 +1,377 @@
+/* ============================================================================
+   Command Deck · 外壳结构层(纯布局,不含皮肤)
+   —— 只负责 grid / flex / 尺寸 / 间距 / 折叠 / 响应式 / 密度;
+      颜色、玻璃、发光、渐变一律交给 hud-overlay.css(在本文件之后加载,皮肤胜出)。
+   —— AppShell 采用语义类(.app-shell / .side-nav / .nav-* / .workbench-* 等),
+      使 hud-overlay.css 的 Command Deck chrome 能精准命中。
+   加载顺序:styles.css → tokens.css → base.css → shell.css(本文件)→ hud-overlay.css。
+   ========================================================================== */
+
+/* ── 外壳栅格 ── */
+.app-shell {
+  display: grid;
+  grid-template-columns: calc(286px * var(--density-scale)) 1fr;
+  height: 100dvh;
+  overflow: hidden;
+  position: relative;
+  /* 环境层(app-ambient,fixed z-index:0)的层叠根;侧栏/主区抬到 z-index:1 */
+  isolation: isolate;
+  transition: grid-template-columns var(--dur-fast) var(--ease-out);
+}
+.app-shell.nav-collapsed {
+  grid-template-columns: calc(92px * var(--density-scale)) 1fr;
+}
+
+/* 全站环境层:固定铺满视口、置底、穿透点击,永不影响布局流 */
+.app-ambient {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+.app-shell > .side-nav,
+.app-shell > .main-panel {
+  position: relative;
+  z-index: 1;
+}
+
+/* ── 侧栏骨架 ── */
+.side-nav {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  align-content: stretch;
+  gap: calc(18px * var(--density-scale));
+  padding: calc(16px * var(--density-scale)) calc(12px * var(--density-scale));
+  border-right: 1px solid var(--aisoc-border);
+  transition: padding var(--dur-fast) var(--ease-out);
+}
+.side-nav-workbench {
+  min-width: 0;
+}
+
+/* 品牌头 */
+.side-nav-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(10px * var(--density-scale));
+}
+.brand-stack {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: calc(10px * var(--density-scale));
+}
+.brand-orb {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+.brand-text {
+  min-width: 0;
+}
+
+/* 折叠钮(方形玻璃按钮,尺寸/皮肤由 hud-overlay 精修) */
+.side-nav .side-nav-toggle {
+  min-width: calc(38px * var(--density-scale));
+  min-height: calc(38px * var(--density-scale));
+  padding: 0;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+/* 分组 */
+.side-nav-groups {
+  display: grid;
+  align-content: start;
+  gap: calc(14px * var(--density-scale));
+  min-height: 0;
+  overflow-y: auto;
+}
+.side-nav-group {
+  display: grid;
+  gap: calc(8px * var(--density-scale));
+}
+.side-nav-group-label {
+  margin: 0;
+}
+
+/* 导航列表 */
+.side-nav nav {
+  display: grid;
+  gap: calc(8px * var(--density-scale));
+}
+.side-nav nav a,
+.side-nav nav .nav-parent-toggle {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  gap: calc(10px * var(--density-scale));
+  min-height: calc(44px * var(--density-scale));
+  padding: calc(8px * var(--density-scale)) calc(10px * var(--density-scale));
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--aisoc-text);
+  text-decoration: none;
+}
+/* 父项按钮复位原生按钮外观 */
+.side-nav nav .nav-parent-toggle {
+  width: 100%;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.nav-link-icon {
+  width: calc(22px * var(--density-scale));
+  height: calc(22px * var(--density-scale));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--ink-mid);
+  transition: color var(--dur-base) var(--ease-out), filter var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+.nav-icon-svg {
+  width: calc(20px * var(--density-scale));
+  height: calc(20px * var(--density-scale));
+}
+.nav-link-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 父项右侧折叠箭头 */
+.nav-parent-caret {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--ink-lo);
+  transition: transform 180ms var(--ease-out), color var(--dur-base) var(--ease-out);
+}
+.nav-parent-toggle:not(.expanded) .nav-parent-caret {
+  transform: rotate(-90deg);
+}
+
+/* Chat 注意力徽标推到最右(无 caret 的普通链接) */
+.side-nav nav a .nav-attention {
+  margin-left: auto;
+}
+
+/* 嵌套子项 */
+.nav-entry {
+  display: grid;
+  gap: calc(4px * var(--density-scale));
+}
+.nav-entry-row {
+  position: relative;
+}
+.side-nav nav .nav-children {
+  display: grid;
+  gap: calc(2px * var(--density-scale));
+  margin-left: calc(22px * var(--density-scale));
+  padding-left: calc(10px * var(--density-scale));
+  border-left: 1px solid var(--aisoc-border-strong);
+  animation: nav-children-in 220ms var(--ease-out);
+}
+@keyframes nav-children-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.side-nav nav .nav-child {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: calc(8px * var(--density-scale));
+  min-height: calc(30px * var(--density-scale));
+  padding: calc(4px * var(--density-scale)) calc(8px * var(--density-scale));
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--aisoc-muted);
+  text-decoration: none;
+}
+.nav-child-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+.nav-child.active .nav-child-dot {
+  opacity: 1;
+}
+.nav-child-label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.15;
+  overflow: hidden;
+}
+.nav-child-en {
+  font-size: calc(12px * var(--density-scale));
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nav-child-zh {
+  font-size: calc(10px * var(--density-scale));
+  color: var(--aisoc-muted);
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 侧栏页脚(主题切换 + 登出,纵向堆叠) */
+.side-nav-footer {
+  display: grid;
+  gap: calc(8px * var(--density-scale));
+}
+.side-nav-footer .ghost-button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: calc(10px * var(--density-scale));
+}
+.side-nav-footer-button .nav-link-icon {
+  width: calc(24px * var(--density-scale));
+  height: calc(24px * var(--density-scale));
+  border-radius: 999px;
+}
+
+/* ── 折叠态:隐标签、居中图标 ── */
+.app-shell.nav-collapsed .side-nav {
+  padding-left: calc(8px * var(--density-scale));
+  padding-right: calc(8px * var(--density-scale));
+}
+.app-shell.nav-collapsed .brand-text,
+.app-shell.nav-collapsed .side-nav-group-label,
+.app-shell.nav-collapsed .nav-parent-caret,
+.app-shell.nav-collapsed .nav-link-label,
+.app-shell.nav-collapsed .nav-attention {
+  display: none;
+}
+.app-shell.nav-collapsed .side-nav-header {
+  flex-direction: column;
+  justify-content: center;
+}
+.app-shell.nav-collapsed .side-nav nav a,
+.app-shell.nav-collapsed .side-nav nav .nav-parent-toggle,
+.app-shell.nav-collapsed .side-nav-footer-button {
+  justify-content: center;
+  padding-left: calc(7px * var(--density-scale));
+  padding-right: calc(7px * var(--density-scale));
+}
+.app-shell.nav-collapsed .side-nav nav .nav-children {
+  display: none;
+}
+
+/* ── 主区 ── */
+.main-panel {
+  min-height: 0;
+  overflow: hidden;
+  padding: calc(18px * var(--density-scale)) calc(24px * var(--density-scale)) calc(24px * var(--density-scale));
+  animation: aisoc-fade-in 320ms var(--ease-out);
+}
+.workbench-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.workbench-main > section {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 顶栏骨架(皮肤/尺寸精修在 hud-overlay) */
+.workbench-topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: calc(10px * var(--density-scale));
+  margin: 0 0 calc(10px * var(--density-scale));
+  padding: calc(8px * var(--density-scale)) calc(14px * var(--density-scale));
+  min-height: calc(44px * var(--density-scale));
+  border-radius: var(--aisoc-radius-md);
+}
+.workbench-topbar-copy {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: calc(10px * var(--density-scale));
+}
+.workbench-topbar-brandmark {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+.workbench-topbar-copy-text {
+  min-width: 0;
+}
+.workbench-topbar h2 {
+  margin: 0;
+}
+.workbench-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: calc(8px * var(--density-scale));
+  flex-shrink: 0;
+}
+
+/* ── 响应式:≤920px 单列,标签恢复(即使折叠态) ── */
+@media (max-width: 920px) {
+  .app-shell,
+  .app-shell.nav-collapsed {
+    grid-template-columns: 1fr;
+  }
+  .side-nav {
+    border-right: 0;
+    border-bottom: 1px solid var(--aisoc-border);
+  }
+  .app-shell.nav-collapsed .brand-text {
+    display: block;
+  }
+  .app-shell.nav-collapsed .side-nav-group-label,
+  .app-shell.nav-collapsed .nav-parent-caret,
+  .app-shell.nav-collapsed .nav-attention {
+    display: revert;
+  }
+  .app-shell.nav-collapsed .nav-link-label {
+    display: inline;
+  }
+  .app-shell.nav-collapsed .side-nav-header {
+    flex-direction: row;
+    justify-content: space-between;
+  }
+  .app-shell.nav-collapsed .side-nav nav a,
+  .app-shell.nav-collapsed .side-nav nav .nav-parent-toggle,
+  .app-shell.nav-collapsed .side-nav-footer-button {
+    justify-content: flex-start;
+    padding-left: calc(10px * var(--density-scale));
+    padding-right: calc(10px * var(--density-scale));
+  }
+  .main-panel {
+    padding: 22px;
+  }
+}

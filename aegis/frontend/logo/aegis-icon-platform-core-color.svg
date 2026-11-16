@@ -1,0 +1,23 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+
+  <defs>
+    <linearGradient id="aegisGradient" x1="512" y1="120" x2="512" y2="840" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1CCDE8" />
+      <stop offset="100%" stop-color="#0E58CC" />
+    </linearGradient>
+  </defs>
+  <polygon points="512,140 764,244 764,500 512,810 260,500 260,244" fill="url(#aegisGradient)" />
+  <polygon points="512.0,195.8 726.2,284.2 726.2,501.8 512.0,765.3 297.8,501.8 297.8,284.2" fill="#FFFFFF" opacity="0.11" />
+  <line x1="412" y1="684" x2="512" y2="352" stroke="#FFFFFF" stroke-width="72" stroke-linecap="round" />
+  <line x1="612" y1="684" x2="512" y2="352" stroke="#FFFFFF" stroke-width="72" stroke-linecap="round" />
+  <line x1="434.0" y1="548" x2="590.0" y2="548" stroke="#FFFFFF" stroke-width="52" stroke-linecap="round" />
+
+  <line x1="512" y1="498" x2="512" y2="402" stroke="#FFFFFF" stroke-opacity="0.94" stroke-width="18" stroke-linecap="round" />
+  <line x1="512" y1="498" x2="426" y2="506" stroke="#FFFFFF" stroke-opacity="0.94" stroke-width="18" stroke-linecap="round" />
+  <line x1="512" y1="498" x2="598" y2="506" stroke="#FFFFFF" stroke-opacity="0.94" stroke-width="18" stroke-linecap="round" />
+  <circle cx="512" cy="498" r="34" fill="#FFFFFF" opacity="0.18" />
+  <circle cx="512" cy="498" r="13" fill="#FFFFFF" />
+  <circle cx="512" cy="402" r="10" fill="#FFFFFF" />
+  <circle cx="426" cy="506" r="10" fill="#FFFFFF" />
+  <circle cx="598" cy="506" r="10" fill="#FFFFFF" />
+</svg>

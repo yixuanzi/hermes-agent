@@ -1,0 +1,4 @@
+frontend/dist/
+backend/web_dist/
+*.tsbuildinfo
+tsconfig.tsbuildinfo

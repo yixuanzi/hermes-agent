@@ -1,0 +1,21 @@
+<svg width="1850" height="360" viewBox="0 0 1850 360" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <g transform="translate(0 0) scale(0.30)">
+
+  <polygon points="512,120 780,240 780,520 512,836 244,520 244,240" fill="#0E2754" />
+  <polygon points="512.0,186.64 734.44,286.24 734.44,518.64 512.0,780.92 289.56,518.64 289.56,286.24" fill="#FFFFFF" opacity="0.10" />
+  <line x1="406" y1="696" x2="512" y2="344" stroke="#FFFFFF" stroke-width="76" stroke-linecap="round" />
+  <line x1="618" y1="696" x2="512" y2="344" stroke="#FFFFFF" stroke-width="76" stroke-linecap="round" />
+  <line x1="429.32" y1="556" x2="594.68" y2="556" stroke="#FFFFFF" stroke-width="56" stroke-linecap="round" />
+
+  <line x1="512" y1="506" x2="512" y2="396" stroke="#FFFFFF" stroke-opacity="0.94" stroke-width="20" stroke-linecap="round" />
+  <line x1="512" y1="506" x2="420" y2="516" stroke="#FFFFFF" stroke-opacity="0.94" stroke-width="20" stroke-linecap="round" />
+  <line x1="512" y1="506" x2="604" y2="516" stroke="#FFFFFF" stroke-opacity="0.94" stroke-width="20" stroke-linecap="round" />
+  <circle cx="512" cy="506" r="34" fill="#FFFFFF" opacity="0.18" />
+  <circle cx="512" cy="506" r="13" fill="#FFFFFF" />
+  <circle cx="512" cy="396" r="10" fill="#FFFFFF" />
+  <circle cx="420" cy="516" r="10" fill="#FFFFFF" />
+  <circle cx="604" cy="516" r="10" fill="#FFFFFF" />
+</g>
+
+  <text x="500" y="208" fill="#0E2754" font-size="176" font-weight="700" font-family="Avenir Next, Helvetica Neue, Arial, sans-serif" letter-spacing="1">Aegis</text>
+</svg>

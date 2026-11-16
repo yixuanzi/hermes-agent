@@ -1,0 +1,17 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+
+  <polygon points="512,102 792,232 792,528 512,862 232,528 232,232" fill="#0E2754" />
+  <polygon points="512.0,179.9 738.8,285.2 738.8,524.96 512.0,795.5 285.2,524.96 285.2,285.2" fill="#FFFFFF" opacity="0.10" />
+  <line x1="402" y1="704" x2="512" y2="336" stroke="#FFFFFF" stroke-width="80" stroke-linecap="round" />
+  <line x1="622" y1="704" x2="512" y2="336" stroke="#FFFFFF" stroke-width="80" stroke-linecap="round" />
+  <line x1="426.2" y1="562" x2="597.8" y2="562" stroke="#FFFFFF" stroke-width="58" stroke-linecap="round" />
+
+  <line x1="512" y1="512" x2="512" y2="390" stroke="#FFFFFF" stroke-opacity="0.94" stroke-width="20" stroke-linecap="round" />
+  <line x1="512" y1="512" x2="416" y2="522" stroke="#FFFFFF" stroke-opacity="0.94" stroke-width="20" stroke-linecap="round" />
+  <line x1="512" y1="512" x2="608" y2="522" stroke="#FFFFFF" stroke-opacity="0.94" stroke-width="20" stroke-linecap="round" />
+  <circle cx="512" cy="512" r="34" fill="#FFFFFF" opacity="0.18" />
+  <circle cx="512" cy="512" r="13" fill="#FFFFFF" />
+  <circle cx="512" cy="390" r="10" fill="#FFFFFF" />
+  <circle cx="416" cy="522" r="10" fill="#FFFFFF" />
+  <circle cx="608" cy="522" r="10" fill="#FFFFFF" />
+</svg>

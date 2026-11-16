@@ -1,0 +1,198 @@
+/* ============================================================================
+   Command Deck · 基础工具类 + 关键帧(从参考 base.css 择取)
+   —— 绝不引入 @import "tailwindcss"(会带入 Preflight,破坏遗留页面 CSS)。
+   —— 颜色一律走 tokens.css 的设计变量,不留参考文件里的陈旧紫色字面量。
+   加载顺序:styles.css → tokens.css → base.css(本文件)→ hud-overlay.css。
+   本文件不分层(unlayered),故其工具类稳胜 Tailwind utilities layer。
+   ========================================================================== */
+
+/* 全站底色升级为签名径向氛围(随 data-theme 由 tokens.css 的 --app-bg 重着色)。
+   覆盖 styles.css 里 body 的纯色底;固定附着,滚动不跟随。 */
+body {
+  background: var(--app-bg);
+  background-attachment: fixed;
+}
+
+/* 键盘焦点统一辉光环(a11y:焦点必须可见,冷青色) */
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-cyan) 42%, transparent);
+  border-radius: var(--radius-sm);
+}
+
+/* ── 排版工具类 ── */
+.font-display {
+  font-family: var(--font-display);
+  letter-spacing: 0.02em;
+}
+.font-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+/* 眉标(canonical):等宽小字 + 统一字距/字重,全站页头/区块 kicker 共用一套规格 */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  font-weight: var(--weight-eyebrow);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--ink-lo);
+}
+/* KPI 大数:显示体 + 等宽数字,供 Overview 及各面板指标统一取用 */
+.data-figure {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-kpi);
+  font-weight: 700;
+  line-height: var(--lh-tight);
+  letter-spacing: 0.01em;
+  color: var(--ink-hi);
+}
+/* 签名渐变字(青→蓝→紫);随主题在 tokens.css 里加深,浅色下不洗白 */
+.text-gradient {
+  background: var(--grad-signature-h);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+.glow-text-cyan {
+  text-shadow: 0 0 18px color-mix(in srgb, var(--accent-cyan) 50%, transparent);
+}
+
+/* ── 玻璃质感 ── */
+.glass {
+  background: var(--bg-glass);
+  border: 1px solid var(--stroke-soft);
+  backdrop-filter: blur(14px) saturate(120%);
+  -webkit-backdrop-filter: blur(14px) saturate(120%);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-panel);
+}
+.glass-strong {
+  background: var(--bg-glass-strong);
+  border: 1px solid var(--stroke-mid);
+  backdrop-filter: blur(34px) saturate(140%);
+  -webkit-backdrop-filter: blur(34px) saturate(140%);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-float);
+}
+.glow-cyan {
+  box-shadow: var(--glow-cyan);
+}
+.hairline {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--hairline), transparent);
+}
+
+/* ── 关键帧(全站共享) ── */
+@keyframes hud-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes hud-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes hud-scanline {
+  0% {
+    transform: translateY(-100%);
+  }
+  100% {
+    transform: translateY(400%);
+  }
+}
+@keyframes hud-sweep {
+  0% {
+    background-position: -180% 0;
+  }
+  100% {
+    background-position: 280% 0;
+  }
+}
+@keyframes hud-shimmer {
+  0% {
+    background-position: -450px 0;
+  }
+  100% {
+    background-position: 450px 0;
+  }
+}
+@keyframes hud-orbit {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.anim-fade-up {
+  animation: hud-fade-up var(--dur-slow) var(--ease-out) both;
+}
+.anim-pulse {
+  animation: hud-pulse var(--dur-ambient) ease-in-out infinite;
+}
+
+/* 技能卡 hover:高光扫过一次(Skills 页 signature) */
+.skill-card:hover .skill-sweep {
+  animation: hud-sweep 0.9s var(--ease-out);
+}
+
+/* 统一表单控件 */
+.hud-input {
+  width: 100%;
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-size: 14px;
+  color: var(--ink-hi);
+  background: linear-gradient(180deg, var(--bg-panel), var(--bg-elevated));
+  transition:
+    border-color var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out);
+}
+.hud-input:focus {
+  outline: none;
+  border-color: var(--stroke-mid);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-cyan) 30%, transparent);
+}
+.hud-input::placeholder {
+  color: var(--ink-lo);
+}
+
+/* ── 图标规格(单一真相源) ──
+   lucide-react 每个图标渲染为 <svg class="lucide …">,默认 stroke-width=2 偏重、
+   且散落文件里各写 1.5/2/条件值。这里用一条 CSS 统一为 1.5(Command Deck 的
+   细描边观感)——CSS 的 stroke-width 胜过 SVG 上的 presentation 属性,故无需逐
+   文件改 props。作用域限 .lucide,不触及手绘 <svg>(如会话执行图)与 canvas。 */
+svg.lucide {
+  stroke-width: 1.5;
+}
+
+/* ── 自定义滚动条(签名冷色) ── */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--accent-blue) 24%, transparent);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--accent-cyan) 38%, transparent);
+  background-clip: content-box;
+}

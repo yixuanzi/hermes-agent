@@ -1,0 +1,961 @@
+/* ============================================================================
+   Command Deck —— 外壳质感 + 环境极光叠层
+   —— 追加在 styles.css + tokens.css + base.css 之后:玻璃侧栏、签名渐变品牌字标、
+      渐变导航激活态、漂移极光环境层、徽标自转、发丝渐变描边。压掉旧的品红/青霓虹硬编码。
+      全部动效守 prefers-reduced-motion。
+   —— 语义 hook 类(.side-nav-workbench / .workbench-topbar / .brand-orb / .nav-link-*
+      / .side-nav-footer-button 等)由 AppShell(阶段 2)挂载;.panel/.card/.status-badge/
+      input/.terminal-host/.settings-runtime-grid 等当前已存在,立即换肤。
+   ========================================================================== */
+
+/* —— 全站背景:深空海军蓝(提亮 + 去紫,青/蓝主导光晕) —— */
+body {
+  background:
+    radial-gradient(1100px 640px at 80% -10%, rgba(59, 130, 246, 0.055), transparent 58%),
+    radial-gradient(1000px 600px at 6% 2%, rgba(34, 211, 238, 0.05), transparent 56%),
+    var(--app-bg) !important;
+  background-attachment: fixed !important;
+  color: var(--ink-hi);
+}
+
+/* ══════════════ 品牌 ══════════════ */
+.brand-text .brand-kicker,
+.side-nav-group-label {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--ink-lo);
+}
+
+/* 徽标容器:玻璃小方 + 渐变发丝边 + 内冷光 */
+.brand-orb {
+  width: calc(52px * var(--density-scale)) !important;
+  height: calc(52px * var(--density-scale)) !important;
+  border-radius: 14px !important;
+  border: 1px solid var(--stroke-mid) !important;
+  background:
+    radial-gradient(120% 120% at 30% 20%, rgba(34, 211, 238, 0.16), transparent 60%),
+    var(--bg-glass) !important;
+  box-shadow: inset 0 0 16px -6px rgba(59, 130, 246, 0.28), 0 8px 20px -14px rgba(34, 211, 238, 0.3) !important;
+  overflow: visible !important;
+}
+.brand-orb-mark { filter: drop-shadow(0 0 4px rgba(59, 130, 246, 0.35)); }
+
+/* 字标:Chakra Petch + 签名渐变字 + 冷光 */
+.brand-text h1 {
+  margin: 0 !important;
+  font-family: var(--font-display) !important;
+  font-size: calc(24px * var(--density-scale)) !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.22em !important;
+  text-transform: uppercase !important;
+  line-height: 1 !important;
+  background: var(--grad-signature-h) !important;
+  -webkit-background-clip: text !important;
+  background-clip: text !important;
+  color: transparent !important;
+  filter: drop-shadow(0 0 8px rgba(59, 130, 246, 0.2)) !important;
+}
+
+/* 顶栏标题 */
+.workbench-topbar h2,
+.page-title,
+.section-title {
+  font-family: var(--font-display);
+  letter-spacing: 0.04em;
+}
+
+/* ══════════════ 侧栏(玻璃) ══════════════ */
+.side-nav-workbench {
+  background: linear-gradient(180deg, rgba(14, 20, 32, 0.86), rgba(8, 11, 20, 0.92));
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-right: 1px solid var(--stroke-soft);
+  box-shadow: 1px 0 0 rgba(34, 211, 238, 0.08);
+}
+
+.side-nav nav a,
+.side-nav nav .nav-parent-toggle {
+  transition: background var(--dur-base) ease, color var(--dur-base) ease, border-color var(--dur-base) ease, box-shadow var(--dur-base) ease;
+}
+
+/* 悬停:冷玻璃微亮 */
+.side-nav nav a:hover,
+.side-nav nav .nav-parent-toggle:hover {
+  background: rgba(120, 180, 255, 0.06) !important;
+  border-color: var(--stroke-mid) !important;
+  box-shadow: none !important;
+  transform: translateX(1px) !important;
+}
+.side-nav nav a:hover::before,
+.side-nav nav a:hover::after { opacity: 0 !important; }
+.side-nav nav a:hover .nav-link-icon {
+  color: var(--accent-cyan) !important;
+  filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.5)) !important;
+  transform: none !important;
+}
+.side-nav nav a:hover .nav-link-label { color: var(--ink-hi) !important; }
+
+/* 激活项:签名渐变左缘 + 渐变淡底 + 渐变字 + 冷光 */
+.side-nav nav a.active,
+.side-nav nav .nav-parent-toggle.active {
+  position: relative;
+  background: linear-gradient(100deg, rgba(34, 211, 238, 0.11), rgba(59, 130, 246, 0.09)) !important;
+  border-color: rgba(59, 130, 246, 0.32) !important;
+  box-shadow: 0 0 16px -10px rgba(59, 130, 246, 0.5), inset 0 0 0 1px rgba(120, 180, 255, 0.06) !important;
+}
+.side-nav nav a.active::before,
+.side-nav nav .nav-parent-toggle.active::before {
+  content: "" !important;
+  position: absolute !important;
+  left: 0; top: 6px; bottom: 6px;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--grad-signature) !important;
+  opacity: 1 !important;
+}
+.side-nav nav a.active::after { opacity: 0 !important; animation: none !important; }
+.side-nav nav a.active .nav-link-icon,
+.side-nav nav .nav-parent-toggle.active .nav-link-icon {
+  color: var(--accent-cyan) !important;
+  filter: drop-shadow(0 0 8px rgba(34, 211, 238, 0.6)) !important;
+}
+.side-nav nav a.active .nav-link-label,
+.side-nav nav .nav-parent-toggle.active .nav-link-label {
+  color: #d6ecff !important;
+  letter-spacing: 0.02em !important;
+}
+
+/* 子项激活点:渐变 */
+.nav-child.active .nav-child-dot {
+  background: var(--grad-signature) !important;
+  box-shadow: 0 0 8px 1px rgba(59, 130, 246, 0.7) !important;
+}
+
+/* ══════════════ 顶栏(玻璃) ══════════════ */
+.workbench-topbar {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(14, 20, 32, 0.72), rgba(14, 20, 32, 0.4)) !important;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--stroke-soft) !important;
+  /* Hero 化:更大的头部空间,与 Overview Hero 语言统一 */
+  padding: calc(20px * var(--density-scale)) calc(26px * var(--density-scale)) !important;
+  min-height: calc(72px * var(--density-scale)) !important;
+}
+/* 头部签名辐射光晕(与 Overview Hero 一致) */
+.workbench-topbar::after {
+  content: "";
+  position: absolute;
+  left: -60px; top: -90px;
+  width: 460px; height: 240px;
+  background:
+    radial-gradient(60% 70% at 20% 42%, rgba(34, 211, 238, 0.15), transparent 70%),
+    radial-gradient(50% 60% at 55% 30%, rgba(59, 130, 246, 0.13), transparent 72%);
+  pointer-events: none;
+  z-index: 0;
+}
+.workbench-topbar-copy,
+.workbench-topbar-actions { position: relative; z-index: 1; }
+.workbench-topbar-brandmark {
+  width: calc(40px * var(--density-scale)) !important;
+  height: calc(40px * var(--density-scale)) !important;
+}
+/* 大号渐变标题 */
+.workbench-topbar h2 {
+  font-size: clamp(24px, calc(34px * var(--density-scale)), 38px) !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.05em !important;
+  line-height: 1.0 !important;
+  background: linear-gradient(100deg, #22d3ee 0%, #3b82f6 46%, #8b5cf6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent !important;
+  text-shadow: none !important;
+  filter: drop-shadow(0 0 22px rgba(59, 130, 246, 0.24));
+}
+/* kicker → 冷青 mono eyebrow */
+.workbench-topbar .brand-kicker {
+  font-family: var(--font-mono) !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.3em !important;
+  color: #7fd7f5 !important;
+  opacity: 0.92;
+  font-size: calc(10px * var(--density-scale)) !important;
+  margin: 0 0 6px !important;
+}
+
+/* 主区近乎全透,让全局漂移光晕充分透出来 */
+.main-panel {
+  background:
+    linear-gradient(180deg, rgba(8, 11, 20, 0.08), rgba(8, 11, 20, 0)) !important;
+}
+
+/* ══════════════ 通用面板(全站磨砂玻璃) ══════════════ */
+/* 覆盖 styles.css 里 `.list-grid li,.detail-panel,.cyber-panel,.panel,.card` 的近乎
+   不透明深色底(rgba(8,11,16,0.86→0.92))——那正是数据页(Sessions/Cron/Skills/
+   Memory/Settings…)上盖住全局极光的"黑色涂层"。这里用 !important 统一换成磨砂玻璃。 */
+.panel,
+.card,
+.detail-panel,
+.list-grid li,
+.cyber-panel {
+  position: relative;
+  border: 1px solid var(--stroke-soft);
+  box-shadow: var(--shadow-panel);
+  /* 磨砂玻璃 —— 更通透:低不透明度 + 更强模糊,让背景极光清晰透出而文字仍锐利 */
+  background:
+    radial-gradient(150% 130% at 0% 0%, rgba(120, 180, 255, 0.025), transparent 46%),
+    var(--bg-glass) !important;
+  backdrop-filter: blur(24px) saturate(1.3) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(1.3) !important;
+}
+/* 面板顶缘签名渐变发丝 */
+.panel::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  border-radius: inherit;
+  background: var(--grad-hairline);
+  opacity: 0.4;
+  pointer-events: none;
+}
+.panel::after,
+.card::after { display: none !important; }
+
+/* 可点击卡片 hover:签名青辉光(替换旧霓虹) */
+.clickable-card:hover {
+  border-color: rgba(34, 211, 238, 0.42) !important;
+  box-shadow: 0 0 22px -8px rgba(34, 211, 238, 0.5), var(--shadow-panel) !important;
+}
+
+/* 状态灯:呼吸(青色能量) */
+.status-live {
+  color: var(--accent-cyan);
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.4), 0 0 18px -4px rgba(34, 211, 238, 0.7);
+  animation: hud-pulse var(--dur-ambient) var(--ease-out) infinite;
+}
+@keyframes hud-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* 焦点可见环 */
+:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* 细滚动条 */
+* { scrollbar-width: thin; scrollbar-color: rgba(120, 180, 255, 0.28) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(120, 180, 255, 0.22);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(120, 180, 255, 0.36); background-clip: content-box; }
+
+/* ══════════════ 角落控件:并入指挥台主题(替换残留翠绿/旧霓虹) ══════════════ */
+/* 侧栏折叠钮(顶部) */
+.side-nav .side-nav-toggle {
+  background:
+    radial-gradient(120% 120% at 30% 20%, rgba(34, 211, 238, 0.14), transparent 62%),
+    var(--bg-glass) !important;
+  border: 1px solid var(--stroke-mid) !important;
+  color: var(--accent-cyan) !important;
+  box-shadow: inset 0 0 0 1px rgba(120, 180, 255, 0.06), 0 0 16px -8px rgba(34, 211, 238, 0.5) !important;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.side-nav .side-nav-toggle::after {
+  background: linear-gradient(120deg, transparent 0, rgba(34, 211, 238, 0.28) 48%, transparent 100%) !important;
+}
+.side-nav .side-nav-toggle:hover {
+  color: #d6ecff !important;
+  border-color: rgba(59, 130, 246, 0.5) !important;
+  box-shadow: inset 0 0 0 1px rgba(120, 180, 255, 0.12), 0 0 20px -6px rgba(59, 130, 246, 0.6) !important;
+}
+.side-nav .side-nav-toggle:focus-visible { outline: 2px solid var(--accent-cyan) !important; }
+
+/* 左下角 Sign Out(侧栏底) */
+.side-nav-footer-button {
+  border-color: var(--stroke-mid) !important;
+  background:
+    radial-gradient(120% 120% at 20% 0%, rgba(34, 211, 238, 0.06), transparent 55%),
+    var(--bg-glass) !important;
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+}
+.side-nav-footer-button .nav-link-icon {
+  background:
+    radial-gradient(120% 120% at 30% 20%, rgba(34, 211, 238, 0.2), transparent 60%),
+    rgba(19, 28, 44, 0.6) !important;
+  color: var(--accent-cyan) !important;
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.28), 0 0 14px -4px rgba(34, 211, 238, 0.5) !important;
+}
+.side-nav-footer-button:hover {
+  border-color: rgba(59, 130, 246, 0.42) !important;
+  box-shadow: 0 0 22px -10px rgba(59, 130, 246, 0.6) !important;
+}
+.side-nav-footer-button:hover .nav-link-icon {
+  color: #d6ecff !important;
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.44), 0 0 20px -4px rgba(34, 211, 238, 0.6) !important;
+}
+.side-nav-footer-button:hover .nav-link-label { color: var(--ink-hi) !important; }
+
+/* 右上角 topbar 动作区:状态徽标 + Sign Out */
+.workbench-topbar-actions .status-badge {
+  border: 1px solid var(--stroke-mid) !important;
+  background:
+    radial-gradient(circle at 18% 50%, rgba(34, 211, 238, 0.16) 0, transparent 34%),
+    var(--bg-glass-strong) !important;
+  color: #d6ecff !important;
+  box-shadow: inset 0 0 0 1px rgba(120, 180, 255, 0.06), 0 8px 20px -12px rgba(0, 0, 0, 0.7) !important;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.workbench-topbar-actions .status-badge::before { border-color: rgba(120, 180, 255, 0.08) !important; }
+/* Live 圆点:青色能量脉冲(替换翠绿) */
+.workbench-topbar-actions .status-live::after {
+  background: var(--accent-cyan) !important;
+  box-shadow: 0 0 10px rgba(34, 211, 238, 0.7) !important;
+}
+.workbench-topbar-signout {
+  background:
+    radial-gradient(120% 120% at 20% 0%, rgba(34, 211, 238, 0.06), transparent 55%),
+    var(--bg-glass) !important;
+  border: 1px solid var(--stroke-mid) !important;
+  color: var(--ink-mid) !important;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.workbench-topbar-signout:hover {
+  color: var(--ink-hi) !important;
+  border-color: rgba(59, 130, 246, 0.42) !important;
+  box-shadow: 0 0 20px -8px rgba(59, 130, 246, 0.6) !important;
+}
+
+/* ══════════════ 科技字体 + 炫酷交互 ══════════════ */
+/* 菜单栏:Chakra Petch 科技字体 */
+.side-nav nav a .nav-link-label,
+.side-nav nav .nav-parent-toggle .nav-link-label {
+  font-family: var(--font-display) !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.05em !important;
+}
+/* 悬停:连续流光扫过 + 字距张开 + 图标上浮 */
+.side-nav nav a:hover,
+.side-nav nav .nav-parent-toggle:hover {
+  background: linear-gradient(
+    100deg,
+    rgba(120, 180, 255, 0.05) 0%,
+    rgba(34, 211, 238, 0.14) 42%,
+    rgba(59, 130, 246, 0.12) 60%,
+    rgba(120, 180, 255, 0.05) 100%
+  ) !important;
+  background-size: 220% 100% !important;
+  animation: navSweep 1.5s var(--ease-out) infinite !important;
+  transform: translateX(2px) !important;
+}
+.side-nav nav a:hover .nav-link-label,
+.side-nav nav .nav-parent-toggle:hover .nav-link-label {
+  color: #e6f4ff !important;
+  letter-spacing: 0.09em !important;
+}
+@keyframes navSweep {
+  0% { background-position: 130% 0; }
+  100% { background-position: -30% 0; }
+}
+/* 激活项左缘条:能量呼吸 */
+.side-nav nav a.active::before,
+.side-nav nav .nav-parent-toggle.active::before {
+  animation: navBarPulse 2.4s ease-in-out infinite !important;
+}
+@keyframes navBarPulse {
+  0%, 100% { box-shadow: 0 0 5px 0 rgba(34, 211, 238, 0.38); }
+  50% { box-shadow: 0 0 10px 0 rgba(59, 130, 246, 0.6); }
+}
+
+/* 主题切换钮:图标随日/月旋入,底色随激活态(浅色)微亮 */
+.side-nav-theme-toggle .nav-link-icon {
+  transition: color var(--dur-base) ease, transform var(--dur-base) ease, box-shadow var(--dur-base) ease !important;
+}
+.side-nav-theme-toggle:hover .nav-link-icon { transform: rotate(18deg); }
+.side-nav-theme-toggle[aria-pressed="true"] .nav-link-icon {
+  color: var(--accent-amber) !important;
+  box-shadow: inset 0 0 0 1px rgba(251, 191, 36, 0.34), 0 0 16px -4px rgba(251, 191, 36, 0.55) !important;
+}
+
+/* 左下角 Sign Out:科技字体 + 图标滑出 */
+.side-nav-footer-button .nav-link-label {
+  font-family: var(--font-display) !important;
+  letter-spacing: 0.14em !important;
+  text-transform: uppercase !important;
+  font-size: 12px !important;
+}
+.side-nav-footer-button .nav-link-icon {
+  transition: color var(--dur-base) ease, transform var(--dur-base) ease, box-shadow var(--dur-base) ease !important;
+}
+.side-nav-footer-button:hover .nav-link-icon { transform: translateX(3px) !important; }
+
+/* 右上角状态徽标 / Sign Out:等宽 / 科技字体 */
+.workbench-topbar-actions .status-badge {
+  font-family: var(--font-mono) !important;
+  letter-spacing: 0.16em !important;
+  text-transform: uppercase !important;
+  font-size: 11px !important;
+}
+.workbench-topbar-signout {
+  font-family: var(--font-display) !important;
+  letter-spacing: 0.1em !important;
+  text-transform: uppercase !important;
+  font-size: 12px !important;
+  transition: color var(--dur-base) ease, border-color var(--dur-base) ease, box-shadow var(--dur-base) ease, transform var(--dur-base) ease !important;
+}
+.workbench-topbar-signout:hover { transform: translateY(-1px) !important; }
+
+/* 面板悬停微升起(全站卡片科技感反馈) */
+.clickable-card {
+  transition: border-color var(--dur-base) ease, box-shadow var(--dur-base) ease, transform var(--dur-base) ease !important;
+}
+.clickable-card:hover { transform: translateY(-2px) !important; }
+
+/* ══════════════ 徽标动画(环带数据行星:行星漂浮 + 光环能量流动 + 星芒闪烁) ══════════════ */
+/* 行星整体缓慢漂浮,像悬在太空 */
+.brandmark-bob {
+  animation: brandBob 4s ease-in-out infinite;
+}
+@keyframes brandBob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1.6px); }
+}
+/* 光环上一段亮光沿环流动,暗示环在转动 */
+.brandmark-shine {
+  animation: brandShine 4.5s linear infinite;
+}
+@keyframes brandShine {
+  to { stroke-dashoffset: -100; }
+}
+/* 三颗星芒错峰闪烁(绕自身中心缩放) */
+.brandmark-spark1,
+.brandmark-spark2,
+.brandmark-spark3 {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: brandTwinkle 2.6s ease-in-out infinite;
+}
+.brandmark-spark2 { animation-delay: 0.9s; }
+.brandmark-spark3 { animation-delay: 1.7s; }
+@keyframes brandTwinkle {
+  0%, 100% { opacity: 0.25; transform: scale(0.7); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+/* ══════════════ 右下角悬浮聊天入口(FAB) ══════════════ */
+.fab-chat {
+  background-image: var(--grad-signature);
+  color: #fff;
+  box-shadow:
+    0 12px 32px -8px rgba(34, 211, 238, 0.5),
+    0 10px 24px -10px rgba(139, 92, 246, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), filter var(--dur-base) var(--ease-out);
+}
+.fab-chat svg { filter: drop-shadow(0 1px 2px rgba(6, 12, 24, 0.35)); }
+.fab-chat:hover {
+  transform: translateY(-2px) scale(1.06);
+  box-shadow:
+    0 18px 42px -8px rgba(34, 211, 238, 0.62),
+    0 14px 30px -10px rgba(139, 92, 246, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.36);
+  filter: brightness(1.05);
+}
+.fab-chat:active { transform: translateY(0) scale(1.0); }
+/* 呼吸光晕:模糊的渐变球体在按钮之后缓慢明灭 + 缩放 */
+.fab-chat-glow {
+  background-image: var(--grad-signature);
+  filter: blur(15px);
+  opacity: 0.55;
+  animation: fabGlow 2.8s var(--ease-out) infinite;
+}
+@keyframes fabGlow {
+  0%, 100% { opacity: 0.45; transform: scale(1); }
+  50% { opacity: 0.85; transform: scale(1.1); }
+}
+
+/* ============================================================================
+   环境极光层(HudGrid 消费)
+   ========================================================================== */
+.tac-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  background: var(--bg-abyss);
+}
+
+/* ══════ 漂移光晕(取代光点)—— 柔和的大团发光光晕缓慢游移 ══════ */
+.tac-halo {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(100px);
+  will-change: transform;
+  mix-blend-mode: screen;
+}
+.tac-halo-1 {
+  width: 42vw; height: 42vw;
+  top: -8vw; left: 2vw;
+  background: radial-gradient(circle, rgba(34, 211, 238, 0.42), transparent 70%);
+  animation: haloDriftA 22s ease-in-out infinite;
+}
+.tac-halo-2 {
+  width: 46vw; height: 46vw;
+  bottom: -14vw; right: -4vw;
+  background: radial-gradient(circle, rgba(59, 130, 246, 0.38), transparent 70%);
+  animation: haloDriftB 26s ease-in-out infinite;
+}
+.tac-halo-3 {
+  width: 36vw; height: 36vw;
+  top: 22%; left: 40%;
+  background: radial-gradient(circle, rgba(139, 92, 246, 0.34), transparent 72%);
+  animation: haloDriftC 30s ease-in-out infinite;
+}
+.tac-halo-4 {
+  width: 30vw; height: 30vw;
+  top: -2vw; right: 22%;
+  background: radial-gradient(circle, rgba(34, 211, 238, 0.28), transparent 72%);
+  animation: haloDriftD 24s ease-in-out infinite;
+}
+.tac-halo-5 {
+  width: 34vw; height: 34vw;
+  bottom: -4vw; left: 30%;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.28), transparent 72%);
+  animation: haloDriftE 32s ease-in-out infinite;
+}
+@keyframes haloDriftA {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(28vw, 22vw) scale(1.22); }
+}
+@keyframes haloDriftB {
+  0%, 100% { transform: translate(0, 0) scale(1.05); }
+  50% { transform: translate(-26vw, -18vw) scale(0.9); }
+}
+@keyframes haloDriftC {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(-24vw, 16vw) scale(1.2); }
+  66% { transform: translate(22vw, -14vw) scale(0.86); }
+}
+@keyframes haloDriftD {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-22vw, 24vw) scale(1.24); }
+}
+@keyframes haloDriftE {
+  0%, 100% { transform: translate(0, 0) scale(1.08); }
+  50% { transform: translate(24vw, -20vw) scale(0.88); }
+}
+
+/* 扫描网格 —— 按用户要求移除背景网格,不再绘制 */
+.tac-bg-grid {
+  display: none;
+}
+
+/* 角落暗角 + 顶部冷光 */
+.tac-bg-vignette {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(120% 90% at 50% -10%, rgba(59, 130, 246, 0.05), transparent 55%),
+    radial-gradient(100% 100% at 50% 120%, rgba(0, 0, 0, 0.6), transparent 60%);
+}
+.tac-bg-topglow {
+  position: absolute;
+  left: 0; right: 0; top: 0;
+  height: 42%;
+  background: linear-gradient(180deg, rgba(34, 211, 238, 0.05), transparent);
+  pointer-events: none;
+}
+
+/* ══════════════ 技能库概览(Skills 列表页头 · 常驻可视化) ══════════════ */
+.skills-inventory-mini {
+  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  margin: 4px 0 14px; padding: 16px 18px; border-radius: 15px;
+  background: linear-gradient(150deg, rgba(34, 211, 238, 0.07), rgba(59, 130, 246, 0.03));
+  border: 1px solid var(--stroke-soft);
+  box-shadow: inset 0 0 30px -18px rgba(34, 211, 238, 0.45);
+}
+.skills-inventory-mini-donut { flex-shrink: 0; width: 104px; height: 104px; }
+.skills-inventory-mini-metrics { flex: 1; min-width: 150px; display: flex; gap: 10px; }
+.skills-inv-metric {
+  flex: 1; display: flex; flex-direction: column; gap: 4px;
+  padding: 11px 12px; border-radius: 12px;
+  background: var(--bg-glass); border: 1px solid var(--stroke-soft);
+}
+.skills-inv-metric-value { font-family: var(--font-mono); font-size: 23px; font-weight: 700; line-height: 1; }
+.skills-inv-metric-value.on { color: #67e8f9; text-shadow: 0 0 16px rgba(34, 211, 238, 0.4); }
+.skills-inv-metric-value.off { color: var(--ink-lo); }
+.skills-inv-metric-value.cat { color: #9db4ff; text-shadow: 0 0 16px rgba(99, 102, 241, 0.4); }
+.skills-inv-metric-label { font-size: 10px; color: var(--ink-mid); letter-spacing: 0.05em; }
+
+/* —— reduced-motion 降级:一切归静 —— */
+@media (prefers-reduced-motion: reduce) {
+  .status-live,
+  .brandmark-bob,
+  .brandmark-shine,
+  .brandmark-spark1,
+  .brandmark-spark2,
+  .brandmark-spark3,
+  .fab-chat-glow,
+  .tac-halo { animation: none !important; }
+  .side-nav nav a:hover,
+  .side-nav nav .nav-parent-toggle:hover,
+  .side-nav nav a.active::before,
+  .side-nav nav .nav-parent-toggle.active::before { animation: none !important; }
+}
+
+/* ============================================================================
+   Light 主题补丁 —— 绕过 token 的烘死深色字面量在浅色下的定点覆盖。
+   靠后加载 + 同等特异性,胜出。
+   ========================================================================== */
+
+/* 徽标(环带数据行星):深色版的近白高光在浅底会"消失",浅色下重着色让它跳出来。
+   —— 星芒 #eafcff → 品牌紫;光环青端加深;光环补一层极淡投影做边缘定义。 */
+:root[data-theme="light"] .brandmark .bm-ring-s1 { stop-color: #2563eb; }
+:root[data-theme="light"] .brandmark .bm-ring-s2 { stop-color: #0891b2; }
+:root[data-theme="light"] .brandmark-spark1,
+:root[data-theme="light"] .brandmark-spark2,
+:root[data-theme="light"] .brandmark-spark3 { fill: #7c3aed; }
+:root[data-theme="light"] .brandmark-ring {
+  filter: drop-shadow(0 1px 1.5px rgba(15, 30, 51, 0.18));
+}
+
+:root[data-theme="light"] .side-nav-workbench {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(244, 246, 251, 0.94));
+  border-right: 1px solid var(--stroke-soft);
+  box-shadow: 1px 0 0 rgba(37, 99, 235, 0.06);
+}
+
+/* 侧栏悬停/激活文字:深色版硬编码近白色 → 深墨蓝 */
+:root[data-theme="light"] .side-nav nav a:hover .nav-link-label,
+:root[data-theme="light"] .side-nav nav .nav-parent-toggle:hover .nav-link-label,
+:root[data-theme="light"] .side-nav nav a.active .nav-link-label,
+:root[data-theme="light"] .side-nav nav .nav-parent-toggle.active .nav-link-label {
+  color: var(--ink-hi) !important;
+}
+:root[data-theme="light"] .side-nav nav a:hover {
+  background: rgba(37, 99, 235, 0.07) !important;
+}
+:root[data-theme="light"] .side-nav nav a.active,
+:root[data-theme="light"] .side-nav nav .nav-parent-toggle.active {
+  background: linear-gradient(100deg, rgba(34, 211, 238, 0.14), rgba(59, 130, 246, 0.12)) !important;
+  border-color: rgba(59, 130, 246, 0.35) !important;
+  box-shadow: 0 0 16px -10px rgba(37, 99, 235, 0.4), inset 0 0 0 1px rgba(37, 99, 235, 0.06) !important;
+}
+:root[data-theme="light"] .side-nav .side-nav-toggle:hover,
+:root[data-theme="light"] .side-nav-footer-button:hover .nav-link-icon {
+  color: #0b63c4 !important;
+}
+:root[data-theme="light"] .side-nav-footer-button .nav-link-icon {
+  background:
+    radial-gradient(120% 120% at 30% 20%, rgba(34, 211, 238, 0.18), transparent 60%),
+    rgba(255, 255, 255, 0.7) !important;
+  color: #0b7ea8 !important;
+}
+
+/* 顶栏:玻璃底改浅色 */
+:root[data-theme="light"] .workbench-topbar {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.5)) !important;
+}
+/* 顶栏大标题 gradient-text:浅色下加深停靠色,避免洗白 */
+:root[data-theme="light"] .workbench-topbar h2 {
+  background: linear-gradient(100deg, #0891b2 0%, #2563eb 46%, #7c3aed 100%);
+  /* background 简写会重置 background-clip,须重申裁剪,否则渲染成实心色块 */
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent !important;
+  filter: drop-shadow(0 0 18px rgba(37, 99, 235, 0.18));
+}
+:root[data-theme="light"] .workbench-topbar .brand-kicker {
+  color: #0b7ea8 !important;
+}
+:root[data-theme="light"] .workbench-topbar-actions .status-badge {
+  color: var(--ink-hi) !important;
+  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.08), 0 8px 20px -14px rgba(15, 30, 60, 0.4) !important;
+}
+
+/* 品牌字标(用 --grad-signature-h,已在 light token 加深)+ 冷光降弱 */
+:root[data-theme="light"] .brand-text h1 {
+  filter: drop-shadow(0 0 6px rgba(37, 99, 235, 0.16)) !important;
+}
+
+/* 主区:去掉深色 wash */
+:root[data-theme="light"] .main-panel {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0)) !important;
+}
+
+/* 环境层:暗角/网格在白底反相为浅色 */
+:root[data-theme="light"] .tac-bg { background: transparent; }
+:root[data-theme="light"] .tac-bg-vignette {
+  background:
+    radial-gradient(120% 90% at 50% -10%, rgba(59, 130, 246, 0.06), transparent 55%),
+    radial-gradient(100% 100% at 50% 120%, rgba(15, 30, 60, 0.05), transparent 60%);
+}
+/* screen 混合在白底会消隐光晕 —— 改 multiply 让浅色下仍有极淡氛围 */
+:root[data-theme="light"] .tac-halo { mix-blend-mode: multiply; opacity: 0.5; }
+
+/* 滚动条:浅色下用深墨蓝半透 */
+:root[data-theme="light"] * { scrollbar-color: rgba(15, 30, 60, 0.22) transparent; }
+:root[data-theme="light"] *::-webkit-scrollbar-thumb { background: rgba(15, 30, 60, 0.18); background-clip: content-box; }
+:root[data-theme="light"] *::-webkit-scrollbar-thumb:hover { background: rgba(15, 30, 60, 0.3); background-clip: content-box; }
+
+/* Skills 概览分类值:浅色下加深靛蓝,保证白底可读 */
+:root[data-theme="light"] .skills-inv-metric-value.on { color: #0b7ea8; }
+:root[data-theme="light"] .skills-inv-metric-value.cat { color: #4f46e5; }
+
+/* ══════════════ Light 主题:styles.css 烘死深色字面量补丁 ══════════════ */
+/* 侧栏未激活项:深色版是深紫渐变字面量,浅色下反白为极淡中性玻璃 */
+:root[data-theme="light"] .side-nav nav a,
+:root[data-theme="light"] .side-nav nav .nav-parent-toggle {
+  background: rgba(15, 30, 60, 0.028) !important;
+  border-color: var(--stroke-soft) !important;
+  color: var(--ink-mid) !important;
+  box-shadow: none !important;
+}
+:root[data-theme="light"] .side-nav nav a .nav-link-label,
+:root[data-theme="light"] .side-nav nav .nav-parent-toggle .nav-link-label {
+  color: var(--ink-hi) !important;
+}
+:root[data-theme="light"] .side-nav nav a .nav-link-icon,
+:root[data-theme="light"] .side-nav nav .nav-parent-toggle .nav-link-icon {
+  color: var(--ink-mid);
+}
+/* 未激活项的翠绿发丝边(::before)在白底刺眼,收敛为极淡蓝 */
+:root[data-theme="light"] .side-nav nav a::before {
+  background:
+    linear-gradient(120deg, rgba(37, 99, 235, 0.14), rgba(37, 99, 235, 0.05)) border-box !important;
+}
+
+/* 通用按钮组(Skills/Cron/详情/列表等):深青绿渐变 → 浅白 + 深墨字 */
+:root[data-theme="light"] :is(
+  .app-shell button,
+  .login-card button,
+  .detail-panel button,
+  .list-grid button,
+  .button-row button,
+  .memory-nav button
+):not(.tab):not(.btn-sm):not(.ev-page-btn):not(.modal-close):not(.ghost-button):not(.nav-parent-toggle) {
+  color: var(--ink-hi);
+  background: linear-gradient(180deg, #ffffff, #eef3fb);
+  border-color: var(--stroke-mid);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 8px 20px -14px rgba(15, 30, 60, 0.3);
+}
+:root[data-theme="light"] :is(
+  .app-shell button,
+  .login-card button,
+  .detail-panel button,
+  .list-grid button,
+  .button-row button,
+  .memory-nav button
+):not(.tab):not(.btn-sm):not(.ev-page-btn):not(.modal-close):not(.ghost-button):not(.nav-parent-toggle):hover {
+  background: linear-gradient(180deg, #ffffff, #e6eef9);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.22), 0 12px 24px -14px rgba(15, 30, 60, 0.32);
+  filter: none;
+}
+/* 白底按钮的高光扫掠(::after 白渐变)在浅底不可见,降透明避免糊白 */
+:root[data-theme="light"] :is(
+  .app-shell button,
+  .login-card button,
+  .detail-panel button,
+  .list-grid button,
+  .button-row button,
+  .memory-nav button
+):not(.ghost-button)::after {
+  background: linear-gradient(120deg, transparent 0, rgba(37, 99, 235, 0.16) 45%, transparent 100%) !important;
+}
+
+/* ghost-button(侧栏折叠/顶栏 Sign Out 等):深色字面量 → 浅玻璃 + 深墨字 */
+:root[data-theme="light"] .ghost-button {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(240, 244, 251, 0.94));
+  color: var(--ink-hi);
+  border-color: var(--stroke-mid);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 8px 20px -14px rgba(15, 30, 60, 0.24);
+}
+:root[data-theme="light"] .ghost-button:hover {
+  background: linear-gradient(180deg, #ffffff, #e6eef9);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.2), 0 12px 24px -14px rgba(15, 30, 60, 0.3);
+}
+
+/* 输入 / 文本域 / 下拉:深色字面量渐变 → 白底 + 深墨字 */
+:root[data-theme="light"] input:is([type="text"], [type="search"], [type="password"], [type="email"], [type="number"], [type="url"], [type="tel"]),
+:root[data-theme="light"] textarea,
+:root[data-theme="light"] select,
+:root[data-theme="light"] .login-form input,
+:root[data-theme="light"] .filter-row input,
+:root[data-theme="light"] .memory-editor textarea {
+  color: var(--ink-hi);
+  background: linear-gradient(180deg, #ffffff, #f5f8fd);
+  border-color: var(--stroke-mid);
+  box-shadow: inset 0 1px 2px rgba(15, 30, 60, 0.05);
+}
+:root[data-theme="light"] input::placeholder,
+:root[data-theme="light"] textarea::placeholder {
+  color: var(--ink-lo);
+}
+
+/* 面板核心表面(.detail-panel/.panel/.card/.chat-sidebar/.cyber-panel/.list-grid li):
+   深色版是烘死深海军蓝渐变 → 浅色下反白为纸感玻璃(阴影已随 token 自动转浅)。
+   .list-grid li 与上述面板共用同一条深色字面量规则(styles.css ~1111),需一并反白,
+   否则 Sessions/Skills 等清单卡在浅色下仍是深底(深字不可读)。 */
+:root[data-theme="light"] :is(.detail-panel, .chat-sidebar, .cyber-panel, .panel, .card, .list-grid li) {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 250, 253, 0.97));
+  border-color: var(--stroke-soft);
+}
+:root[data-theme="light"] .clickable-card:hover {
+  border-color: rgba(37, 99, 235, 0.4);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.16), 0 18px 34px -20px rgba(15, 30, 60, 0.3);
+}
+:root[data-theme="light"] .clickable-card.active {
+  border-color: rgba(37, 99, 235, 0.5);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.24), 0 20px 36px -22px rgba(15, 30, 60, 0.3);
+}
+
+/* 代码块 / 日志(深色近黑字面量)→ 浅灰底 + 深墨字 */
+:root[data-theme="light"] :is(
+  .detail-content pre,
+  .detail-message pre,
+  .chat-events pre,
+  .log-box,
+  .cyber-code,
+  .skills-markdown-view pre,
+  .skills-appendix-content pre
+) {
+  background: linear-gradient(180deg, #f2f5fb, #eaeff7);
+  border-color: var(--stroke-mid);
+  color: #1c3350;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+/* skills 迷你启停按钮:深色字面量 → 浅白 + 深墨字(与通用按钮同调) */
+:root[data-theme="light"] .skills-mini-toggle {
+  color: var(--ink-hi);
+  background: linear-gradient(180deg, #ffffff, #eef3fb);
+}
+
+/* skills 激活列表项近白文本 → 深墨蓝(浅底可读) */
+:root[data-theme="light"] .skills-narrow-list li.active strong { color: var(--ink-hi); }
+:root[data-theme="light"] .skills-narrow-list li.active p { color: var(--ink-mid); }
+
+/* 通用状态徽标(如 skills 面板头 "110 total" / "Enabled"):
+   深色字面量 rgba(11,45,57) → 浅色淡蓝底 + 深墨字 */
+:root[data-theme="light"] .status-badge {
+  background: rgba(37, 99, 235, 0.10);
+  border-color: rgba(37, 99, 235, 0.22);
+  color: #0b63c4;
+}
+
+/* Settings 运行状态表格单元(styles.css 烘死 rgba(5,14,25,0.92) 深底):
+   浅色下反白,否则值文字(深墨)落在深底上不可读。间隙线用浅描边。 */
+:root[data-theme="light"] .settings-runtime-grid {
+  background: var(--stroke-soft);
+  border-color: var(--stroke-soft);
+}
+:root[data-theme="light"] .settings-runtime-grid > div {
+  background: linear-gradient(180deg, #ffffff, #f5f8fd);
+}
+
+/* 终端外框(xterm 画布的容器):深色渐变 → 浅底,与 xterm 浅色主题(ChatPage
+   TERMINAL_THEME_LIGHT #f5f8fd)对齐,避免画布外露出深色接缝;边框/发光转浅。 */
+:root[data-theme="light"] .terminal-host {
+  background: #f5f8fd;
+  border-color: var(--stroke-mid);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.08), 0 20px 44px -26px rgba(15, 30, 60, 0.28);
+}
+
+/* ==========================================================================
+   TIER-1 补丁 —— styles.css 中烘死深色字面量的类,浅色主题下须反白。
+   这些类未被上面的通用面板/代码块补丁覆盖,逐一显式重着色。
+   模态遮罩(.settings-confirm-overlay / .cron-*-modal-overlay)是有意的暗色
+   蒙层,浅色下同样保留压暗,故不在此翻转。
+   ========================================================================== */
+
+/* Wiki 阅读面板:深近黑底 → 纸白;行内 code / 代码块 / 表头深底 → 浅灰。 */
+:root[data-theme="light"] .wiki-detail-content {
+  background: linear-gradient(180deg, #ffffff, #f7f9fd);
+}
+:root[data-theme="light"] .wiki-detail-content code {
+  background: rgba(37, 99, 235, 0.08);
+  border-color: var(--stroke-soft);
+}
+:root[data-theme="light"] .wiki-detail-content pre {
+  background: linear-gradient(180deg, #f2f5fb, #eaeff7);
+}
+:root[data-theme="light"] .wiki-detail-content pre code {
+  color: #1c3350;
+}
+:root[data-theme="light"] .wiki-detail-content th {
+  background: rgba(15, 30, 60, 0.05);
+}
+
+/* Cron 任务卡主字(近白 #cbd5e1)→ 深墨蓝 */
+:root[data-theme="light"] .cron-job-info-grid strong {
+  color: var(--ink-hi);
+}
+
+/* Cron 历史行:深近黑渐变 + 近白字 → 纸白 + 深墨 */
+:root[data-theme="light"] .cron-history-row {
+  background: linear-gradient(180deg, #ffffff, #f5f8fd);
+  border-color: var(--stroke-soft);
+  color: var(--ink-hi);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+/* Cron 详情/原始/会话模态:深近黑底 → 纸白玻璃(正文默认墨字即可读) */
+:root[data-theme="light"] :is(.cron-detail-modal, .cron-raw-modal, .cron-session-modal) {
+  background: linear-gradient(180deg, #ffffff, #f6f9fd);
+  border-color: var(--stroke-mid);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.08), 0 26px 58px -26px rgba(15, 30, 60, 0.32);
+}
+
+/* Cron 运行/暂停状态徽标:深底 + 浅字 → 浅色语义染底 + 深语义字 */
+:root[data-theme="light"] .cron-status.running {
+  color: #047857;
+  border-color: rgba(5, 150, 105, 0.4);
+  background: rgba(5, 150, 105, 0.12);
+}
+:root[data-theme="light"] .cron-status.paused {
+  color: #b42318;
+  border-color: rgba(225, 29, 72, 0.36);
+  background: rgba(225, 29, 72, 0.1);
+}
+
+/* Settings 危险面板 / 重启态 / 确认弹窗:深 maroon → 浅玫瑰纸,红调保留转深字 */
+:root[data-theme="light"] .settings-danger-panel {
+  border-color: rgba(225, 29, 72, 0.32);
+  background: linear-gradient(100deg, rgba(225, 29, 72, 0.08), #ffffff 46%), #ffffff;
+}
+:root[data-theme="light"] .status-restarting {
+  color: #b42318;
+  border-color: rgba(225, 29, 72, 0.4);
+  background: rgba(225, 29, 72, 0.1);
+}
+:root[data-theme="light"] .settings-confirm-dialog {
+  border-color: rgba(225, 29, 72, 0.36);
+  background: linear-gradient(145deg, rgba(225, 29, 72, 0.06), #ffffff 42%), var(--aisoc-panel-strong);
+  box-shadow: 0 0 0 1px rgba(225, 29, 72, 0.08), 0 30px 80px -30px rgba(15, 30, 60, 0.4);
+}
+:root[data-theme="light"] .settings-confirm-dialog code {
+  color: #b42318;
+}
+
+/* Sessions 消息卡:深近黑底 → 纸白玻璃 */
+:root[data-theme="light"] .sessions-message-stream .detail-message {
+  background: linear-gradient(180deg, #ffffff, #f6f9fd);
+  border-color: var(--stroke-soft);
+}

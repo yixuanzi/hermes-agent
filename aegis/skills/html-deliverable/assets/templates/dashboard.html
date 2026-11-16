@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="{{LANG}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{TITLE}}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root { --theme:#61dbb0; --on-theme:#08120f; --page-background:#101827; --page-foreground:#eef4fb; --surface:#182235; --surface-foreground:#eef4fb; --bg:var(--page-background); --panel:var(--surface); --line:#2a3950; --text:var(--page-foreground); --muted:#b4c1d3; --accent:var(--theme); --blue:#7cb6ff; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--page-background); color:var(--page-foreground); font:14px/1.5 Manrope,system-ui,sans-serif; }
+    main { max-width:1200px; margin:auto; padding:clamp(22px,5vw,64px); } .meta { color:var(--accent); font:500 11px "DM Mono",monospace; letter-spacing:.1em; text-transform:uppercase; }
+    h1 { margin:7px 0 4px; font-size:clamp(32px,5vw,50px); letter-spacing:-.05em; } .subtitle { margin:0; color:var(--muted); } .top { display:flex; justify-content:space-between; gap:24px; align-items:end; } .updated { color:var(--muted); font:12px "DM Mono",monospace; white-space:nowrap; }
+    .kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:32px 0 14px; } .panel { border:1px solid var(--line); border-radius:14px; background:var(--panel); padding:20px; } .kpi-button { width:100%; color:inherit; font:inherit; text-align:left; cursor:pointer; } .label { color:var(--muted); font:11px "DM Mono",monospace; letter-spacing:.08em; text-transform:uppercase; } .value { display:block; margin:8px 0 2px; font-size:30px; font-weight:800; letter-spacing:-.05em; } .delta { color:var(--accent); font-size:12px; }
+    .content { display:grid; grid-template-columns:1.45fr .9fr; gap:14px; } h2 { margin:0 0 18px; font-size:17px; } canvas { width:100% !important; max-height:300px; } table { width:100%; border-collapse:collapse; } caption { text-align:left; margin-bottom:12px; font-weight:700; } th,td { padding:12px 4px; border-bottom:1px solid var(--line); text-align:left; } th { color:var(--muted); font:11px "DM Mono",monospace; text-transform:uppercase; } .note { margin-top:14px; color:var(--muted); font-size:12px; } .status { color:var(--accent); }
+    @media (max-width:850px) { .kpis { grid-template-columns:repeat(2,1fr); } .content { grid-template-columns:1fr; } } @media (max-width:500px) { .top { display:block; } .updated { margin-top:16px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="top"><div><div class="meta">{{DASHBOARD_TYPE}}</div><h1>{{TITLE}}</h1><p class="subtitle">{{SUBTITLE}}</p></div><div class="updated">Updated {{UPDATED_AT}}</div></header>
+    <section class="kpis" aria-label="Key performance indicators">
+      <button type="button" class="panel kpi-button agent2ui-object" data-agent2ui-content="{{KPI_1_LABEL}}: {{KPI_1_VALUE}} ({{KPI_1_CHANGE}})" aria-label="Use KPI one in chat"><span class="label">{{KPI_1_LABEL}}</span><strong class="value">{{KPI_1_VALUE}}</strong><span class="delta">{{KPI_1_CHANGE}}</span></button>
+      <button type="button" class="panel kpi-button agent2ui-object" data-agent2ui-content="{{KPI_2_LABEL}}: {{KPI_2_VALUE}} ({{KPI_2_CHANGE}})" aria-label="Use KPI two in chat"><span class="label">{{KPI_2_LABEL}}</span><strong class="value">{{KPI_2_VALUE}}</strong><span class="delta">{{KPI_2_CHANGE}}</span></button>
+      <button type="button" class="panel kpi-button agent2ui-object" data-agent2ui-content="{{KPI_3_LABEL}}: {{KPI_3_VALUE}} ({{KPI_3_CHANGE}})" aria-label="Use KPI three in chat"><span class="label">{{KPI_3_LABEL}}</span><strong class="value">{{KPI_3_VALUE}}</strong><span class="delta">{{KPI_3_CHANGE}}</span></button>
+      <button type="button" class="panel kpi-button agent2ui-object" data-agent2ui-content="{{KPI_4_LABEL}}: {{KPI_4_VALUE}} ({{KPI_4_CHANGE}})" aria-label="Use KPI four in chat"><span class="label">{{KPI_4_LABEL}}</span><strong class="value">{{KPI_4_VALUE}}</strong><span class="delta">{{KPI_4_CHANGE}}</span></button>
+    </section>
+    <section class="content">
+      <article class="panel"><h2>{{CHART_TITLE}}</h2><canvas id="trend-chart" aria-label="{{CHART_ACCESSIBLE_DESCRIPTION}}" role="img"></canvas><p class="note">{{CHART_TEXT_ALTERNATIVE}}</p></article>
+      <article class="panel"><table><caption>{{TABLE_TITLE}}</caption><thead><tr><th>{{COLUMN_1}}</th><th>{{COLUMN_2}}</th><th>{{COLUMN_3}}</th></tr></thead><tbody>{{TABLE_ROWS}}</tbody></table><p class="note">{{DATA_NOTE}}</p></article>
+    </section>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="/static/skills/html-deliverable/assets/agent2ui-bridge.js"></script>
+</body>
+</html>

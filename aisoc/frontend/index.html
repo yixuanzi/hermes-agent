@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 无闪屏主题落定:首帧前读 localStorage["aisoc_theme"](默认 dark),写 <html data-theme>,
+         避免 FOUC。与 src/design/theme.ts 的 THEME_STORAGE_KEY 一致。 -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem("aisoc_theme");
+          document.documentElement.dataset.theme = t === "light" ? "light" : "dark";
+        } catch (e) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
+    <link rel="icon" type="image/svg+xml" href="%BASE_URL%aisoc-logo.svg?v=7" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <title>AISOC</title>
+  </head>
+  <body>
+    <div id="root">AISOC frontend bootstrap pending.</div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
