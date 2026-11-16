@@ -84,7 +84,7 @@ def test_text_message_reaches_backend_verbatim():
         text,
         reply_to_message_id="om_prev",
         reply_to_text="上一条回复",
-        metadata={"group_history_block": "[群聊历史]\nBob: 早"},
+        channel_context="[群聊历史]\nBob: 早",
     )
 
     prepared = asyncio.run(
@@ -113,8 +113,7 @@ def test_attachment_keeps_notes_and_strips_gateway_context(tmp_path):
         reply_to_message_id="om_prev",
         reply_to_text="之前的讨论",
         reply_to_is_own_message=True,
-        channel_context="[频道上下文]",
-        metadata={"group_history_block": "[群聊历史]\nBob: 早"},
+        channel_context="[群聊历史]\nBob: 早",
     )
 
     prepared = asyncio.run(_gateway_turn(runner, session, event))
@@ -122,7 +121,7 @@ def test_attachment_keeps_notes_and_strips_gateway_context(tmp_path):
     assert "[Alice] 看看这个文件" in prepared  # 共享会话：网关确实加了昵称前缀
     [sent] = session.inputs
     assert str(doc) in sent and sent.endswith("\n\n看看这个文件")
-    for gateway_only in ("<source>", "[群聊历史]", "Replying to", "[频道上下文]", "[New message]", "[Alice]"):
+    for gateway_only in ("<source>", "[群聊历史]", "Replying to", "[New message]", "[Alice]"):
         assert gateway_only not in sent
 
 

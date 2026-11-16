@@ -366,12 +366,15 @@ def _inbound_adapter(monkeypatch, *, verdict, reply_thread: bool = True, busy: b
     return adapter, _run
 
 
-def test_an_in_scope_message_is_dispatched_and_marked(monkeypatch):
+def test_an_in_scope_message_is_dispatched_and_admissible(monkeypatch):
+    """Native admission refuses adapter metadata outside WhatsApp; an admitted turn carries none."""
+    from gateway.session_envelope import _native_metadata
+
     adapter, run = _inbound_adapter(monkeypatch, verdict=True)
     run()
     assert adapter._dispatch_inbound_event.await_count == 1
     event = adapter._dispatch_inbound_event.call_args.args[0]
-    assert event.metadata["jev_channel_autoreply"] is True
+    assert _native_metadata(event) == {}
 
 
 def test_an_out_of_scope_message_is_never_dispatched(monkeypatch):

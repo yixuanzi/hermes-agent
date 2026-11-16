@@ -1,11 +1,10 @@
-"""Outermost layers of an agent-bound Slack/Feishu turn (fork): ``<source>`` header and group history.
+"""Outermost layer of an agent-bound Slack/Feishu turn (fork): the ``<source>`` header.
 
 The structured header carries the trusted sender identity (platform, channel, user id, display
 name) that the A2A delegate and user-identity paths read; it is built only when the adapter supplied
 a user id, and it is separate from the remote A2A envelope, which carries parent identity only.
-The adapter-supplied group history block sits directly under it, above the shared-session
-``[Name]`` prefix, reply quote and media notes, so those keep their shape and the history stays one
-detachable preamble.
+Feishu's recent group history is not added here: it rides ``MessageEvent.channel_context``, which
+the shared inbound path renders as ``{history}\n\n[New message]\n...``.
 """
 
 from __future__ import annotations
@@ -33,10 +32,6 @@ def source_header(source: Any) -> Optional[str]:
 
 
 def add_source_preamble(event: Any, source: Any, message_text: str) -> str:
-    """Prepend the event's group-history block, then the ``<source>`` header, to the prepared text."""
-    metadata = getattr(event, "metadata", None)
-    history = str(metadata.get("group_history_block") or "").strip() if isinstance(metadata, dict) else ""
-    if history:
-        message_text = f"{history}\n\n{message_text}"
+    """Prepend the ``<source>`` header to the prepared text."""
     header = source_header(source)
     return f"{header}\n\n{message_text}" if header else message_text

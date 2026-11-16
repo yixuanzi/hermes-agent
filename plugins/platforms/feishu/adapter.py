@@ -2630,10 +2630,10 @@ class FeishuAdapter(FeishuAegisMixin, FeishuChoiceCardsMixin, FeishuSyntheticEve
             is_bot=is_bot,
             message_id=message_id,
         )
-        aegis_metadata = await self._aegis_inbound(
+        channel_context = await self._aegis_inbound(
             source=source, message=message, text=text, inbound_type=inbound_type, chat_id=chat_id, chat_type=chat_type,
             chat_info=chat_info, sender_profile=sender_profile, message_id=message_id, jev_gate_pending=jev_gate_pending)
-        if aegis_metadata is None:  # dropped by the Jev gate or taken by a delegate loop
+        if channel_context is None:  # dropped by the Jev gate or taken by a delegate loop
             return
         thread_id = getattr(source, "thread_id", thread_id)
         normalized = MessageEvent(
@@ -2642,9 +2642,9 @@ class FeishuAdapter(FeishuAegisMixin, FeishuChoiceCardsMixin, FeishuSyntheticEve
             media_text_inlined=media_text_inlined,
             reply_to_message_id=reply_to_message_id, reply_to_text=reply_to_text,
             channel_prompt=self._resolve_channel_prompt(chat_id, thread_id or None),
+            channel_context=channel_context or None,
             timestamp=datetime.now(),
         )
-        normalized.metadata.update(aegis_metadata)
         await self._dispatch_inbound_event(normalized)
 
     async def _dispatch_inbound_event(self, event: MessageEvent) -> None:

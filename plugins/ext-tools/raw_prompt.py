@@ -127,10 +127,6 @@ def strip_gateway_context(event: Any, source: Any, text: str) -> str:
 
     逐层按网关拼接的原样精确匹配；某层对不上就留着，宁可多发也不误删。"""
     text = _strip_source_header(text)
-    metadata = getattr(event, "metadata", None)
-    history = str(metadata.get("group_history_block") or "").strip() if isinstance(metadata, dict) else ""
-    if history:
-        text = _strip_prefix(text, f"{history}\n\n")
     reply = getattr(event, "reply_to_text", None)
     if reply and getattr(event, "reply_to_message_id", None):
         snippet = reply[:_REPLY_SNIPPET_CHARS]

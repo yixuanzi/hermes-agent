@@ -63,7 +63,6 @@ from gateway.session import SessionSource
 from hermes_platform.resolver.core import Candidate, Resolution
 from plugins.platforms.feishu.adapter import FeishuAdapter
 from plugins.platforms.feishu.adapter_aegis import load_aegis_settings
-from plugins.platforms.feishu.adapter_aegis_admission import _FEISHU_GROUP_HISTORY_METADATA_KEY
 
 BLOCK = "<group_messages>\n[09-26 10:00] Alice: earlier\n</group_messages>"
 
@@ -222,7 +221,6 @@ def test_adapter_cli_mode_never_touches_sdk_list_and_renders_cli_content():
         block = asyncio.run(adapter._fetch_group_history_block(chat_id="oc_g", exclude_message_id="om_now"))
     # Default card regions (title,body): the card renders as 【title】 body.
     assert block == "<group_messages>\n[09-26 20:15] [assistant]: 【x】 body\n</group_messages>"
-    assert gh.METADATA_KEY == _FEISHU_GROUP_HISTORY_METADATA_KEY
 
 
 @pytest.mark.parametrize(
@@ -658,7 +656,7 @@ def _run_inbound(adapter, message, *, chat_type="group"):
     return adapter._dispatch_inbound_event.await_args.args[0]
 
 
-def test_new_group_session_carries_block_on_metadata_not_text():
+def test_new_group_session_carries_block_on_channel_context_not_text():
     adapter = _inbound_adapter()
     event = _run_inbound(adapter, _message("do the thing"))
 
@@ -666,7 +664,16 @@ def test_new_group_session_carries_block_on_metadata_not_text():
         chat_id="oc_g", exclude_message_id="om_now", thread_id=None
     )
     assert event.text == "do the thing"
-    assert event.metadata[_FEISHU_GROUP_HISTORY_METADATA_KEY] == BLOCK
+    assert event.channel_context == BLOCK
+
+
+def test_history_event_crosses_native_admission():
+    """Native admission refuses adapter metadata outside WhatsApp, so the block rides channel_context."""
+    from gateway.session_envelope import _native_metadata
+
+    event = _run_inbound(_inbound_adapter(), _message("do the thing"))
+    assert event.channel_context == BLOCK
+    assert _native_metadata(event) == {}
 
 
 def test_topic_message_passes_its_real_thread_id_to_the_fetch():
@@ -693,7 +700,7 @@ def test_mention_hint_and_text_are_untouched_by_the_block():
 
     assert event.text.startswith("[Mentioned:")
     assert "<group_messages>" not in event.text
-    assert event.metadata[_FEISHU_GROUP_HISTORY_METADATA_KEY] == BLOCK
+    assert event.channel_context == BLOCK
 
 
 @pytest.mark.parametrize(
@@ -710,7 +717,7 @@ def test_reply_and_topic_messages_inject_when_session_is_new(kwargs):
     event = _run_inbound(adapter, _message("follow-up", **kwargs))
     adapter._fetch_group_history_block.assert_awaited_once()
     assert event.text == "follow-up"
-    assert event.metadata[_FEISHU_GROUP_HISTORY_METADATA_KEY] == BLOCK
+    assert event.channel_context == BLOCK
 
 
 @pytest.mark.parametrize(
@@ -730,7 +737,7 @@ def test_existing_session_skips_injection(kwargs):
     assert adapter._session_exists_for_source.called
     adapter._fetch_group_history_block.assert_not_awaited()
     assert event.text == "follow-up"
-    assert _FEISHU_GROUP_HISTORY_METADATA_KEY not in event.metadata
+    assert event.channel_context is None
 
 
 def test_session_check_sees_the_final_source():
@@ -778,7 +785,7 @@ def test_empty_history_leaves_text_untouched():
     event = _run_inbound(adapter, _message("hello"))
     adapter._fetch_group_history_block.assert_awaited_once()
     assert event.text == "hello"
-    assert _FEISHU_GROUP_HISTORY_METADATA_KEY not in event.metadata
+    assert event.channel_context is None
 
 
 def test_auto_threading_still_injects_for_root_message():
@@ -788,7 +795,7 @@ def test_auto_threading_still_injects_for_root_message():
     adapter._mark_auto_thread_pending = Mock()
     event = _run_inbound(adapter, _message("hello"))
     adapter._fetch_group_history_block.assert_awaited_once()
-    assert event.metadata[_FEISHU_GROUP_HISTORY_METADATA_KEY] == BLOCK
+    assert event.channel_context == BLOCK
 
 
 def test_legacy_adapter_without_settings_attribute_is_unaffected():
@@ -812,7 +819,7 @@ def _clear_feishu_env(monkeypatch):
 
 def _event_with_block(text, message_id, source, **kwargs):
     event = MessageEvent(text=text, message_type=MessageType.TEXT, source=source, message_id=message_id, **kwargs)
-    event.metadata[_FEISHU_GROUP_HISTORY_METADATA_KEY] = BLOCK
+    event.channel_context = BLOCK
     return event
 
 
@@ -840,7 +847,7 @@ def test_text_batch_keeps_first_events_block_and_plain_merged_text(monkeypatch):
     merged = adapter.handle_message.await_args.args[0]
     assert merged.text == "first\nsecond"
     assert "<group_messages>" not in merged.text
-    assert merged.metadata[_FEISHU_GROUP_HISTORY_METADATA_KEY] == BLOCK
+    assert merged.channel_context == BLOCK
 
 
 def test_media_batch_keeps_first_events_block_and_plain_caption(monkeypatch):
@@ -857,7 +864,7 @@ def test_media_batch_keeps_first_events_block_and_plain_caption(monkeypatch):
             text=text, message_type=MessageType.PHOTO, source=source, message_id=message_id,
             media_urls=[url], media_types=["image/png"],
         )
-        event.metadata[_FEISHU_GROUP_HISTORY_METADATA_KEY] = BLOCK
+        event.channel_context = BLOCK
         return event
 
     async def _sleep(_delay):
@@ -875,7 +882,7 @@ def test_media_batch_keeps_first_events_block_and_plain_caption(monkeypatch):
     merged = adapter.handle_message.await_args.args[0]
     assert "<group_messages>" not in merged.text
     assert "cap one" in merged.text and "cap two" in merged.text
-    assert merged.metadata[_FEISHU_GROUP_HISTORY_METADATA_KEY] == BLOCK
+    assert merged.channel_context == BLOCK
 
 
 # ---------------------------------------------------------------------------
@@ -898,8 +905,8 @@ SOURCE_HEADER = '<source>{"platform":"feishu","channel":"oc_g","uid":"ou_user","
 
 
 @pytest.mark.asyncio
-async def test_gateway_places_block_under_source_and_above_sender_prefix_and_reply():
-    """Shared thread session: [Ada] prefix and the reply quote keep their shape below the block."""
+async def test_gateway_renders_block_as_channel_context_under_source():
+    """Shared thread session: the block is upstream's backfill above ``[New message]``; [Ada] stays on the trigger."""
     runner = _runner()
     source = SessionSource(
         platform=Platform.FEISHU, chat_id="oc_g", chat_type="group", user_id="ou_user", user_name="Ada",
@@ -907,29 +914,28 @@ async def test_gateway_places_block_under_source_and_above_sender_prefix_and_rep
     )
     event = MessageEvent(
         text="继续处理", source=source, reply_to_message_id="om_parent", reply_to_text="上一条消息",
+        channel_context=BLOCK,
     )
-    event.metadata[_FEISHU_GROUP_HISTORY_METADATA_KEY] = BLOCK
 
     result = await runner._prepare_inbound_message_text(event=event, source=source, history=[])
 
     assert result == (
         f"{SOURCE_HEADER}\n\n"
-        f"{BLOCK}\n\n"
         '[Replying to: "上一条消息"]\n\n'
+        f"{BLOCK}\n\n[New message]\n"
         "[Ada] 继续处理"
     )
 
 
 @pytest.mark.asyncio
-async def test_gateway_places_block_under_source_for_plain_group_message():
+async def test_gateway_renders_block_under_source_for_plain_group_message():
     runner = _runner()
     source = SessionSource(platform=Platform.FEISHU, chat_id="oc_g", chat_type="group", user_id="ou_user", user_name="Ada")
-    event = MessageEvent(text="继续处理", source=source)
-    event.metadata[_FEISHU_GROUP_HISTORY_METADATA_KEY] = BLOCK
+    event = MessageEvent(text="继续处理", source=source, channel_context=BLOCK)
 
     result = await runner._prepare_inbound_message_text(event=event, source=source, history=[])
 
-    assert result == f"{SOURCE_HEADER}\n\n{BLOCK}\n\n继续处理"
+    assert result == f"{SOURCE_HEADER}\n\n{BLOCK}\n\n[New message]\n继续处理"
 
 
 @pytest.mark.asyncio
@@ -947,11 +953,10 @@ async def test_gateway_output_is_unchanged_without_block():
 
 
 @pytest.mark.asyncio
-async def test_gateway_ignores_blank_or_non_string_block():
+async def test_gateway_ignores_an_empty_block():
     runner = _runner()
     source = SessionSource(platform=Platform.FEISHU, chat_id="oc_g", chat_type="group", user_id="ou_user", user_name="Ada")
-    for bad in ("", "   ", None):
-        event = MessageEvent(text="hi", source=source)
-        event.metadata[_FEISHU_GROUP_HISTORY_METADATA_KEY] = bad
+    for empty in ("", None):
+        event = MessageEvent(text="hi", source=source, channel_context=empty)
         result = await runner._prepare_inbound_message_text(event=event, source=source, history=[])
         assert result == f"{SOURCE_HEADER}\n\nhi"

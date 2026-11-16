@@ -21,7 +21,6 @@ from plugins.platforms.feishu.adapter_aegis_admission import (
     _DEFAULT_GROUP_HISTORY_HOURS,
     _DEFAULT_GROUP_HISTORY_LIMIT,
     _DEFAULT_GROUP_HISTORY_THREAD_LIMIT,
-    _FEISHU_GROUP_HISTORY_METADATA_KEY,
     _FEISHU_GROUP_HISTORY_MSG_MAX_CHARS,
     _FEISHU_GROUP_HISTORY_PAGE_SIZE_MAX,
     FeishuAdmissionMixin,
@@ -227,8 +226,12 @@ class FeishuAegisMixin(
         return await self._maybe_route_delegate_foreground_message(text=routed_text, **route)
 
     async def _aegis_inbound(self, *, source, message, text, inbound_type, chat_id, chat_type, chat_info,
-                             sender_profile, message_id, jev_gate_pending) -> Optional[dict[str, Any]]:
-        """Fork routing between ``build_source`` and dispatch; event metadata to add, or None when consumed.
+                             sender_profile, message_id, jev_gate_pending) -> Optional[str]:
+        """Fork routing between ``build_source`` and dispatch: the event's ``channel_context``, or None when consumed.
+
+        The recent group history rides ``channel_context`` (upstream's history-backfill field), never
+        metadata: native admission accepts no adapter metadata outside WhatsApp, so a metadata block
+        refused the whole turn. ``""`` means no history.
 
         Order matters: the Jev verdict decides whether the turn exists, the topic keying fixes the
         session identity the delegate routing and the history gate both depend on.
@@ -245,15 +248,10 @@ class FeishuAegisMixin(
         if await self._route_to_delegate(source=source, text=text, chat_id=chat_id, chat_type=source_chat_type,
                                          user_id=getattr(source, "user_id", None) or sender_profile["user_id"]):
             return None
-        extra: dict[str, Any] = {}
-        if jev_gate_pending:
-            extra["jev_channel_autoreply"] = True
-        if self._should_inject_group_history(chat_type=chat_type, inbound_type=inbound_type, source=source):
-            history = await self._fetch_group_history_block(
-                chat_id=chat_id, exclude_message_id=message_id, thread_id=getattr(message, "thread_id", None) or None)
-            if history:
-                extra[_FEISHU_GROUP_HISTORY_METADATA_KEY] = history
-        return extra
+        if not self._should_inject_group_history(chat_type=chat_type, inbound_type=inbound_type, source=source):
+            return ""
+        return await self._fetch_group_history_block(
+            chat_id=chat_id, exclude_message_id=message_id, thread_id=getattr(message, "thread_id", None) or None)
 
     # --- Card output around send() ---
 

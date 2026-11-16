@@ -4,8 +4,8 @@ When the Feishu adapter opens a *new* session for a group message it can hand
 the agent the conversation it is being pulled into: the chat's recent
 chat-level messages as a ``<group_messages>`` block and, when the trigger sits
 inside a topic, that topic's recent messages as a ``<thread_messages>`` block.
-The adapter stores the rendered text on ``MessageEvent.metadata[METADATA_KEY]``
-and the gateway places it directly under the ``<source>`` header.
+The adapter hands the rendered text over as ``MessageEvent.channel_context``,
+which the gateway renders above the trigger message (``[New message]``).
 
 This module owns everything below the adapter's gate:
 
@@ -52,7 +52,6 @@ SOURCE_API = "api"
 SOURCE_CLI = "cli"
 DEFAULT_CLI_BIN = "lark-cli"
 CLI_TIMEOUT_SECONDS = 30.0
-METADATA_KEY = "group_history_block"   # MessageEvent.metadata key the gateway reads
 
 # Interactive-card region selection (FEISHU_GROUP_HISTORY_CARD_REGIONS).
 CARD_REGION_TITLE = "title"
