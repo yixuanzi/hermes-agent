@@ -194,6 +194,20 @@ class TestNamedProviderDeclaredWire:
         assert agent.api_mode == "anthropic_messages"
         assert mock_rpc.call_args.kwargs["api_mode"] == "anthropic_messages"
 
+    def test_named_block_codex_responses_inherited_on_plain_host(self):
+        """A Responses-only third-party endpoint (e.g. a GLM coding-plan key) must not be sent to
+        /chat/completions after failover."""
+        fbs = [{"provider": "custom:glm", "model": "glm-x"}]
+        agent = _make_agent(fallback_model=fbs)
+        with patch(
+            "hermes_cli.runtime_provider._get_named_custom_provider",
+            return_value={"name": "glm", "base_url": "https://glm.example/api/v1",
+                          "api_key": "k", "api_mode": "codex_responses"},
+        ):
+            mock_rpc = _activate(agent, "https://glm.example/api/v1", "glm-x")
+        assert agent.api_mode == "codex_responses"
+        assert mock_rpc.call_args.kwargs["api_mode"] == "codex_responses"
+
     def test_entry_transport_alias_is_honored(self):
         fbs = [{"provider": "custom", "model": "custom/responses", "base_url": "https://gateway.example.com/v1",
                 "api_key": "k", "transport": "responses"}]
