@@ -93,6 +93,8 @@ from gateway.platforms.base import (
 )
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 from gateway.platforms.helpers import caption_is_command, prompt_id_counter, send_chunks
+from plugins.platforms.feishu.adapter_aegis import FeishuAegisMixin
+from plugins.platforms.feishu.adapter_aegis_admission import build_feishu_ws_client
 from plugins.platforms.feishu.adapter_choice_cards import FeishuChoiceCardsMixin
 from plugins.platforms.feishu.adapter_synthetic_events import FeishuSyntheticEventsMixin
 from gateway.status import acquire_scoped_lock
@@ -1287,7 +1289,7 @@ def _sdk_build(request_cls: Any, **fields: Any) -> Any:
     return builder.build()
 
 
-class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlatformAdapter):
+class FeishuAdapter(FeishuAegisMixin, FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlatformAdapter):
     """Feishu/Lark bot adapter."""
     # Answers /p/<profile>/... on the default listener for a served secondary (shared_ingress).
     serves_profile_prefix: bool = True
@@ -1348,6 +1350,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         self._update_prompt_state: dict[int, dict[str, str]] = {}
         self._update_prompt_counter = prompt_id_counter()
         self._init_choice_card_state()
+        self._init_aegis_state()
         # Reaction deletion needs the opaque reaction_id from create, cached per message_id.
         self._pending_processing_reactions: OrderedDict[str, str] = OrderedDict()
         self._load_seen_message_ids()
@@ -1551,6 +1554,8 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
     async def disconnect(self) -> None:
         """Disconnect from Feishu/Lark."""
         self._running = False
+        self._close_delegate_routes()
+        await self._close_card_sessions()
         if self._ws_supervisor is not None:
             self._ws_supervisor.cancel()
             self._ws_supervisor = None
@@ -1661,6 +1666,10 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         """Send a Feishu message."""
         if not self._client:
             return SendResult(success=False, error="Not connected")
+        content, owed_files, card_result = await self._card_send_first(
+            chat_id=chat_id, content=content, reply_to=reply_to, metadata=metadata)
+        if card_result is not None:  # inside a card turn the reply and its chrome are one card
+            return card_result
 
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
@@ -1701,7 +1710,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
             return self._finalize_send_result(response, "send failed")
 
         try:  # stops at the first refused chunk and marks a partial delivery: a later success never masks it
-            return await send_chunks(chunks, _send_one)
+            return await self._with_owed_attachments(chat_id, owed_files, metadata, send_chunks(chunks, _send_one))
         except Exception as exc:
             logger.error("[Feishu] Send error: %s", (shown := describe_proxy_error(exc, env_proxy_for_redaction(_onboard_open_base_url(self._domain_name)))) or exc, exc_info=not shown)
             return SendResult(success=False, error=shown or str(exc))
@@ -1710,6 +1719,8 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         """Edit a previously sent Feishu text/post message."""
         if not self._client:
             return SendResult(success=False, error="Not connected")
+        if (card_result := await self._edit_via_card(message_id, content)) is not None:
+            return card_result  # a card block: the im edit API cannot touch cards
 
         content = self.format_message(content)
 
@@ -1736,6 +1747,8 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
 
     async def delete_message(self, chat_id: str, message_id: str) -> bool:
         """Delete a bot-posted message (used by stream-consumer preview cleanup)."""
+        if (card_removed := await self._delete_via_card(message_id)) is not None:
+            return card_removed  # a superseded block inside a card this adapter owns
         if not self._client or not message_id:
             return False
         try:
@@ -1887,10 +1900,10 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
             if transcoded_path:
                 audio_path = transcoded_path
         try:
-            return await self._send_uploaded_file_message(
-                chat_id=chat_id, file_path=audio_path, reply_to=reply_to, metadata=metadata,
-                caption=caption, outbound_message_type="audio",
-            )
+            return await self._send_media_once(chat_id=chat_id, path=audio_path, metadata=metadata, send=lambda: (
+                self._send_uploaded_file_message(
+                    chat_id=chat_id, file_path=audio_path, reply_to=reply_to, metadata=metadata,
+                    caption=caption, outbound_message_type="audio")))
         finally:
             if transcoded_path:
                 try:
@@ -1903,26 +1916,31 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         reply_to: Optional[str] = None, metadata: Optional[dict[str, Any]] = None, **kwargs,
     ) -> SendResult:
         """Send a document/file attachment to Feishu."""
-        return await self._send_uploaded_file_message(
-            chat_id=chat_id, file_path=file_path, reply_to=reply_to, metadata=metadata,
-            caption=caption, file_name=file_name,
-        )
+        return await self._send_media_once(chat_id=chat_id, path=file_path, metadata=metadata, send=lambda: (
+            self._send_uploaded_file_message(chat_id=chat_id, file_path=file_path, reply_to=reply_to,
+                                             metadata=metadata, caption=caption, file_name=file_name)))
 
     async def send_video(
         self, chat_id: str, video_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None, **kwargs,
     ) -> SendResult:
         """Send a video file to Feishu."""
-        return await self._send_uploaded_file_message(
-            chat_id=chat_id, file_path=video_path, reply_to=reply_to, metadata=metadata,
-            caption=caption, outbound_message_type="media",
-        )
+        return await self._send_media_once(chat_id=chat_id, path=video_path, metadata=metadata, send=lambda: (
+            self._send_uploaded_file_message(chat_id=chat_id, file_path=video_path, reply_to=reply_to,
+                                             metadata=metadata, caption=caption, outbound_message_type="media")))
 
     async def send_image_file(
         self, chat_id: str, image_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None, **kwargs,
     ) -> SendResult:
-        """Send a local image file to Feishu."""
+        """Send a local image file to Feishu (once per file per card turn)."""
+        return await self._send_media_once(chat_id=chat_id, path=image_path, metadata=metadata, send=lambda: (
+            self._send_image_file_unclaimed(chat_id, image_path, caption=caption, reply_to=reply_to, metadata=metadata)))
+
+    async def _send_image_file_unclaimed(
+        self, chat_id: str, image_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> SendResult:
         if not self._client:
             return SendResult(success=False, error="Not connected")
         if not os.path.exists(image_path):
@@ -2130,6 +2148,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
             logger.debug("[Feishu] Dropping duplicate/missing message_id: %s", message_id)
             return
         reason = self._admit(sender, message)
+        reason, jev_gate_pending = self._jev_gate(reason, sender, message)
         if reason is not None:
             logger.debug("[Feishu] dropping inbound event: %s", reason)
             if reason == "group_policy_rejected":
@@ -2138,6 +2157,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         await self._process_inbound_message(
             data=data, message=message, sender_id=getattr(sender, "sender_id", None),
             chat_type=getattr(message, "chat_type", "p2p"), message_id=message_id, is_bot=_is_bot_sender(sender),
+            jev_gate_pending=jev_gate_pending,
         )
 
     def _on_message_read_event(self, data: P2ImMessageMessageReadV1) -> None:
@@ -2403,7 +2423,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
                 _chat = str(state.get("chat_id", "") or chat_id or "")
                 if _chat:
                     try:
-                        await self.send(_chat, t("platform.shared.approval_expired"))
+                        await self.send(_chat, t("platform.shared.approval_expired"), metadata={"hermes_card_bypass": True})
                     except Exception:
                         logger.debug("[Feishu] expired-approval notice failed", exc_info=True)
         except Exception as exc:
@@ -2506,6 +2526,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         return data is not None
 
     async def on_processing_start(self, event: MessageEvent) -> None:
+        self._card_begin_turn(event)
         message_id = event.message_id
         if not self._reactions_enabled() or not message_id or message_id in self._pending_processing_reactions:
             return
@@ -2518,6 +2539,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
                 cache.popitem(last=False)
 
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
+        await self._card_finish_turn(event, outcome)
         message_id = event.message_id
         if not self._reactions_enabled() or not message_id:
             return
@@ -2559,6 +2581,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
 
     async def _process_inbound_message(
         self, *, data: Any, message: Any, sender_id: Any, chat_type: str, message_id: str, is_bot: bool = False,
+        jev_gate_pending: bool = False,
     ) -> None:
         text, inbound_type, media_urls, media_types, media_text_inlined, mentions = await self._extract_message_content(message)
         if inbound_type == MessageType.TEXT:
@@ -2607,6 +2630,12 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
             is_bot=is_bot,
             message_id=message_id,
         )
+        aegis_metadata = await self._aegis_inbound(
+            source=source, message=message, text=text, inbound_type=inbound_type, chat_id=chat_id, chat_type=chat_type,
+            chat_info=chat_info, sender_profile=sender_profile, message_id=message_id, jev_gate_pending=jev_gate_pending)
+        if aegis_metadata is None:  # dropped by the Jev gate or taken by a delegate loop
+            return
+        thread_id = getattr(source, "thread_id", thread_id)
         normalized = MessageEvent(
             text=text, message_type=inbound_type, source=source, raw_message=data,
             message_id=message_id, media_urls=media_urls, media_types=media_types,
@@ -2615,6 +2644,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
             channel_prompt=self._resolve_channel_prompt(chat_id, thread_id or None),
             timestamp=datetime.now(),
         )
+        normalized.metadata.update(aegis_metadata)
         await self._dispatch_inbound_event(normalized)
 
     async def _dispatch_inbound_event(self, event: MessageEvent) -> None:
@@ -3198,8 +3228,10 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         user_id = getattr(sender_id, "user_id", None) or None
         union_id = getattr(sender_id, "union_id", None) or None
         primary_id = user_id or open_id
-        name_lookup_id = open_id if is_bot else (primary_id or union_id)  # bots/basic_batch only takes open_id
-        display_name = await self._resolve_sender_name_from_api(name_lookup_id, is_bot=is_bot)
+        # Contact v3 keys on the event's open_id, then union_id; user_id last. bots/basic_batch takes open_id.
+        display_name = await self._resolve_sender_name_from_api(open_id or union_id or user_id, is_bot=is_bot)
+        if display_name:
+            self._cache_sender_name(display_name, open_id, user_id, union_id)
         return {"user_id": primary_id, "user_name": display_name, "user_id_alt": union_id}
 
     def _get_cached_sender_name(self, sender_id: Optional[str]) -> Optional[str]:
@@ -3242,7 +3274,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
             name = next((value for value in candidates if value), None)
             if name and isinstance(name, str) and name.strip():
                 name = name.strip()
-                self._sender_name_cache[trimmed] = (name, now + _FEISHU_SENDER_NAME_TTL_SECONDS)
+                self._cache_sender_name(name, trimmed)
                 return name
         except Exception:
             logger.debug("[Feishu] Failed to resolve sender name for %s", sender_id, exc_info=True)
@@ -3636,27 +3668,6 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
                 key_msg_type=resolved_message_type, key_payload=key_payload,
                 media_tag={"tag": "media", "file_key": file_key, "file_name": display_name},
             )
-            # Audio may fail with 99992402 under thread_id routing: retry as a reply to the
-            # thread's last message, then fall back to a plain chat_id send.
-            if (not caption
-                    and not self._response_succeeded(message_response)
-                    and getattr(message_response, "code", None) == 99992402
-                    and resolved_message_type == "audio"
-                    and (metadata or {}).get("thread_id")):
-                payload = json.dumps(key_payload, ensure_ascii=False)
-                thread_msg_id = (metadata or {}).get("reply_to_message_id")
-                if not thread_msg_id:
-                    thread_msg_id = await self._fetch_last_message_in_thread((metadata or {}).get("thread_id"))
-                if thread_msg_id:
-                    logger.info("[Feishu] Audio: retrying via reply API in thread")
-                    message_response = await self._feishu_send_with_retry(
-                        chat_id=chat_id, msg_type="audio", payload=payload, reply_to=thread_msg_id, metadata=metadata,
-                    )
-                if not self._response_succeeded(message_response):
-                    logger.warning("[Feishu] Audio send failed in thread, retrying with chat_id")
-                    message_response = await self._feishu_send_with_retry(
-                        chat_id=chat_id, msg_type="audio", payload=payload, reply_to=None, metadata=None,
-                    )
             return self._finalize_send_result(message_response, "file send failed")
         except Exception as exc:
             logger.error("[Feishu] Failed to send file %s: %s", file_path, (shown := describe_proxy_error(exc, env_proxy_for_redaction(_onboard_open_base_url(self._domain_name)))) or exc, exc_info=not shown)
@@ -3673,7 +3684,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         else:
             msg_type = key_msg_type
             payload = json.dumps(key_payload, ensure_ascii=False)
-        return await self._feishu_send_with_retry(
+        return await self._send_attachment_message(
             chat_id=chat_id, msg_type=msg_type, payload=payload, reply_to=reply_to, metadata=metadata,
         )
 
@@ -3681,6 +3692,8 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         """Fetch the last message_id in a thread for reply-based routing."""
         if not self._client or not thread_id:
             return None
+        if self._is_message_thread_anchor(thread_id):
+            return str(thread_id)  # an om_* prospective root is its own anchor
         try:
             from lark_oapi.api.im.v1 import ListMessageRequest
             request = ListMessageRequest.builder().container_id_type("thread").container_id(thread_id).page_size(1).build()
@@ -3697,7 +3710,8 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         self, *, chat_id: str, msg_type: str, payload: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
     ) -> Any:
         thread_id = (metadata or {}).get("thread_id")
-        effective_reply_to = reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
+        effective_reply_to = (reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
+                              or (str(thread_id) if self._is_message_thread_anchor(thread_id) else None))
         if effective_reply_to:
             body = self._build_reply_message_body(
                 content=payload, msg_type=msg_type, reply_in_thread=bool(thread_id), uuid_value=str(uuid.uuid4()),
@@ -3828,15 +3842,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         if loop is None or loop.is_closed():
             raise RuntimeError("adapter loop is not ready")
         await self._hydrate_bot_identity()
-        self._ws_client = FeishuWSClient(
-            app_id=self._app_id,
-            app_secret=self._app_secret,
-            log_level=lark.LogLevel.INFO,
-            event_handler=self._event_handler,
-            domain=domain,
-            # Without the "channel" UA tag Feishu won't push group @mention events over WS.
-            extra_ua_tags=["channel"],
-        )
+        self._ws_client = build_feishu_ws_client(self, domain=domain, event_handler=self._event_handler)
         # The lark SDK owns this thread and fires every event/card callback on it; those hop back
         # to the adapter loop via run_coroutine_threadsafe, which copies the CALLER's context — so
         # whatever scope the WS thread carries is what pre-handler work (inbound media caching,
@@ -3874,6 +3880,10 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
     async def _feishu_send_with_retry(
         self, *, chat_id: str, msg_type: str, payload: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
     ) -> Any:
+        reply_to, metadata, pending_root = self._auto_thread_route(reply_to, metadata)
+        if pending_root:  # the reply that creates an automatic topic
+            return await self._send_in_pending_topic(chat_id=chat_id, msg_type=msg_type, payload=payload,
+                                                     reply_to=reply_to, metadata=metadata, root=pending_root)
         last_error: Optional[Exception] = None
         active_reply_to = reply_to
 
