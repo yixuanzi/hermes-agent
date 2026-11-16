@@ -391,3 +391,72 @@ def test_gateway_binds_feishu_delegate_runtime_for_each_turn():
 
     assert agent._delegate_ext_output_adapter is not None
     assert callable(agent._delegate_ext_input_factory)
+
+
+def _raw_send_recorder(adapter):
+    """Capture which Feishu API (reply vs create) a send resolves to."""
+    calls = []
+    ok = SimpleNamespace(success=lambda: True, data=SimpleNamespace(message_id="om_card"))
+
+    async def _run_blocking(fn, request):
+        calls.append((fn, request))
+        return ok
+
+    adapter._run_blocking = _run_blocking
+    adapter._build_reply_message_request = lambda message_id, body: ("reply", message_id)
+    adapter._build_create_message_request = lambda id_type, body: ("create", id_type, body)
+    adapter._build_reply_message_body = lambda **kw: kw
+    adapter._build_create_message_body = lambda **kw: kw
+    return calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["approval", "clarify"])
+async def test_feishu_delegate_card_posts_into_topic_for_omt_thread(kind):
+    """A real topic id (omt_*) must never be sent to the reply API."""
+    adapter = _make_adapter()
+    calls = _raw_send_recorder(adapter)
+    payload = {"interaction_id": f"{kind}-1", "command": "ls", "question": "Q?", "choices": ["a"]}
+    sender = adapter.send_delegate_exec_approval if kind == "approval" else adapter.send_delegate_clarify
+    result = await sender(chat_id="oc_group", payload=payload, responder=None, metadata={"thread_id": "omt_topic"})
+
+    assert result.success is True
+    assert len(calls) == 1
+    fn, request = calls[0]
+    assert fn is adapter._client.im.v1.message.create
+    assert request[0] == "create" and request[1] == "thread_id"
+    assert request[2]["receive_id"] == "omt_topic"
+    assert f"{kind}-1" in adapter._delegate_interactions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["approval", "clarify"])
+async def test_feishu_delegate_card_still_replies_to_om_anchor(kind):
+    """A message-id anchor (om_*, DM / auto-thread lane) keeps the reply path."""
+    adapter = _make_adapter()
+    calls = _raw_send_recorder(adapter)
+    payload = {"interaction_id": f"{kind}-2", "command": "ls", "question": "Q?", "choices": ["a"]}
+    sender = adapter.send_delegate_exec_approval if kind == "approval" else adapter.send_delegate_clarify
+    result = await sender(chat_id="oc_dm", payload=payload, responder=None, metadata={"thread_id": "om_anchor"})
+
+    assert result.success is True
+    assert len(calls) == 1
+    fn, request = calls[0]
+    assert fn is adapter._client.im.v1.message.reply
+    assert request == ("reply", "om_anchor")
+
+
+@pytest.mark.asyncio
+async def test_feishu_delegate_card_logs_when_not_delivered(caplog):
+    adapter = _make_adapter()
+    failed = SimpleNamespace(success=lambda: False, code=230001, msg="bad target", data=None)
+    with patch.object(adapter, "_feishu_send_with_retry", new_callable=AsyncMock, return_value=failed):
+        with caplog.at_level("WARNING"):
+            result = await adapter.send_delegate_exec_approval(
+                chat_id="oc_group", payload={"interaction_id": "ia-3", "command": "ls"},
+                responder=None, metadata={"thread_id": "omt_topic"},
+            )
+
+    assert result.success is False
+    assert "ia-3" not in adapter._delegate_interactions
+    assert "delegate approval card not delivered" in caplog.text

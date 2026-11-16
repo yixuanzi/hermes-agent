@@ -3271,10 +3271,19 @@ class FeishuAdapter(BasePlatformAdapter):
                 chat_id=chat_id,
                 msg_type="interactive",
                 payload=json.dumps(card, ensure_ascii=False),
-                reply_to=(metadata or {}).get("thread_id"),
+                # Let _send_raw_message pick the target from metadata: an om_*
+                # anchor is replied to, a real omt_* topic id is posted into.
+                # Passing omt_* as reply_to hits the reply API with a non-message
+                # id and the card is silently lost.
+                reply_to=None,
                 metadata=metadata,
             )
             result = self._finalize_send_result(response, "send_delegate_exec_approval failed")
+            if not result.success:
+                logger.warning(
+                    "[Feishu] delegate approval card not delivered: interaction=%s chat=%s thread=%s error=%s",
+                    interaction_id, chat_id, (metadata or {}).get("thread_id"), result.error,
+                )
             if result.success:
                 self._delegate_interactions[interaction_id] = {
                     "kind": "approval", "interaction_id": interaction_id, "responder": responder,
@@ -3330,9 +3339,14 @@ class FeishuAdapter(BasePlatformAdapter):
                 }
             response = await self._feishu_send_with_retry(
                 chat_id=chat_id, msg_type="interactive", payload=json.dumps(card, ensure_ascii=False),
-                reply_to=state["thread_id"], metadata=metadata,
+                reply_to=None, metadata=metadata,  # target resolved from metadata thread_id
             )
             result = self._finalize_send_result(response, "send_delegate_clarify failed")
+            if not result.success:
+                logger.warning(
+                    "[Feishu] delegate clarify card not delivered: interaction=%s chat=%s thread=%s error=%s",
+                    interaction_id, chat_id, state.get("thread_id"), result.error,
+                )
             if result.success:
                 state["message_id"] = result.message_id or ""
                 self._delegate_interactions[interaction_id] = state
