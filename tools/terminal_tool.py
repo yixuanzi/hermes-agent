@@ -533,6 +533,18 @@ def _qualify_task_key(key: str) -> str:
     return f"{scope}:{key}" if scope else key
 
 
+def _env_cache_key(task_id: Optional[str], env_type: str) -> str:
+    """The ``_active_environments`` key for one terminal call: the container task id, or on the local
+    backend with a platform user bound, that user's ``local::{platform}::{user_id}`` scope. Messaging
+    users then never share a shell (or its snapshot), while a renamed user keeps the same one."""
+    key = _resolve_container_task_id(task_id)
+    if env_type != "local":
+        return key
+    from tools.user_env_runtime import get_current_user_env_identity
+    identity = get_current_user_env_identity()
+    return identity.runtime_scope_key if identity is not None else key
+
+
 def _resolve_container_task_id(task_id: Optional[str]) -> str:
     """Map a tool-call ``task_id`` to the ``_active_environments`` key. Order matters —
     earlier branches are authoritative where they apply:
@@ -1280,7 +1292,7 @@ def _plan_execution(
 
         enforce_no_refusal()
 
-    effective_task_id = _resolve_container_task_id(task_id)
+    effective_task_id = _env_cache_key(task_id, env_type)
     if _host_local:
         # Control-plane children run beside this interpreter, never inside
         # the configured Docker/SSH backend; keep their env cache separate.

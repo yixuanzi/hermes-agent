@@ -315,6 +315,8 @@ def _build_child_agent(
                     enabled_toolsets=child_toolsets, disabled_toolsets=child_disabled_toolsets, quiet_mode=True,
                     ephemeral_system_prompt=child_prompt, log_prefix=f"[subagent-{task_index}]", platform="subagent",
                     side_agent=True,
+                    # The child acts for the same platform user: its tools see that user's env (userenv).
+                    user_id=getattr(parent_agent, "_user_id", None), user_name=getattr(parent_agent, "_user_name", None),
                     skip_context_files=True, skip_memory=not child_checkpoint_required,
                     memory_agent_context="subagent", clarify_callback=None,
                     thinking_callback=(
@@ -342,6 +344,7 @@ def _build_child_agent(
             effective_requested_provider=rt.get("requested_provider"),
         )
     child._print_fn = getattr(parent_agent, "_print_fn", None)
+    child._user_env_platform = getattr(parent_agent, "_user_env_platform", None) or getattr(parent_agent, "platform", None)
     _apply_child_cache_ttl(child)
     if child_session_db is not None:
         child._owns_session_db = True  # released by the child's close(), never by the parent

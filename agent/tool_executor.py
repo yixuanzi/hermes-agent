@@ -48,6 +48,7 @@ from agent.inline_tool_executors import (
 )
 from agent.message_metadata import stamp_data_use
 from agent.session_persistence import sync_rewritten_tool_rows
+from tools.user_env_runtime import call_as_agent_user
 from agent.tool_dispatch_helpers import (
     _NEVER_PARALLEL_TOOLS,
     _is_destructive_command,
@@ -756,7 +757,7 @@ def _dispatch_authorized_once(
     with bound_tool_progress(agent.tool_progress_callback, ref.name, ref.call_id), collect_data_use() as data_use, \
             bound_form_asker(getattr(agent, "clarify_callback", None)):
         try:
-            return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
+            return _run_with_activity_heartbeat(agent, ref.name, lambda: call_as_agent_user(agent, execute, ref.args))
         finally:
             state.data_use = frozenset(data_use)
 

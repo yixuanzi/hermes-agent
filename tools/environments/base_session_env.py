@@ -7,7 +7,7 @@ No module state lives here; ``BaseEnvironment`` supplies quoting hooks.
 
 import re
 import shlex
-from typing import Iterable
+from typing import Iterable, Mapping
 
 # Bridged per-session vars (gateway.session_context._VAR_MAP) are injected fresh onto every
 # command's process env and must NEVER persist in the shared bash snapshot: one long-lived
@@ -117,8 +117,20 @@ def _export_dump_excluding_session_vars(tmp_path: str, excluded_names: Iterable[
         f"> {tmp_path}")
 
 
+def _user_env_export_lines(user_env: Mapping[str, str]) -> list[str]:
+    """``export`` lines for the calling user's persisted env (shell-valid names only)."""
+    return [f"export {name}={shlex.quote(str(value))}"
+            for name, value in sorted(user_env.items()) if _SHELL_ENV_NAME_RE.match(name)]
+
+
+def _user_env_unset_lines(user_env: Iterable[str]) -> list[str]:
+    """``unset`` lines that keep the calling user's env out of every snapshot dump."""
+    return [f"unset {name}" for name in sorted(user_env) if _SHELL_ENV_NAME_RE.match(name)]
+
+
 def _snapshot_bootstrap_script(
     *, quoted_cwd: str, quoted_snap: str, snap_tmp_template: str, excluded_names: Iterable[str], cwd_marker: str,
+    user_env: Iterable[str] = (),
 ) -> str:
     """Login-shell bootstrap that captures env/functions/aliases into the snapshot. Atomic publish:
     assemble in a ``mktemp`` file, then ``mv`` over the final path so a concurrent ``source`` never
@@ -127,9 +139,12 @@ def _snapshot_bootstrap_script(
     ``declare -F`` (a line-based ``declare -f | grep -v`` strips the header and leaves an orphaned
     body that breaks every sourced command); the non-empty guard matters because bare ``declare -f``
     dumps ALL functions. The trailing ``cd`` restores the configured cwd after profile scripts (e.g.
-    ``cd ~``) so ``pwd -P`` reports terminal.cwd, not the profile's directory."""
+    ``cd ~``) so ``pwd -P`` reports terminal.cwd, not the profile's directory. *user_env* names
+    (the calling user's persisted env) are unset before the dump so one user's values never
+    reach the shared snapshot."""
     return (
         "umask 077\n"
+        + "".join(f"{line}\n" for line in _user_env_unset_lines(user_env)) +
         f"__hermes_snap_tmp=$(mktemp {snap_tmp_template}) || exit 1\n"
         f"{_export_dump_excluding_session_vars(_SNAP_TMP, excluded_names)}\n"
         "__hermes_fns=$(declare -F | awk '{print $3}' | grep -vE '^_[^_]') || true\n"
@@ -163,7 +178,8 @@ def _passthrough_save_restore(names: Iterable[str]) -> tuple[list[str], list[str
 def _wrap_command_script(
     command: str, *, quoted_cwd: str, quoted_snap: str, snap_tmp_template: str,
     passthrough_names: Iterable[str], snapshot_ready: bool, cwd_marker: str,
-    pipe_marker: str = "", persist_env: bool = True, seed_snaps: Iterable[str] = ()) -> str:
+    pipe_marker: str = "", persist_env: bool = True, seed_snaps: Iterable[str] = (),
+    user_env: Mapping[str, str] | None = None) -> str:
     """Per-command bash script: source snapshot, cd, run, re-dump env, emit CWD marker.
     ``persist_env=False`` skips the re-dump, so every command starts from the login-time
     snapshot and exports from one command never reach the next (the CWD marker still runs).
@@ -176,7 +192,8 @@ def _wrap_command_script(
     the user's command so snapshot files (which may carry secrets) are private without
     changing the command's umask. *seed_snaps* (quoted paths) are read, first existing wins,
     while *quoted_snap* does not exist yet: a delegated child's own snapshot starts as a copy of
-    its parent's shell state and its re-dump never writes the parent's file.
+    its parent's shell state and its re-dump never writes the parent's file. *user_env* (the
+    calling user's persisted env) is exported for this command only and unset before the re-dump.
     """
     escaped = command.replace("'", "'\\''")
     capture = bool(pipe_marker) and _can_capture_pipestatus(command)
@@ -195,9 +212,11 @@ def _wrap_command_script(
         'export GIT_PAGER="${GIT_PAGER:-cat}" PAGER="${PAGER:-cat}"',
         # ``--`` keeps hyphen-prefixed directory names from being parsed as options.
         f"builtin cd -- {quoted_cwd} || exit 126",
+        *_user_env_export_lines(user_env or {}),
         _eval_capturing_pipestatus(escaped) if capture else f"eval '{escaped}'",
         "__hermes_ec=$?",
-        "umask 077"]
+        "umask 077",
+        *_user_env_unset_lines(user_env or {})]
     if snapshot_ready and persist_env:
         parts.append(
             f"__hermes_snap_tmp=$(mktemp {snap_tmp_template}) && "

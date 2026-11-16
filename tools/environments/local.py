@@ -343,7 +343,22 @@ def _scrubbed_env(parts, plugin_strip: frozenset, fix_path) -> dict:
     # already applies this invariant; Cron scripts use this sanitizer directly (#92998).
     if path_key is not None:
         out[path_key] = _prepend_hermes_bin_dir(fix_path(out.get(path_key, "")))
-    return _finalize_child_env(out)
+    return _with_calling_user_env(_finalize_child_env(out))
+
+
+def _with_calling_user_env(env: dict) -> dict:
+    """Overlay the calling platform user's persisted env (``userenv``) onto a terminal child's env.
+
+    Applied per spawn, never to ``os.environ``, so one messaging user's values cannot reach another
+    user's commands or the process itself. A store that cannot be read or migrated degrades to no
+    overlay instead of failing the spawn.
+    """
+    from tools.user_env_runtime import get_current_user_env_values
+    try:
+        env.update(get_current_user_env_values())
+    except OSError as exc:
+        logger.warning("Could not inject current user env values: %s", exc)
+    return env
 
 
 def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = None) -> dict:

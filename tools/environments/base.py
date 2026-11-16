@@ -191,6 +191,21 @@ def get_activity_callback() -> Callable[[str], None] | None:
     return getattr(_activity_callback_local, "callback", None)
 
 
+def _current_user_env_for_shell() -> dict[str, str]:
+    """The calling platform user's persisted env (``userenv``), exported around each command.
+
+    Every backend gets it through the command wrapper (remote backends inherit no local env), and
+    the wrapper unsets it before any snapshot dump. A store that cannot be read or migrated
+    degrades to no overlay instead of failing the command.
+    """
+    from tools.user_env_runtime import get_current_user_env_values
+    try:
+        return get_current_user_env_values()
+    except OSError as exc:
+        logger.warning("Could not load current user env values for shell wrapper: %s", exc)
+        return {}
+
+
 def touch_activity_if_due(state: dict, label: str) -> None:
     """Fire the activity callback at most once every ``state['interval']`` (default 10 s).
     *state* holds ``last_touch``/``start`` monotonic timestamps. Swallows all exceptions."""
@@ -456,7 +471,8 @@ class BaseEnvironment(LongLivedProcessMixin, ABC):
         under ``bash -l``. On failure, fall back to ``bash -l`` per command — unless a non-login
         probe shows login bash itself is dead, in which case prefer ``bash -c``."""
         bootstrap = _snapshot_bootstrap_script(
-            excluded_names=self._snapshot_excluded_passthrough_names(), **self._snapshot_script_kwargs(self.cwd))
+            excluded_names=self._snapshot_excluded_passthrough_names(), user_env=_current_user_env_for_shell(),
+            **self._snapshot_script_kwargs(self.cwd))
         try:
             proc = self._run_bash(bootstrap, login=True, timeout=self._snapshot_timeout)
             result = self._wait_for_process(proc, timeout=self._snapshot_timeout)
@@ -520,6 +536,7 @@ class BaseEnvironment(LongLivedProcessMixin, ABC):
             persist_env=self._persist_env,
             pipe_marker=self._pipe_marker,
             seed_snaps=seeds,
+            user_env=_current_user_env_for_shell(),
             **self._snapshot_script_kwargs(cwd, chain[0] if chain else None))
 
     @staticmethod

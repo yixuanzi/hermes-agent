@@ -39,6 +39,7 @@ def _make_mock_parent(depth=0):
     parent.api_mode = "chat_completions"
     parent.model = "anthropic/claude-sonnet-4"
     parent.platform = "cli"
+    parent._user_env_platform = None
     parent.providers_allowed = None
     parent.providers_ignored = None
     parent.providers_order = None
@@ -383,6 +384,42 @@ class TestDelegateTask(unittest.TestCase):
 
             _, kwargs = MockAgent.call_args
             self.assertEqual(kwargs["api_mode"], "anthropic_messages")
+
+    def _build_child_for(self, parent):
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+            _build_child_agent(
+                task_index=0, goal="Act for the same user", context=None, toolsets=None, model=None,
+                max_iterations=10, parent_agent=parent, task_count=1,
+            )
+        return MockAgent.call_args.kwargs, mock_child
+
+    def test_child_acts_for_the_parents_platform_user(self):
+        parent = _make_mock_parent(depth=0)
+        parent._user_id, parent._user_name = "u-7", "alice"
+
+        kwargs, _child = self._build_child_for(parent)
+
+        self.assertEqual((kwargs["user_id"], kwargs["user_name"]), ("u-7", "alice"))
+
+    def test_child_preserves_originating_user_platform(self):
+        parent = _make_mock_parent(depth=0)
+        parent.platform = "subagent"
+        parent._user_env_platform = "aegis"
+
+        _kwargs, child = self._build_child_for(parent)
+
+        self.assertEqual(child._user_env_platform, "aegis")
+
+    def test_top_level_child_takes_the_parents_platform_for_user_env(self):
+        parent = _make_mock_parent(depth=0)
+        parent.platform = "slack"
+
+        _kwargs, child = self._build_child_for(parent)
+
+        self.assertEqual(child._user_env_platform, "slack")
+
 
 class TestToolNamePreservation(unittest.TestCase):
     """Verify _last_resolved_tool_names is restored after subagent runs."""

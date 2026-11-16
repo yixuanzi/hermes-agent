@@ -5,10 +5,13 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Callable, Iterator, TypeVar
 from urllib.parse import quote
 
 from tools.user_env_store import load_user_env, make_user_env_key
+
+T = TypeVar("T")
+R = TypeVar("R")
 
 
 @dataclass(frozen=True)
@@ -114,3 +117,14 @@ def bind_current_user_env_identity_from_agent(agent) -> Iterator[UserEnvIdentity
         yield get_current_user_env_identity()
     finally:
         reset_current_user_env_identity(token)
+
+
+def call_as_agent_user(agent, execute: Callable[[T], R], args: T) -> R:
+    """Run one tool executor as the user ``agent`` is serving.
+
+    Tool execution is the single seam every sequential, concurrent and helper call crosses
+    (agent/tool_executor.py), so binding here gives terminal/runtime tools the calling
+    platform user even when cron cleared ``HERMES_SESSION_*`` or the call hopped threads.
+    """
+    with bind_current_user_env_identity_from_agent(agent):
+        return execute(args)
