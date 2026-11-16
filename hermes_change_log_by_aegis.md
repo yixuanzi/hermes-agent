@@ -74,6 +74,9 @@ Intent: `dispatch_for_agent(agent, args)` is the one call site `AIAgent._dispatc
 Feature: Opt-in `userenv` and `aegis_a2a` toolsets.
 Intent: Expose the user-env tool and the Aegis A2A tools behind explicit toolsets so users opt in without adding schema cost to every session. The `aegis_` names keep them apart from upstream's `a2a` platform-plugin toolset, whose `a2a_list` the fork's tool used to shadow.
 
+Feature: Fork names stay out of shared metrics.
+Intent: `BUILTIN_TOOL_NAMES` / `BUILTIN_TOOLSET_NAMES` are the names shared metrics may export, and upstream's `hermes.shared_metrics.v4` schema enumerates only upstream's. `_FORK_TOOLSET_NAMES` keeps the fork's toolsets and their tools out, so they record as `custom` / `plugin` and an opted-in upload never carries a value the schema rejects.
+
 ## File: `hermes_cli/tools_config.py`
 
 Feature: Configurable user environment and A2A toolsets.

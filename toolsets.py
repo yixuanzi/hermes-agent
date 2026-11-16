@@ -239,9 +239,14 @@ TOOLSETS = {
 TOOLSET_SESSION_PLATFORMS = {name: spec["platforms"] for name, spec in TOOLSETS.items() if "platforms" in spec}
 
 # Captured before create_custom_toolset() can add user-named tools: shared metrics may export only
-# these names, so a plugin, MCP server or custom toolset name never leaves the machine.
-BUILTIN_TOOL_NAMES = frozenset(tool for spec in TOOLSETS.values() for tool in spec["tools"])
-BUILTIN_TOOLSET_NAMES = frozenset(TOOLSETS)
+# these names, so a plugin, MCP server or custom toolset name never leaves the machine. The Aegis
+# fork's toolsets enable like shipped ones but are not upstream's, so they stay out and record as
+# custom / plugin, which upstream's shared-metrics schema accepts.
+_FORK_TOOLSET_NAMES = frozenset({"aegis_a2a", "userenv"})
+BUILTIN_TOOL_NAMES = frozenset(
+    tool for name, spec in TOOLSETS.items() if name not in _FORK_TOOLSET_NAMES for tool in spec["tools"]
+)
+BUILTIN_TOOLSET_NAMES = frozenset(TOOLSETS) - _FORK_TOOLSET_NAMES
 
 
 def _registry():
