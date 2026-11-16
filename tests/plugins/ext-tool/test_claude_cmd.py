@@ -417,15 +417,31 @@ def test_real_agent_turn_runs_through_core_codex_path(real_agent, tmp_path, monk
     assert second["codex_thread_id"] == "new-session"
 
 
+def _once_claude_turn_runs(agent, action) -> threading.Thread:
+    """Run ``action`` from another thread once the agent's Claude Code turn is in flight. A fixed delay
+    raced turn setup: an interrupt or steer landing before the turn starts is not what this tests."""
+    from tests.waiting import wait_until
+
+    def _fire():
+        wait_until(lambda: _session(agent.session_id).turn_active, what="Claude Code turn in flight")
+        action()
+
+    thread = threading.Thread(target=_fire, daemon=True)
+    thread.start()
+    return thread
+
+
 def test_real_agent_interrupt_and_redirect_reach_claude(real_agent, tmp_path):
     claude_cmd.claude_command(f"on cwd={tmp_path}")
-    threading.Timer(0.5, real_agent.interrupt).start()
+    interrupter = _once_claude_turn_runs(real_agent, real_agent.interrupt)
     result = real_agent.run_conversation("slow")
+    interrupter.join()
     assert result["interrupted"] or result["partial"]
 
     accepted = []
-    threading.Timer(0.5, lambda: accepted.append(real_agent.redirect("go left"))).start()
+    steerer = _once_claude_turn_runs(real_agent, lambda: accepted.append(real_agent.redirect("go left")))
     result = real_agent.run_conversation("slow")
+    steerer.join()
     assert accepted == [True]
     assert result["final_response"] == "Working steered:go left"
 
