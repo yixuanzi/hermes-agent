@@ -385,6 +385,35 @@ class FeishuDelegateMixin:
         except asyncio.CancelledError:
             return
 
+    def _defer_delegate_flush(self, state, *, chat_id, metadata, route_key) -> bool:
+        """Throttle edits of the same message: schedule one delayed flush and report True."""
+        interval = self._delegate_stream_edit_interval()
+        elapsed = time.monotonic() - state.last_flush_ts
+        if elapsed >= interval:
+            return False
+        if route_key and (state.flush_task is None or state.flush_task.done()):
+            state.flush_task = asyncio.create_task(self._flush_delegate_stream_after_delay(
+                route_key=route_key, chat_id=chat_id, metadata=metadata, delay=interval - elapsed,
+            ))
+        return True
+
+    async def _send_delegate_groups(self, state, groups, *, chat_id, metadata) -> bool:
+        """Send each group as a new message, tracking the last id; False on the first failure."""
+        for group in groups:
+            result = await self.send(chat_id, group, metadata=metadata)
+            if not result.success:
+                return False
+            if result.message_id:
+                state.message_id = str(result.message_id)
+        return True
+
+    async def _edit_or_resend(self, state, text, fallback_text, *, chat_id, metadata) -> bool:
+        """Edit the streaming message; after an edit failure append ``fallback_text`` instead."""
+        result = await self.edit_message(chat_id, state.message_id, text)
+        if result.success:
+            return True
+        return await self._send_delegate_groups(state, [fallback_text], chat_id=chat_id, metadata=metadata)
+
     async def _flush_delegate_stream_locked(
         self,
         *,
@@ -396,15 +425,9 @@ class FeishuDelegateMixin:
     ) -> None:
         if not state.pending_text and state.message_id:
             return
-        if state.message_id and state.pending_text and not force:
-            interval = self._delegate_stream_edit_interval()
-            elapsed = time.monotonic() - state.last_flush_ts
-            if elapsed < interval:
-                if route_key and (state.flush_task is None or state.flush_task.done()):
-                    state.flush_task = asyncio.create_task(self._flush_delegate_stream_after_delay(
-                        route_key=route_key, chat_id=chat_id, metadata=metadata, delay=interval - elapsed,
-                    ))
-                return
+        if state.message_id and state.pending_text and not force and self._defer_delegate_flush(
+                state, chat_id=chat_id, metadata=metadata, route_key=route_key):
+            return
         if state.flush_task is not None and not state.flush_task.done():
             state.flush_task.cancel()
             state.flush_task = None
@@ -412,36 +435,16 @@ class FeishuDelegateMixin:
         if not groups:
             return
         if not state.message_id:
-            for group in groups:
-                result = await self.send(chat_id, group, metadata=metadata)
-                if not result.success:
-                    return
-                if result.message_id:
-                    state.message_id = str(result.message_id)
+            ok = await self._send_delegate_groups(state, groups, chat_id=chat_id, metadata=metadata)
         elif len(groups) == 1:
-            current = groups[0]
-            if current != state.last_rendered_text:
-                result = await self.edit_message(chat_id, state.message_id, current)
-                if not result.success:
-                    result = await self.send(chat_id, state.pending_text, metadata=metadata)
-                    if not result.success:
-                        return
-                    if result.message_id:
-                        state.message_id = str(result.message_id)
+            ok = groups[0] == state.last_rendered_text or await self._edit_or_resend(
+                state, groups[0], state.pending_text, chat_id=chat_id, metadata=metadata)
         else:
-            result = await self.edit_message(chat_id, state.message_id, groups[0])
-            if not result.success:
-                result = await self.send(chat_id, groups[0], metadata=metadata)
-                if not result.success:
-                    return
-                if result.message_id:
-                    state.message_id = str(result.message_id)
-            for group in groups[1:]:
-                result = await self.send(chat_id, group, metadata=metadata)
-                if not result.success:
-                    return
-                if result.message_id:
-                    state.message_id = str(result.message_id)
+            # Past the single-message limit: finish the current message, send the rest separately.
+            ok = (await self._edit_or_resend(state, groups[0], groups[0], chat_id=chat_id, metadata=metadata)
+                  and await self._send_delegate_groups(state, groups[1:], chat_id=chat_id, metadata=metadata))
+        if not ok:
+            return
         state.accumulated_text = groups[-1]
         state.last_rendered_text = groups[-1]
         state.pending_text = ""
