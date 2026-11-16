@@ -437,8 +437,8 @@ def _plain_spawn(monkeypatch):
     monkeypatch.setattr(_pr, "_SYSTEMD_SCOPE_AVAILABLE", False)
 
 
-def _bind_session(session_key, session_id, platform="telegram"):
-    set_session_vars(platform=platform, chat_id=session_id, user_id=session_id,
+def _bind_session(session_key, session_id, platform="telegram", user_id=None):
+    set_session_vars(platform=platform, chat_id=session_id, user_id=user_id or session_id,
                      session_key=session_key, session_id=session_id)
     set_current_session_key(session_key)
 
@@ -493,17 +493,19 @@ def test_timed_out_turn_reaps_only_its_own_job_on_a_shared_container_key(_plain_
     default-profile session under persistent Docker). The timed-out turn lists and loses only
     the job it started; the sibling session's job, started after the baseline, survives."""
     turn_a, turn_b = "api-session-a-76115", "api-session-b-76115"
+    # One caller: the local shell is scoped per platform user (userenv), so two users never share it.
+    user = "api-user-76115"
     spawned = []
 
     def scenario():
-        _bind_session("", turn_a, platform="api_server")
+        _bind_session("", turn_a, platform="api_server", user_id=user)
         baseline = process_registry.snapshot_running_ids(turn_a)
         mine = _spawn_background(turn_a, spawned)
-        _bind_session("", turn_b, platform="api_server")
+        _bind_session("", turn_b, platform="api_server", user_id=user)
         sibling = _spawn_background(turn_b, spawned)
         assert mine.task_id == sibling.task_id and mine.owner_task_id != sibling.owner_task_id
 
-        _bind_session("", turn_a, platform="api_server")
+        _bind_session("", turn_a, platform="api_server", user_id=user)
         listed = json.loads(handle_function_call("process_manage", {"action": "list"}, task_id=turn_a))
         assert [p["session_id"] for p in listed["processes"]] == [mine.id]
 
