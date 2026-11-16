@@ -359,7 +359,7 @@ _PRIMARY_ARGS = {
     "browser_click": "ref", "browser_type": "text", "image_generate": "prompt", "text_to_speech": "text",
     "vision_analyze": "question", "skill_view": "name", "skills_list": "category", "cronjob_manage": "action",
     "execute_code": "code", "browser_exec": "code", "delegate_task": "goal",
-    "skill_manage": "name",
+    "skill_manage": "name", "aegis_a2a_delegate": "goal",
 }
 _FALLBACK_PREVIEW_KEYS = ("query", "text", "command", "path", "name", "prompt", "code", "goal")
 
@@ -1279,6 +1279,7 @@ _CUTE_LINES = {
     "execute_code": _cute_execute_code,
     "browser_exec": _cute_browser_exec,
     "delegate_task": _cute_delegate,
+    "aegis_a2a_delegate": lambda a, r: _cute_row("🤝", "delegate", _cute_trunc(a.get("goal", ""))),
 }
 
 

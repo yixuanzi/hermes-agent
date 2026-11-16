@@ -349,6 +349,7 @@ _RAW_INLINE_TOOL_EXECUTORS: dict[str, InlineToolExecutor] = {
     "manage_catalog": _manage_catalog,
     "setup_mcp": _setup_mcp_shim,
     "delegate_task": lambda agent, args, ctx: agent._dispatch_delegate_task(args),
+    "aegis_a2a_delegate": lambda agent, args, ctx: agent._dispatch_a2a_delegate(args),
 }
 
 

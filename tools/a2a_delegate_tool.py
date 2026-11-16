@@ -1835,6 +1835,26 @@ def a2a_delegate(
     return _json_result(**payload)
 
 
+def dispatch_for_agent(agent, function_args: dict) -> str:
+    """``AIAgent._dispatch_a2a_delegate``: the one agent-loop call site for the delegate tool.
+
+    Every execution path (sequential, concurrent, helper) reaches the tool through here so each
+    gets the same parent agent and the adapter-bound foreground I/O the gateway put on it.
+    """
+    input_factory = getattr(agent, "_delegate_ext_input_factory", None)
+    return a2a_delegate(
+        goal=function_args.get("goal"),
+        context=function_args.get("context"),
+        agent_name=function_args.get("agent_name"),
+        session_id=function_args.get("session_id"),
+        is_delegate_output=function_args.get("is_delegate_output", True),
+        is_loop=function_args.get("is_loop", False),
+        input=input_factory() if callable(input_factory) else None,
+        output=getattr(agent, "_delegate_ext_output_adapter", None),
+        parent_agent=agent,
+    )
+
+
 A2A_LIST_SCHEMA = {
     "name": "aegis_a2a_list",
     "description": "List active A2A agents and global routing rules.",

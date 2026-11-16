@@ -1,4 +1,4 @@
-"""Tool execution acts for the agent's platform user (``userenv``)."""
+"""Tool execution acts for the agent's platform user (``userenv``), and the Aegis A2A delegate stays inline."""
 from __future__ import annotations
 
 import json
@@ -84,3 +84,32 @@ def test_the_binding_does_not_outlive_the_call(agent):
         agent._execute_tool_calls_sequential(SimpleNamespace(content="", tool_calls=[_call("web_search")]), [], "t")
 
     assert get_current_user_env_identity() is None
+
+
+@pytest.mark.parametrize("path", ["sequential", "concurrent"])
+def test_the_aegis_a2a_delegate_runs_inline_through_the_agent(agent, monkeypatch, path):
+    seen = []
+    monkeypatch.setattr(agent, "_dispatch_a2a_delegate", lambda args: seen.append(args) or '{"ok": true}')
+    call = _call("aegis_a2a_delegate", json.dumps({"agent_name": "threat-intel", "goal": "check"}))
+    messages: list = []
+
+    with patch("model_tools.handle_function_call", side_effect=AssertionError("must stay inline")):
+        if path == "sequential":
+            agent._execute_tool_calls_sequential(SimpleNamespace(content="", tool_calls=[call]), messages, "t")
+        else:
+            agent._invoke_tool("aegis_a2a_delegate", {"agent_name": "threat-intel", "goal": "check"}, "t")
+
+    assert seen and seen[0]["goal"] == "check"
+
+
+def test_dispatch_hands_the_gateway_bound_foreground_io_to_the_tool(agent, monkeypatch):
+    captured = {}
+    monkeypatch.setattr("tools.a2a_delegate_tool.a2a_delegate", lambda **kwargs: captured.update(kwargs) or "{}")
+    output, inputs = object(), []
+    agent._delegate_ext_output_adapter = output
+    agent._delegate_ext_input_factory = lambda: inputs.append(object()) or inputs[-1]
+
+    agent._dispatch_a2a_delegate({"goal": "g", "agent_name": "a", "is_loop": True})
+
+    assert captured["parent_agent"] is agent and captured["output"] is output
+    assert captured["input"] is inputs[0] and captured["is_loop"] is True and captured["is_delegate_output"] is True

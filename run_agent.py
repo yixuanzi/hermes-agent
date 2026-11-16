@@ -1371,6 +1371,7 @@ class AIAgent(
             subagent_id=function_args.get("subagent_id"), message=function_args.get("message"), parent_agent=self,
         )
 
+    _dispatch_a2a_delegate = _forward("tools.a2a_delegate_tool", "dispatch_for_agent")
     _invoke_tool = _forward("agent.agent_runtime_helpers", "invoke_tool")
 
     @staticmethod
