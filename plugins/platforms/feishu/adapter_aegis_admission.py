@@ -84,15 +84,26 @@ def _env_boolean_default_false(name: str) -> bool:
     return False
 
 
+def _scoped_env(name: str) -> Optional[str]:
+    """A profile env value through the adapter reader (``get_scoped_secret``), or None when unset."""
+    value = str(_fa()._get_scoped_secret(name, "") or "").strip()
+    return value or None
+
+
 class FeishuAdmissionMixin:
     """Mixed into ``FeishuAdapter`` ahead of ``BasePlatformAdapter``."""
 
     def _jev_settings(self):
-        """Effective Jev settings, or ``None`` when the module is unavailable."""
+        """Effective Jev settings, or ``None`` when the module is unavailable.
+
+        Read through the adapter's scoped reader, like every other Feishu setting: the default
+        profile's adapter runs unscoped under a multiplexing gateway, where a bare ``get_secret``
+        fails closed, so Jev read as switched off and every unaddressed group message was answered.
+        """
         try:
             from agent import jev_policy
 
-            return jev_policy.load_jev_settings()
+            return jev_policy.load_jev_settings(read=_scoped_env)
         except Exception:
             logger.debug("[Feishu] Jev policy unavailable", exc_info=True)
             return None

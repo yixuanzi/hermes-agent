@@ -71,7 +71,7 @@ def _adapter_with_jev(monkeypatch, *, active: bool, verdict, gated: bool = False
     adapter = make_adapter_skeleton()
     monkeypatch.setattr(
         jev_policy, "load_jev_settings",
-        lambda: SimpleNamespace(name="stub", autoreply_gate=gated),
+        lambda read=None: SimpleNamespace(name="stub", autoreply_gate=gated),
     )
     monkeypatch.setattr(
         jev_policy, "channel_admission_mode",
@@ -112,13 +112,13 @@ def test_a_raising_mode_check_falls_back_on_the_master_switch(monkeypatch):
 
     monkeypatch.setattr(
         jev_policy, "load_jev_settings",
-        lambda: SimpleNamespace(name="stub", autoreply_gate=False),
+        lambda read=None: SimpleNamespace(name="stub", autoreply_gate=False),
     )
     assert adapter._jev_admission_mode() == "normal"
 
     monkeypatch.setattr(
         jev_policy, "load_jev_settings",
-        lambda: SimpleNamespace(name="stub", autoreply_gate=True),
+        lambda read=None: SimpleNamespace(name="stub", autoreply_gate=True),
     )
     assert adapter._jev_admission_mode() == "silence"
 
@@ -138,7 +138,7 @@ def test_a_raising_classifier_keeps_the_bot_quiet(monkeypatch):
     from agent import jev_policy
 
     adapter = make_adapter_skeleton()
-    monkeypatch.setattr(jev_policy, "load_jev_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(jev_policy, "load_jev_settings", lambda read=None: SimpleNamespace())
 
     async def _boom(text, **_kwargs):
         raise RuntimeError("classifier exploded")
@@ -162,6 +162,25 @@ def test_unresolvable_settings_fall_back_to_the_normal_path(monkeypatch):
 
 
 # --- the admission hand-off ------------------------------------------------
+
+
+def test_the_default_profile_adapter_reads_its_jev_switches_while_multiplexing(monkeypatch):
+    """The default profile's adapter runs unscoped under a multiplexing gateway, where a bare
+    ``get_secret`` fails closed: Jev read as off and every unaddressed group message was answered."""
+    from agent import secret_scope
+    from plugins.platforms.feishu.adapter import FeishuAdapter
+
+    for name, value in {
+        "HERMES_JEV_AUTOREPLY": "true", "HERMES_JEV_CHANNEL_AUTOREPLY": "true",
+        "TYPESAFE_API_KEY": "test-key", "HERMES_JEV_AGENT_DESCRIPTION": "security operations",
+    }.items():
+        monkeypatch.setenv(name, value)
+    adapter = FeishuAdapter.__new__(FeishuAdapter)
+    secret_scope.set_multiplex_active(True)
+    try:
+        assert adapter._jev_admission_mode() == "judge"
+    finally:
+        secret_scope.set_multiplex_active(False)
 
 
 def _handoff_adapter(

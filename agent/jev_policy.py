@@ -30,7 +30,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from agent.jev_client import (
     DEFAULT_JEV_BASE_URL,
@@ -388,7 +388,9 @@ class JevSettings:
         return bool(self.api_key)
 
 
-def _resolve_complexity_criteria(config: Mapping[str, Any]) -> dict[str, str]:
+def _resolve_complexity_criteria(
+    config: Mapping[str, Any], read: Optional[Callable[[str], Optional[str]]] = None,
+) -> dict[str, str]:
     """Read each band's criterion, env overriding config, config overriding default.
 
     Only the three bands are configurable. ``other`` is derived from them and is
@@ -399,7 +401,7 @@ def _resolve_complexity_criteria(config: Mapping[str, Any]) -> dict[str, str]:
     raw_criteria = raw if isinstance(raw, Mapping) else {}
     resolved: dict[str, str] = {}
     for tier in COMPLEXITY_TIERS:
-        text = (_env(f"HERMES_JEV_CRITERIA_{tier.upper()}") or "").strip()
+        text = ((read or _env)(f"HERMES_JEV_CRITERIA_{tier.upper()}") or "").strip()
         if not text:
             text = str(raw_criteria.get(tier) or "").strip()
         if text:
@@ -470,7 +472,9 @@ def _band_effort(raw: Any, tier: str, source: str) -> Optional[str]:
     return parsed["effort"]
 
 
-def _resolve_tier_models(config: Mapping[str, Any]) -> dict[str, TierModel]:
+def _resolve_tier_models(
+    config: Mapping[str, Any], read: Optional[Callable[[str], Optional[str]]] = None,
+) -> dict[str, TierModel]:
     """Resolve each band's model, provider and effort, env overriding config per FIELD.
 
     ``HERMES_JEV_MODEL_<BAND>``, ``HERMES_JEV_PROVIDER_<BAND>`` and
@@ -483,6 +487,7 @@ def _resolve_tier_models(config: Mapping[str, Any]) -> dict[str, TierModel]:
     keeps the session's model and only changes how hard it thinks. A provider
     without a model cannot route on its own and is dropped with a warning.
     """
+    read = read or _env
     raw_models = config.get("models")
     raw_models = raw_models if isinstance(raw_models, dict) else {}
     resolved: dict[str, TierModel] = {}
@@ -491,14 +496,14 @@ def _resolve_tier_models(config: Mapping[str, Any]) -> dict[str, TierModel]:
         model, provider, raw_effort = _configured_tier(raw_models.get(tier))
         effort = _band_effort(raw_effort, tier, f"jev.models.{tier}.reasoning_effort")
 
-        env_model = _env(f"HERMES_JEV_MODEL_{tier.upper()}")
+        env_model = read(f"HERMES_JEV_MODEL_{tier.upper()}")
         if env_model:
             model = env_model
-        env_provider = _env(f"HERMES_JEV_PROVIDER_{tier.upper()}")
+        env_provider = read(f"HERMES_JEV_PROVIDER_{tier.upper()}")
         if env_provider:
             provider = env_provider
         env_effort_name = f"HERMES_JEV_REASONING_{tier.upper()}"
-        env_effort = _band_effort(_env(env_effort_name), tier, env_effort_name)
+        env_effort = _band_effort(read(env_effort_name), tier, env_effort_name)
         if env_effort is not None:
             effort = env_effort
 
@@ -520,18 +525,24 @@ def _resolve_tier_models(config: Mapping[str, Any]) -> dict[str, TierModel]:
     return resolved
 
 
-def load_jev_settings() -> JevSettings:
-    """Resolve the effective settings: env var → ``config.yaml`` → default."""
+def load_jev_settings(read: Optional[Callable[[str], Optional[str]]] = None) -> JevSettings:
+    """Resolve the effective settings: env var → ``config.yaml`` → default.
+
+    ``read`` replaces the env reader for callers with their own scoping rule: a platform adapter
+    passes the adapter reader, because the default profile's adapter runs unscoped under a
+    multiplexing gateway, where ``_env`` fails closed and would switch Jev off.
+    """
     config = _jev_config()
+    read = read or _env
 
     def pick(env_name: str, config_key: str) -> Optional[Any]:
-        value = _env(env_name)
+        value = read(env_name)
         if value is not None:
             return value
         return config.get(config_key)
 
     return JevSettings(
-        api_key=_env("TYPESAFE_API_KEY") or "",
+        api_key=read("TYPESAFE_API_KEY") or "",
         base_url=str(pick("TYPESAFE_BASE_URL", "base_url") or DEFAULT_JEV_BASE_URL),
         model=str(pick("TYPESAFE_MODEL", "model") or DEFAULT_JEV_MODEL),
         timeout=_as_float(pick("HERMES_JEV_TIMEOUT", "timeout"), DEFAULT_JEV_TIMEOUT),
@@ -557,8 +568,8 @@ def load_jev_settings() -> JevSettings:
         relevance_threshold=_as_float(
             pick("HERMES_JEV_RELEVANCE_THRESHOLD", "relevance_threshold"), 0.7
         ),
-        tier_models=_resolve_tier_models(config),
-        complexity_criteria=_resolve_complexity_criteria(config),
+        tier_models=_resolve_tier_models(config, read),
+        complexity_criteria=_resolve_complexity_criteria(config, read),
     )
 
 
