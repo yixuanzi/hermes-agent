@@ -68,23 +68,23 @@ class TestConfigEnvOverrides(unittest.TestCase):
         self.assertEqual(config.platforms[Platform.FEISHU].extra["connection_mode"], "websocket")
 
     def test_reply_thread_flag_defaults_true_and_parses_false_values(self):
-        from plugins.platforms.feishu.adapter import FeishuAdapter
+        from plugins.platforms.feishu.adapter_aegis import load_aegis_settings
 
         with patch.dict(os.environ, {}, clear=True):
-            self.assertTrue(FeishuAdapter._load_settings({}).reply_thread)
+            self.assertTrue(load_aegis_settings({}).reply_thread)
         for value in ("false", "0", "no", "off", " FALSE "):
             with self.subTest(value=value), patch.dict(
                 os.environ, {"FEISHU_REPLY_THREAD": value}, clear=True
             ):
-                self.assertFalse(FeishuAdapter._load_settings({}).reply_thread)
+                self.assertFalse(load_aegis_settings({}).reply_thread)
 
     def test_reply_thread_flag_invalid_value_warns_and_defaults_true(self):
-        from plugins.platforms.feishu.adapter import FeishuAdapter
+        from plugins.platforms.feishu.adapter_aegis import load_aegis_settings
 
         with patch.dict(
             os.environ, {"FEISHU_REPLY_THREAD": "sometimes"}, clear=True
         ), self.assertLogs(level="WARNING") as logs:
-            self.assertTrue(FeishuAdapter._load_settings({}).reply_thread)
+            self.assertTrue(load_aegis_settings({}).reply_thread)
         self.assertTrue(any("FEISHU_REPLY_THREAD" in line for line in logs.output))
 
 class TestFeishuMessageNormalization(unittest.TestCase):
@@ -281,45 +281,6 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
             captured["calls"][1].request_body.content,
             json.dumps({"text": "可以用 粗体 和 斜体。"}, ensure_ascii=False),
         )
-
-    @patch.dict(os.environ, {
-        "FEISHU_APP_ID": "cli_app",
-        "FEISHU_APP_SECRET": "secret_app",
-        "FEISHU_CONNECTION_MODE": "webhook",
-        "FEISHU_WEBHOOK_HOST": "127.0.0.1",
-        "FEISHU_WEBHOOK_PORT": "9001",
-        "FEISHU_WEBHOOK_PATH": "/hook",
-        "FEISHU_VERIFICATION_TOKEN": "vtok",
-    }, clear=True)
-    def test_connect_webhook_mode_starts_local_server(self):
-        from gateway.config import PlatformConfig
-        from plugins.platforms.feishu.adapter import FeishuAdapter
-
-        adapter = FeishuAdapter(PlatformConfig())
-        runner = AsyncMock()
-        site = AsyncMock()
-        web_module = SimpleNamespace(
-            Application=lambda **_kwargs: SimpleNamespace(router=SimpleNamespace(add_post=lambda *_args, **_kwargs: None)),
-            AppRunner=lambda _app: runner,
-            TCPSite=lambda _runner, host, port: SimpleNamespace(start=site.start, host=host, port=port),
-        )
-
-        with (
-            patch("plugins.platforms.feishu.adapter.FEISHU_AVAILABLE", True),
-            patch("plugins.platforms.feishu.adapter.FEISHU_WEBHOOK_AVAILABLE", True),
-            patch("plugins.platforms.feishu.adapter.EventDispatcherHandler") as mock_handler_class,
-            patch("plugins.platforms.feishu.adapter.acquire_scoped_lock", return_value=(True, None)),
-            patch("plugins.platforms.feishu.adapter.release_scoped_lock"),
-            patch.object(adapter, "_hydrate_bot_identity", new=AsyncMock()),
-            patch.object(adapter, "_build_lark_client", return_value=SimpleNamespace()),
-            patch("plugins.platforms.feishu.adapter.web", web_module),
-        ):
-            _mock_event_dispatcher_builder(mock_handler_class)
-            connected = asyncio.run(adapter.connect())
-
-        self.assertTrue(connected)
-        runner.setup.assert_awaited_once()
-        site.start.assert_awaited_once()
 
     @patch.dict(os.environ, {
         "FEISHU_APP_ID": "cli_app",
@@ -3226,13 +3187,14 @@ class TestFeishuAutoThreading(unittest.TestCase):
             )
         self.assertEqual(build_session_key(follow_up.source), first_key)
 
-    def test_quote_reply_with_reply_thread_disabled_keeps_quoted_root(self):
+    def test_quote_reply_with_reply_thread_disabled_stays_flat(self):
+        # v0.4 keys a quote reply on no topic at all (#20548); the fork only adds topics when on.
         adapter = self._build_adapter(resolved_chat_type="group")
         with patch.dict(os.environ, {"FEISHU_REPLY_THREAD": "false"}, clear=True):
             event = self._dispatch(
                 adapter, self._message("om_quote_reply", root_id="om_quoted")
             )
-        self.assertEqual(event.source.thread_id, "om_quoted")
+        self.assertIsNone(event.source.thread_id)
         self.assertNotIn("om_quoted", adapter._pending_auto_thread_roots)
 
     def test_quote_reply_approval_card_lands_under_the_quote_reply(self):

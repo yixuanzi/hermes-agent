@@ -36,7 +36,13 @@ class _RecordingRequestBuilder:
         return _set
 
     def build(self) -> SimpleNamespace:
-        return SimpleNamespace(**self._fields)
+        fields = self._fields
+
+        class _Request(SimpleNamespace):
+            def __getattr__(self, name):  # unset request fields read as None, like the SDK's
+                return None
+
+        return _Request(**fields)
 
 
 def _ensure_feishu_mocks():
