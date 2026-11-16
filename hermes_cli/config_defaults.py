@@ -6,6 +6,7 @@ docs of config.yaml.
 
 from hermes_cli.config_defaults_auxiliary import _aux
 from hermes_cli.config_defaults_voice import VOICE_DEFAULTS
+from hermes_cli.config_defaults_jev import JEV_DEFAULTS, JEV_OPTIONAL_ENV_VARS
 
 #: Image every container terminal backend (docker/modal/daytona, the singularity plugin) uses unless the
 #: user pins one. LEGACY_SANDBOX_IMAGES are the plain defaults that preceded the desktop stack
@@ -1194,7 +1195,6 @@ DEFAULT_CONFIG = {
             # optional "base_url" key overrides DEEPINFRA_BASE_URL for STT only
         },
     },
-
     "voice": VOICE_DEFAULTS,
     # Native images (vision_analyze, browser screenshots, replayed user images) are re-sent on every later call.
     "vision": {
@@ -1472,7 +1472,7 @@ DEFAULT_CONFIG = {
     },
     # IANA timezone (e.g. "Asia/Kolkata", "America/New_York"). Empty = server-local time.
     "timezone": "",
-
+    "jev": JEV_DEFAULTS,
     "slack": {
         "require_mention": True,  # require @mention to respond in channels
         "free_response_channels": "",  # comma-separated channel IDs answered without mention
@@ -2669,7 +2669,6 @@ DEFAULT_CONFIG = {
 
 from hermes_cli.config_defaults_env import OptionalEnvVars, _base_url, _env, _msg, _prov, _setting, _skill, _tool
 
-
 # Optional environment variables that enhance functionality. Feeds the dashboard keys page and setup
 # checklists; category: provider|tool|skill|messaging|setting, advanced=True hides from checklists,
 # tools=[...] lists the model tools the key unlocks. Provider entries: config_provider_env (on first read).
@@ -3071,4 +3070,5 @@ OPTIONAL_ENV_VARS = OptionalEnvVars({
     "HERMES_EPHEMERAL_SYSTEM_PROMPT": _setting(
         "Ephemeral system prompt injected at API-call time (never persisted to sessions)",
         "Ephemeral system prompt", None),
+    **JEV_OPTIONAL_ENV_VARS,
 })

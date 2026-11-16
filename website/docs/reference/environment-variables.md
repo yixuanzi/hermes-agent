@@ -197,6 +197,8 @@ For native Anthropic auth, Hermes prefers Claude Code's own credential files whe
 | `VERCEL_PROJECT_ID` | Vercel project ID (required with `VERCEL_TOKEN`) |
 | `VERCEL_TEAM_ID` | Vercel team ID (required with `VERCEL_TOKEN`) |
 | `VERCEL_OIDC_TOKEN` | Vercel short-lived OIDC token (development-only alternative) |
+| `TYPESAFE_API_KEY` | TypeSafe Jev key for channel admission and complexity routing ([Jev Decision Layer](../user-guide/features/jev-decision-layer.md)) |
+| `TYPESAFE_BASE_URL` | Jev endpoint override for a self-hosted or proxied System One gateway (optional) |
 
 ### Skill API Keys
 
