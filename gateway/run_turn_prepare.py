@@ -307,11 +307,15 @@ class GatewayTurnPrepareMixin:
         return _recover_or_remember_model(self, skey, model), runtime_kwargs
 
     def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict, *,
-                                   tier: Any = _TIER_FROM_RUNNER) -> dict:
+                                   tier: Any = _TIER_FROM_RUNNER, session_id: Optional[str] = None,
+                                   model_pinned: bool = False) -> dict:
         """Effective model/runtime config for one turn. With `/fast` priority on, fast-mode
         ``request_overrides`` are deep-merged OVER the per-provider ones so both reach the model.
         ``tier`` defaults to the runner's per-turn ``_service_tier``; an off-turn builder (a cold
-        ``/review``) passes the session's own instead of writing that shared slot."""
+        ``/review``) passes the session's own instead of writing that shared slot. Jev complexity
+        routing may move the route onto a band model first (``session_id`` keys the per-session band;
+        ``model_pinned`` — a ``/model`` choice — skips it); a band's effort comes back as
+        ``band_reasoning_config`` for the caller to rank against the session ``/reasoning`` override."""
         from gateway.run import _deep_merge_request_overrides
         from agent.fast_mode import STATIC_TIERS
         from hermes_cli.models import resolve_fast_mode_overrides
@@ -333,6 +337,9 @@ class GatewayTurnPrepareMixin:
                 runtime["api_mode"], runtime["command"], tuple(runtime["args"]),
             ),
         }
+        from gateway.run_jev_routing import apply_jev_complexity_route
+        base_request_overrides = apply_jev_complexity_route(
+            user_message, route, session_id, model_pinned=model_pinned, request_overrides=base_request_overrides)
         if tier is _TIER_FROM_RUNNER:
             tier = getattr(self, "_service_tier", None)
         route["service_tier"] = tier  # the tier this turn's agent runs, carried with its overrides

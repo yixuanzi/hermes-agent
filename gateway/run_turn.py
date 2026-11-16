@@ -1013,7 +1013,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         for status / approval / stream sends (Feishu topics need the triggering message id via the
         reply API, so carry it as a fallback). Slack and Buzz honour the user's reply_in_thread
         opt-out: never synthesise a thread for progress, or every later reply inherits it."""
-        from gateway.run import _non_conversational_metadata, _resolve_progress_thread_id
+        from gateway.run import _resolve_progress_thread_id
         is_buzz = str(getattr(source.platform, "value", source.platform) or "").lower() == "buzz"
         _progress_reply_in_thread = True
         _adapter = self._delivery_adapter_for(source) if source.platform == Platform.SLACK or is_buzz else None
@@ -1041,12 +1041,9 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             and not source.thread_id
             else None
         )
-        _progress_metadata = _non_conversational_metadata(
-            self._thread_metadata_for_progress(
-                source, event_message_id, _progress_thread_id, _relay_prospective_thread_id,
-            ),
-            platform=source.platform,
-        )
+        from gateway.run_feishu_card_markers import progress_card_metadata
+        _progress_metadata = progress_card_metadata(self._thread_metadata_for_progress(
+            source, event_message_id, _progress_thread_id, _relay_prospective_thread_id), platform=source.platform)
         if _native_slack_task_cards:
             # chat.startStream in channels requires the recipient team/user pair; harmless elsewhere.
             _progress_metadata = dict(_progress_metadata or {})
@@ -1467,7 +1464,8 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             policy = policy_for_source(self, turn_ctx.source)
             _cfg_model = self._fallback_baseline_model(
                 session_key, turn_ctx.source, _agent, policy_model=turn_model(policy, active_authority(self)) if policy and policy.model else None)
-            if _agent.model == _cfg_model or self._is_intentional_model_switch(session_key, _agent, _cfg_model):
+            if (_agent.model == _cfg_model or not getattr(_agent, "_fallback_activated", False)  # a Jev band is no fallback
+                    or self._is_intentional_model_switch(session_key, _agent, _cfg_model)):
                 return
         _agent._evicted_on_fallback = session_key or True
         self._evict_cached_agent(session_key)
@@ -1974,7 +1972,8 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
 
         Interval: agent.gateway_notify_interval / HERMES_AGENT_NOTIFY_INTERVAL (default 180s; 0 or
         long_running_notifications=off disables)."""
-        from gateway.run import _float_env, _interim_metadata, _non_conversational_metadata
+        from gateway.run import _float_env, _interim_metadata
+        from gateway.run_feishu_card_markers import heartbeat_card_metadata
         _notify_start = time.time()
         _NOTIFY_INTERVAL = _float_env("HERMES_AGENT_NOTIFY_INTERVAL", 180)
         _long_running_mode = disp._display_surface_mode("long_running_notifications", default=True, allow_generic=True)
@@ -2031,7 +2030,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
                         break
                     _notify_res = await _notify_adapter.send(
                         source.chat_id, _heartbeat_text,
-                        metadata=_interim_metadata(_non_conversational_metadata(_status_thread_metadata, platform=source.platform)),
+                        metadata=_interim_metadata(heartbeat_card_metadata(_status_thread_metadata, platform=source.platform)),
                     )
                     if getattr(_notify_res, "success", False) and getattr(_notify_res, "message_id", None):
                         _heartbeat_msg_id = str(_notify_res.message_id)

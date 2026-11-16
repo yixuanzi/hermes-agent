@@ -1418,26 +1418,34 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         from gateway.session_authorities import active_authority
         from gateway.session_worker_construct import session_routing
         pr = session_routing(active_authority(runner), policy) if policy else runner._provider_routing
-        reasoning_config = (policy.current_reasoning_config(runner, ctx.session_key) if policy else
-            runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model))
-        from gateway.session_cli_turn import one_turn_reasoning
-        reasoning_config = one_turn_reasoning(self, reasoning_config)  # `/model --once --reasoning X`
         service_tier = (policy.current_service_tier(runner, ctx.session_key) if policy else
             runner._resolve_session_service_tier(source=ctx.source, session_key=ctx.session_key))
         from gateway.session_api_turn import api_execution
         api = api_execution.get()
         if api is not None:
-            from gateway.platforms.api_server import _request_reasoning_config, _request_service_tier, _REQUEST_OPTION_MISSING
-            requested_reasoning = _request_reasoning_config(api['settings'].get('model_options'))
-            if requested_reasoning is not None:
-                reasoning_config = requested_reasoning
+            from gateway.platforms.api_server import _request_service_tier, _REQUEST_OPTION_MISSING
             tier = _request_service_tier(api['settings'].get('model_options'))
             if tier is not _REQUEST_OPTION_MISSING:
                 service_tier = tier
+        # Route first: a Jev band moves the model this turn runs, and its effort ranks below /reasoning.
+        from gateway.run_jev_routing import session_model_pinned
+        turn_route = runner._resolve_turn_agent_config(
+            ctx.message, model, runtime_kwargs, tier=service_tier, session_id=ctx.session_id,
+            model_pinned=policy is not None or session_model_pinned(runner, ctx.session_key))
+        reasoning_config = (policy.current_reasoning_config(runner, ctx.session_key) if policy else
+            runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key,
+                                                     model=turn_route["model"],
+                                                     band_reasoning=turn_route.get("band_reasoning_config")))
+        from gateway.session_cli_turn import one_turn_reasoning
+        reasoning_config = one_turn_reasoning(self, reasoning_config)  # `/model --once --reasoning X`
+        if api is not None:
+            from gateway.platforms.api_server import _request_reasoning_config
+            requested_reasoning = _request_reasoning_config(api['settings'].get('model_options'))
+            if requested_reasoning is not None:
+                reasoning_config = requested_reasoning
         # The tier stays turn-local (turn_route): one runner serves concurrent turns of every profile.
         runner._reasoning_config = reasoning_config
         stream_consumer, stream_delta_cb, interim_cb, want_interim = self._setup_stream_consumer(platform_key)
-        turn_route = runner._resolve_turn_agent_config(ctx.message, model, runtime_kwargs, tier=service_tier)
         agent, reused_cached_agent = self._resolve_turn_agent(
             turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr,
         )
@@ -1447,6 +1455,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         # Set every turn (None clears it): a cached agent must not keep a login failure that resolved.
         from agent.primary_auth_fallback import attach_primary_auth_failure
         attach_primary_auth_failure(agent, pending_primary_auth)
+        from gateway.run_aegis_delegate import bind_delegate_foreground_runtime_for_turn
+        bind_delegate_foreground_runtime_for_turn(runner, agent, ctx.source, event_message_id=ctx.event_message_id)
         self._wire_turn_agent_callbacks(agent, turn_route, reasoning_config, stream_delta_cb, interim_cb, want_interim)
         from gateway.run_turn_progress import local_viewer_turn
         local_sinks = None

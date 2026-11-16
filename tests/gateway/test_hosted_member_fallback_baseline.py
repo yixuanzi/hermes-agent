@@ -41,7 +41,7 @@ def test_switched_room_member_is_not_evicted_as_a_fallback(tmp_path, monkeypatch
     runner._run_agent_evict_on_fallback(ctx)
     assert not runner._evict_cached_agent.called
 
-    # A real fallback off the profile's current model still evicts.
-    ctx.agent_holder[0] = SimpleNamespace(model='fallback-model', provider='custom')
+    # A real fallback off the profile's current model still evicts (AIAgent flags every activation).
+    ctx.agent_holder[0] = SimpleNamespace(model='fallback-model', provider='custom', _fallback_activated=True)
     runner._run_agent_evict_on_fallback(ctx)
     assert runner._evict_cached_agent.called

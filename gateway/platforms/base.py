@@ -180,8 +180,8 @@ def _reply_anchor_for_event(event) -> str | None:
         if getattr(source, "chat_type", None) != "dm":
             return None
         return getattr(event, "message_id", None) or getattr(event, "reply_to_message_id", None)
-    if platform == "feishu" and thread_id and getattr(event, "reply_to_message_id", None):
-        return getattr(event, "reply_to_message_id", None)
+    if platform == "feishu" and thread_id and not str(thread_id).startswith("om_"):  # om_*: prospective auto-topic root
+        return getattr(event, "reply_to_message_id", None) or getattr(event, "message_id", None)
     return getattr(event, "message_id", None)
 
 
@@ -438,8 +438,8 @@ if (_checkout_root := str(Path(__file__).resolve().parents[2])) not in sys.path:
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import fence_state_after, reply_file_off, try_reply_file, typing_metadata_for_turn, sender_may_see_activity, typing_pause_key, typing_refresh_wanted
 from gateway.platforms.base_post_delivery import run_post_delivery_callback
-from gateway.platforms.base_delivery_ledger import (
-    finalize_final_obligation, ledger_attempted, ledger_bracket, record_final_obligation)
+from gateway.platforms.base_delivery_ledger import finalize_final_obligation, ledger_attempted, ledger_bracket, record_final_obligation
+from gateway.platforms.base_delegate_loop import DELEGATE_STEER_ACK, DelegateLoopAdapterMixin, is_gateway_command_during_delegate_loop
 from gateway.platforms.base_exec_approval import (
     approval_timeout_seconds, ea_action_labels, ea_default_reason_text, ea_header_text,
     ea_reason_label_text, ea_smart_deny_line_text, exec_approval_cmd_budget, format_approval_deadline_line,

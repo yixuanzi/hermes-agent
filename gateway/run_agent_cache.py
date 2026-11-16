@@ -522,6 +522,8 @@ class GatewayAgentCacheMixin:
             with _log_suppressed(logging.WARNING, "Failed to interrupt running agent for %s; continuing",
                                  session_key, exc_info=True):
                 request_hard_interrupt(running_agent, interrupt_reason, tool_reason=tool_reason)
+            from gateway.run_aegis_delegate import cancel_running_delegation
+            cancel_running_delegation(running_agent)  # a delegate blocks on a remote task, not the flag
             _process_task_id = getattr(running_agent, "_gateway_turn_process_task_id", "")
             _process_baseline = getattr(running_agent, "_gateway_turn_process_baseline", None)
         # Bump the generation BEFORE scheduling the reap thread and capture the post-bump value:

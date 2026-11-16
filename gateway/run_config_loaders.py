@@ -329,12 +329,14 @@ class GatewayConfigLoadersMixin:
 
     def _resolve_session_reasoning_config(
         self, *, source: Optional[SessionSource] = None, session_key: Optional[str] = None,
-        model: str = "",
+        model: str = "", band_reasoning: Optional[dict] = None,
     ) -> dict | None:
-        """Session ``/reasoning --session`` > per-model ``agent.reasoning_overrides`` > global.
+        """Session ``/reasoning --session`` > Jev band effort > per-model ``agent.reasoning_overrides`` > global.
 
-        ``model`` must be the session's *effective* model (session ``/model`` override included);
-        empty uses ``model.default``.
+        ``model`` must be the model this turn runs (session ``/model`` override included, or the Jev
+        band's model when complexity routing moved it); empty uses ``model.default``. The band outranks
+        the per-model override as the more specific decision, and a session override outranks the band
+        for the reason ``/model`` does: an explicit human choice beats a classifier.
         """
         resolved_session_key = self._resolve_session_key_or_none(source, session_key)
         if resolved_session_key:
@@ -345,6 +347,8 @@ class GatewayConfigLoadersMixin:
         if (policy := local_policy(self, source)) is not None:
             # A local session runs its frozen (or followed) level, not the profile's.
             return policy.current_reasoning_config(self, resolved_session_key)
+        if band_reasoning is not None:
+            return dict(band_reasoning)
         return self._load_reasoning_config(model)
 
     def _set_session_reasoning_override(self, session_key: str, reasoning_config: Optional[dict]) -> None:

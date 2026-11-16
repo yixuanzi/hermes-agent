@@ -1803,7 +1803,8 @@ class GatewayInboundMixin(
             return None
         # After expansion: the quoted reply is someone else's text and stays literal — an
         # ``@file:`` inside it must never read a local file on the replier's behalf.
-        return self._prepend_inbound_reply_context(event, source, message_text)
+        from gateway.run_source_envelope import add_source_preamble
+        return add_source_preamble(event, source, self._prepend_inbound_reply_context(event, source, message_text))
 
     async def _prepare_profile_scoped_inbound_message_text(
         self, *, event: MessageEvent, source: SessionSource, history: list[dict[str, Any]],

@@ -61,10 +61,11 @@ class GatewayBackgroundMixin:
             enabled_toolsets, disabled_toolsets = self._resolve_turn_toolsets(user_config, source, platform_key)
             pr = self._provider_routing
             max_iterations = _current_max_iterations()
-            reasoning_config = self._resolve_session_reasoning_config(source=source, model=model)
-            self._reasoning_config = reasoning_config
             service_tier = self._resolve_session_service_tier(source=source)
             turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs, tier=service_tier)
+            reasoning_config = self._resolve_session_reasoning_config(
+                source=source, model=turn_route["model"], band_reasoning=turn_route.get("band_reasoning_config"))
+            self._reasoning_config = reasoning_config
 
             # Enrich the prompt with image descriptions (same as the main flow).
             enriched_prompt = prompt
