@@ -89,6 +89,9 @@ Intent: List `aegis_a2a_delegate` in `_AGENT_LOOP_TOOLS` so registry dispatch ne
 Feature: Remote-only A2A delegate dispatch.
 Intent: `AIAgent._dispatch_a2a_delegate` is a one-line forward to `tools.a2a_delegate_tool.dispatch_for_agent`, so the facade stays thin while sequential, concurrent and helper execution share one dispatch.
 
+Feature: Host runtime reported during owner sessions.
+Intent: `_current_main_runtime` reports the host `api_mode` while an owner-attached codex session runs (see `agent/codex_owner_runtime.py`), so auxiliary routing follows the provider the user configured.
+
 ## File: `agent/tool_executor.py`
 
 Feature: Tool-execution identity binding.
@@ -285,6 +288,11 @@ Intent: Mark Feishu tool-progress sends `hermes_progress` and the long-running h
 Feature: Plugin slash-command caller identity binding.
 Intent: Bind the invoking user's userenv identity (from the adapter's `SessionSource`) around plugin-registered slash-command handlers, mirroring the tool-call path. Plugin dispatch runs inside `_handle_message` before `_set_session_env` binds `HERMES_SESSION_*`, so without this identity-dependent commands (e.g. `/userenv`) fail closed. Identity comes only from the gateway source, never message text, and the ContextVar is reset after the handler returns. Wired from `gateway/run_inbound_hooks.py` as `caller_user_env_identity(source)`.
 
+## File: `gateway/run_inbound_hooks.py`
+
+Feature: `pre_gateway_dispatch` session key.
+Intent: The hook passes `session_key` (the route key the gateway uses for the message's canonicalized source; `""` when a bare runner cannot derive one) as an additive keyword field. Plugin slash commands run before the turn binds `HERMES_SESSION_KEY`, so a command that must find its session (ext-tools `/codex`, `/claude`) reads the captured key instead of the runner's private `_session_key_for_source`.
+
 ## File: `gateway/run_turn.py`
 
 Feature: Fallback eviction limited to real fallbacks.
@@ -306,7 +314,7 @@ Intent: `_resolve_session_reasoning_config(band_reasoning=)` is resolved after t
 ## File: `tools/user_env_store.py`
 
 Feature: Persistent per-user env storage.
-Intent: Store user runtime env values in `$HERMES_HOME/users.env.json` keyed by `platform.user_id`, keep `CURRENT_USER_NAME` system-managed, and migrate a single legacy username-keyed entry safely.
+Intent: Store user runtime env values in `$HERMES_HOME/users.env.json` keyed by `platform.user_id`, keep `CURRENT_USER_NAME` system-managed, and migrate a single legacy username-keyed entry safely. Reads accept a UTF-8 BOM (`utf-8-sig`) so a file touched by Windows tooling still loads.
 
 ## File: `tools/user_env_runtime.py`
 
@@ -365,6 +373,9 @@ Intent: Create records the caller as owner; list, every job action and `context_
 
 Feature: Caller-scoped cron job lookup.
 Intent: `caller_identity`, `visible_jobs`, `get_visible_job` and `resolve_visible_job_ref` apply the current runtime user's visibility to cron job reads in one place, so every cron tool action filters identically.
+
+Feature: `resolve_caller_job(ref)`.
+Intent: The plugin-facing caller-scoped job lookup with the same rules as the `cronjob` tool, used by ext-tools `/cron_prompt`: another user's job, or one with a malformed owner, reads as not found and is never named.
 
 ## File: `tools/cronjob_job_args.py`
 
@@ -442,6 +453,19 @@ Intent: Each codex turn resets stream-delivery tracking and the pending segment 
 Feature: Final-answer delivery and turn-input echo.
 Intent: Not ported from aegis_v0.3 because v0.4 covers both: the gateway suppresses the final send by exact delivered text (#74248 / #80519), and `run_turn` records `submitted_user_text` so persistence drops exactly the codex echo.
 
+Feature: `owner_session_approval(agent)`.
+Intent: Non-codex owner sessions (Claude Code over ACP) get Hermes' codex approval policy: no callback where nobody can answer, auto-approve only under an explicit bypass, so `/claude` fails closed instead of reading terminal-tool internals.
+
+## File: `agent/codex_owner_runtime.py`
+
+Feature: Owner session runtime.
+Intent: `enter_owner_codex_runtime` / `leave_owner_codex_runtime` switch an agent onto its owner-attached codex session at a turn boundary and back, so plugin backends no longer swap `api_mode` or publish the auxiliary runtime themselves. While an owner session runs, `_current_main_runtime` and the per-turn auxiliary publish report the host `api_mode`, so titles, review forks and compression checks are never downgraded to `codex_responses` on a `chat_completions` or `anthropic_messages` provider. Re-entering follows a host change made with `/model`; a native `codex_app_server` agent is never taken over.
+
+## File: `agent/turn_context.py`
+
+Feature: Host runtime during owner sessions.
+Intent: The per-turn auxiliary-runtime publish uses the host `api_mode` recorded by `agent/codex_owner_runtime.py` while an owner-attached session runs the turn.
+
 ## File: `agent/transports/codex_app_server_session.py`
 
 Feature: Session owner surface.
@@ -476,3 +500,28 @@ Intent: Attach or clear a session's account after the row exists, used by the AI
 
 Feature: Owner-scoped session listing.
 Intent: `list_sessions_rich` / `session_count` take `user_id` and `include_ownerless` (default `True`: owned plus ownerless history; `False`: strictly private) through the shared WHERE builder, so counts, the last-active query and the pinned back-fill agree.
+
+## File: `hermes_cli/plugins_context.py`
+
+Feature: `ctx.session_id()`.
+Intent: Plugins identify the calling session without private manager state: the classic CLI's session counts even before its first turn built an agent; elsewhere it is the turn's bound `HERMES_SESSION_ID` (resolved by `hermes_cli/plugin_session.py`).
+
+## File: `hermes_cli/plugin_session.py`
+
+Feature: Calling-session id for plugin contexts.
+Intent: `context_session_id(manager)` backs `ctx.session_id()` so ext-tools `/codex` and `/claude` find their session through the published plugin surface instead of `get_plugin_manager()._cli_ref`.
+
+## File: `hermes_cli/data/plugin_api.json`
+
+Feature: The "Aegis fork" published names.
+Intent: The fork's bundled plugins import nothing outside the published list. The fork groups list only fork-owned plugin-facing surfaces (user-env identity and store, cron caller visibility, the codex owner-session surface and `agent.codex_owner_runtime`) and stable generic helpers (`spawn_owned`, `release_process_group_once_empty`, `hermes_subprocess_env`, approval-bypass queries, `neutralize_untrusted_inline_text`), each with no `ctx` or upstream equivalent; underscore names are never published. Documented in `aegis/docs/hermes/plugin-api.md` and the regenerated public-api page.
+
+## File: `scripts/boundary_lint_baseline.json`
+
+Feature: Intended Feishu/Slack fork crossings.
+Intent: The fork's `adapter_aegis*.py` siblings import the fork's own core modules (`agent.jev_policy`, `tools.feishu_group_history`) and helpers the adapters already used (`gateway.session.build_session_key`, `utils.env_float`); added by hand, never with `--update`, so no other crossing is baselined.
+
+## File: `scripts/install_root_lint_baseline.json`
+
+Feature: Product direct-script startup.
+Intent: The aegis/aisoc/workagent backends keep the `sys.path` bootstrap that lets `python <app>/backend/main.py` run directly; their install root otherwise comes from `project_root_str()`.
