@@ -23,6 +23,7 @@ Hermes Agent 可作为全功能机器人与飞书和 Lark 集成。连接后，�
 | 私信 | Hermes 回复每一条消息。 |
 | 群聊 | Hermes 仅在被 @提及 时回复。 |
 | 共享群聊 | 默认情况下，每位用户在共享群聊中的会话历史相互隔离。 |
+| 自动话题 | 默认情况下，私聊或普通群中的每个新任务都会在独立话题中回复，并在该话题内持续复用同一 session。 |
 
 共享群聊行为由 `config.yaml` 控制：
 
@@ -31,6 +32,22 @@ group_sessions_per_user: true
 ```
 
 仅当你明确希望每个群聊共享同一个对话时，才将其设为 `false`。
+
+### 自动创建话题
+
+私聊和普通群中的顶层消息会在机器人首次回复时创建飞书话题。进度、审批、
+澄清、媒体和最终回复都会留在该话题中，后续话题消息继续使用同一个 Hermes
+session。已有话题保持正常路由，话题群不受此开关影响。
+
+在主聊天中引用回复一条消息也按同样方式处理：话题建在这条引用回复下面，
+而不是被引用的消息下面，被引用的内容会作为上下文一并带上。
+
+```bash
+FEISHU_REPLY_THREAD=true   # 默认值
+FEISHU_REPLY_THREAD=false  # 直接在原聊天中回复
+```
+
+如果创建话题失败，Hermes 会将该次输出降级为一条普通聊天消息。
 
 ## 第一步：创建飞书 / Lark 应用
 
@@ -498,6 +515,7 @@ platforms:
 | `FEISHU_ALLOWED_USERS` | — | _（空）_ | 用户白名单的逗号分隔 open_id 列表 |
 | `FEISHU_ALLOW_BOTS` | — | `none` | 接受其他机器人消息：`none`、`mentions` 或 `all` |
 | `FEISHU_REQUIRE_MENTION` | — | `true` | 群消息是否必须 @提及 机器人 |
+| `FEISHU_REPLY_THREAD` | — | `true` | 为每条私聊或普通群顶层消息创建话题；设为 `false` 时平铺回复 |
 | `FEISHU_HOME_CHANNEL` | — | — | cron/通知输出的聊天 ID |
 | `FEISHU_ENCRYPT_KEY` | — | _（空）_ | webhook 签名验证的加密密钥 |
 | `FEISHU_VERIFICATION_TOKEN` | — | _（空）_ | webhook payload 认证的验证 token |

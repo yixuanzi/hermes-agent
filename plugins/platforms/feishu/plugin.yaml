@@ -42,3 +42,55 @@ optional_env:
     description: "Display name for the Feishu home channel"
     prompt: "Home channel display name"
     password: false
+  - name: FEISHU_CARD_OUTPUT
+    description: "Render replies as a three-element CardKit card (title / collapsible execution trace / streamed rich text). Default false; set true to opt in, otherwise replies are text+post messages"
+    prompt: "Card output? (true/false)"
+    password: false
+  - name: FEISHU_CARD_TITLE
+    description: "Card header title for the main agent (default '🤖 Hermes')"
+    prompt: "Card title"
+    password: false
+  - name: FEISHU_CARD_DELEGATE_TITLE
+    description: "Card header title for a delegated remote agent; may contain {agent}"
+    prompt: "Delegate card title"
+    password: false
+  - name: FEISHU_CARD_TRACE_TITLE
+    description: "Title of the collapsible execution-trace panel (default '🔧 执行过程')"
+    prompt: "Execution panel title"
+    password: false
+  - name: FEISHU_CARD_ATTACHMENT_NOTE
+    description: "Line added to the card body when a reply ships files; the files themselves arrive as separate messages. May contain {names} (default '📎 已发送文件：{names}')"
+    prompt: "Attachment note"
+    password: false
+  - name: FEISHU_GROUP_HISTORY
+    description: "Prepend the group's recent messages, wrapped in <group_messages>, to the first message of a new group session. Default false; set true to opt in"
+    prompt: "Inject recent group history? (true/false)"
+    password: false
+  - name: FEISHU_GROUP_HISTORY_LIMIT
+    description: "Max number of recent group messages to inject (default 20, capped at 50)"
+    prompt: "Group history message limit"
+    password: false
+  - name: FEISHU_GROUP_HISTORY_HOURS
+    description: "Only inject group messages created within this many hours (default 24)"
+    prompt: "Group history window (hours)"
+    password: false
+  - name: FEISHU_GROUP_HISTORY_MSG_MAX_CHARS
+    description: "Truncate each injected message body to this many characters (default 1000; 0 disables truncation)"
+    prompt: "Group history per-message cap"
+    password: false
+  - name: FEISHU_GROUP_HISTORY_THREAD_LIMIT
+    description: "When the first message of a new session sits inside a topic, also inject up to this many of that topic's messages as <thread_messages> (default 20, capped at 50; 0 disables)"
+    prompt: "Group history topic message limit"
+    password: false
+  - name: FEISHU_GROUP_HISTORY_SOURCE
+    description: "How group history is fetched: api (lark SDK client, default) or cli (runs lark-cli im +chat-messages-list / +threads-messages-list as the bot and can render interactive-card bodies). Same limits, window and block shape either way"
+    prompt: "Group history source (api/cli)"
+    password: false
+  - name: FEISHU_GROUP_HISTORY_CLI_BIN
+    description: "lark-cli executable used by the cli group history source: a name on PATH or an absolute path (default lark-cli)"
+    prompt: "lark-cli executable"
+    password: false
+  - name: FEISHU_GROUP_HISTORY_CARD_REGIONS
+    description: "Regions of an interactive card to include in group history: comma-separated subset of title, trace (collapsible execution-trace panel), body (final answer), or all (default title,body)"
+    prompt: "Card regions (title,body / all)"
+    password: false
