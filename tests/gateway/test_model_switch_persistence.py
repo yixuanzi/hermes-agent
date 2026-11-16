@@ -184,7 +184,9 @@ class TestFallbackEvictionHonorsChannelOverrides:
             }
         runner._evict_cached_agent = MagicMock()
         ctx = TurnContext(source=source, session_key=build_session_key(source))
-        ctx.agent_holder[0] = SimpleNamespace(model=agent_model, **({"provider": "openrouter"} | agent_attrs))
+        # A real AIAgent flags every fallback activation; eviction requires it (a Jev band is no fallback).
+        ctx.agent_holder[0] = SimpleNamespace(
+            model=agent_model, **({"provider": "openrouter", "_fallback_activated": True} | agent_attrs))
         ctx.result_holder[0] = {"final_response": "ok"}
         runner._run_agent_evict_on_fallback(ctx)
         return runner._evict_cached_agent.called

@@ -72,7 +72,7 @@ async def test_slack_answered_root_restart_replay_preserves_identity(tmp_path, m
     runner, adapter, authority, sent, calls = await _slack_gateway(tmp_path, monkeypatch, 'Before', 'first')
     try:
         await _deliver(adapter, original)
-        assert calls == [TEXT]
+        assert [c.split('</source>\n\n', 1)[-1] for c in calls] == [TEXT]  # after the <source> header
         assert [text for text in sent if 'home channel' not in text] == ['the answer']
         before = _rows(authority)
         assert len(before) == 1 and before[0]['status'] == 'terminal'
@@ -145,7 +145,7 @@ async def test_slack_name_reconcile_does_not_erase_sender_ids(tmp_path, monkeypa
                                     request_id=TS, payload=payload, authorize=None)
         assert (error.value.reason, error.value.field) == ('admission_conflict', ADMITTED_REQUEST_CONFLICT['field'])
         assert _rows(authority) == before
-        assert calls == [TEXT]
+        assert [c.split('</source>\n\n', 1)[-1] for c in calls] == [TEXT]  # after the <source> header
     finally:
         runner.session_store.close_all_db_handles()
         authority.db.close()

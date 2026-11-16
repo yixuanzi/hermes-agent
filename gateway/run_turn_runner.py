@@ -1430,7 +1430,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         # Route first: a Jev band moves the model this turn runs, and its effort ranks below /reasoning.
         from gateway.run_jev_routing import session_model_pinned
         turn_route = runner._resolve_turn_agent_config(
-            ctx.message, model, runtime_kwargs, tier=service_tier, session_id=ctx.session_id,
+            ctx.message, model, runtime_kwargs, tier=service_tier, session_id=getattr(ctx, "session_id", None),
             model_pinned=policy is not None or session_model_pinned(runner, ctx.session_key))
         reasoning_config = (policy.current_reasoning_config(runner, ctx.session_key) if policy else
             runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key,
@@ -1456,7 +1456,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         from agent.primary_auth_fallback import attach_primary_auth_failure
         attach_primary_auth_failure(agent, pending_primary_auth)
         from gateway.run_aegis_delegate import bind_delegate_foreground_runtime_for_turn
-        bind_delegate_foreground_runtime_for_turn(runner, agent, ctx.source, event_message_id=ctx.event_message_id)
+        bind_delegate_foreground_runtime_for_turn(
+            runner, agent, ctx.source, event_message_id=getattr(ctx, "event_message_id", None))
         self._wire_turn_agent_callbacks(agent, turn_route, reasoning_config, stream_delta_cb, interim_cb, want_interim)
         from gateway.run_turn_progress import local_viewer_turn
         local_sinks = None

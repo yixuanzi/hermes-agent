@@ -3711,7 +3711,7 @@ class FeishuAdapter(FeishuAegisMixin, FeishuChoiceCardsMixin, FeishuSyntheticEve
     ) -> Any:
         thread_id = (metadata or {}).get("thread_id")
         effective_reply_to = (reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
-                              or (str(thread_id) if self._is_message_thread_anchor(thread_id) else None))
+                              or (str(thread_id) if str(thread_id or "").startswith("om_") else None))  # om_*: topic root
         if effective_reply_to:
             body = self._build_reply_message_body(
                 content=payload, msg_type=msg_type, reply_in_thread=bool(thread_id), uuid_value=str(uuid.uuid4()),

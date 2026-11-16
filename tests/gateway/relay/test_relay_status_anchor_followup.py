@@ -67,7 +67,9 @@ async def test_queued_followup_status_stays_on_its_own_message(monkeypatch, tmp_
                                      session_id='sess-anchor', session_key=SESSION_KEY,
                                      event_message_id=first.message_id)
 
-    assert _TwoTurnAgent.calls == ['first', 'follow-up'] and result['final_response'] == 'done-2'
+    # The queued Slack follow-up carries the fork's <source> header ahead of its text.
+    calls = [c.split('</source>\n\n', 1)[-1] for c in _TwoTurnAgent.calls]
+    assert calls == ['first', 'follow-up'] and result['final_response'] == 'done-2'
     typing = [(f['metadata'] or {}).get('thread_id') for f in stub.sent if f['op'] == 'typing']
     assert '1700000000.000902' not in typing
     assert '1700000000.000901' in typing
