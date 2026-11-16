@@ -30,6 +30,34 @@ def _dict_args(raw: Any) -> dict:
     return args if isinstance(args, dict) else {"arguments": args}
 
 
+@dataclass(frozen=True)
+class ProjectionLimits:
+    """How much of a turn a session owner lets into Hermes history (the backend keeps the full turn).
+
+    Command output keeps head + tail (the opening lines and, usually, the error); each string field of a
+    tool's arguments is clipped; reasoning is projected only when asked for.
+    """
+
+    command_head_chars: int = 2000
+    command_tail_chars: int = 1000
+    args_field_chars: int = 1500
+    project_reasoning: bool = False
+
+
+def _clip_head_tail(text: str, head: int, tail: int) -> str:
+    if len(text) <= head + tail:
+        return text
+    return f"{text[:head]}\n…[elided {len(text) - head - tail} chars]\n{text[-tail:] if tail else ''}"
+
+
+def _clip_string_fields(args: dict, limit: int) -> dict:
+    return {
+        key: f"{value[:limit]}…[clipped {len(value) - limit} chars]" if isinstance(value, str) and len(value) > limit
+        else value
+        for key, value in args.items()
+    }
+
+
 @dataclass
 class ProjectionResult:
     """Output of projecting one Codex item; empty ``messages`` = ignored (e.g. a streaming delta)."""
@@ -42,8 +70,9 @@ class ProjectionResult:
 class CodexEventProjector:
     """Stateful projector; stashes codex's separate reasoning items onto the next assistant message."""
 
-    def __init__(self) -> None:
+    def __init__(self, limits: Optional[ProjectionLimits] = None) -> None:
         self._pending_reasoning: list[str] = []
+        self._limits = limits
 
     def project(self, notification: dict) -> ProjectionResult:
         """Project one notification; only ``item/completed`` materializes messages (deltas are display-only)."""
@@ -69,7 +98,8 @@ class CodexEventProjector:
     def _assistant_message(self, content: Optional[str], **extra: Any) -> dict[str, Any]:
         msg: dict[str, Any] = {"role": "assistant", "content": content, **extra}
         if self._pending_reasoning:
-            msg["reasoning"] = "\n".join(self._pending_reasoning)
+            if self._limits is None or self._limits.project_reasoning:
+                msg["reasoning"] = "\n".join(self._pending_reasoning)
             self._pending_reasoning = []
         return msg
 
@@ -92,7 +122,13 @@ class CodexEventProjector:
         self, item: dict, item_id: str, spec: Callable[[dict], tuple[str, str, dict, str]]
     ) -> ProjectionResult:
         """Emit the (assistant tool_call, tool result) pair; ``spec(item)`` -> ``(id_type, name, args, content)``."""
+        limits = self._limits
+        if limits is not None and item.get("type") == "commandExecution":
+            output = item.get("aggregatedOutput") or ""
+            item = {**item, "aggregatedOutput": _clip_head_tail(output, limits.command_head_chars, limits.command_tail_chars)}
         id_type, name, args, content = spec(item)
+        if limits is not None:
+            args = _clip_string_fields(args, limits.args_field_chars)
         call_id = _deterministic_call_id(id_type, item_id)
         assistant_msg = self._assistant_message(
             None,

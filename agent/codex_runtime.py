@@ -503,6 +503,70 @@ def _close_codex_session(agent) -> None:
     with suppress(Exception):
         agent._codex_session.close()
     agent._codex_session = None
+    agent._codex_session_hermes_owned = None
+
+
+def _codex_session_is_hermes_owned(agent) -> bool:
+    """Whether ``agent._codex_session`` is the one ``_ensure_codex_session`` built from Hermes' settings.
+
+    A session its owner attached (``attach_codex_app_server_session``, a plugin backend, a test double)
+    keeps its own model, prompt and thread binding: Hermes neither retires it nor overrides its turns."""
+    session = getattr(agent, "_codex_session", None)
+    return session is not None and session is getattr(agent, "_codex_session_hermes_owned", None)
+
+
+def _codex_request_hooks(agent) -> tuple[Any, Any]:
+    """``(approval_callback, request_routing)`` for a session driven from the agent's turn thread.
+
+    Approval callback: Hermes' standard prompt flow when a CLI thread installed one. `hermes chat -q`, cron and
+    unattended platforms can have one registered with nobody to answer it, so they get none and fail closed at
+    once. Gateway/cron have no UI for codex approval requests, so exec/apply_patch fail closed by default; only an
+    explicit approval bypass (approvals.mode: off, /yolo, --yolo, HERMES_YOLO_MODE) hands policy to codex's sandbox."""
+    from agent.transports.codex_app_server_session import _ServerRequestRouting
+    approval_callback = None
+    with suppress(Exception):
+        from tools.approval_context import _no_user_can_answer
+        from tools.terminal_tool import _get_approval_callback
+        if not _no_user_can_answer():
+            approval_callback = _get_approval_callback()
+    auto_approve_requests = False
+    try:
+        from tools.approval import is_approval_bypass_active
+        auto_approve_requests = is_approval_bypass_active()
+    except Exception:
+        logger.debug("codex app-server: approval-bypass lookup failed; keeping fail-closed default", exc_info=True)
+    return approval_callback, _ServerRequestRouting(
+        auto_approve_exec=auto_approve_requests, auto_approve_apply_patch=auto_approve_requests)
+
+
+def attach_codex_app_server_session(agent, session=None, *, cwd=None, thread_start_params=None,
+                                    projection_limits=None):
+    """Bind a codex app-server session the CALLER owns to ``agent`` and return it.
+
+    With ``session=None`` a new (not yet spawned) session is created in ``cwd`` (default: the agent's session
+    cwd) with codex's own model and instructions, the per-thread ``thread_start_params`` (sandbox / approval
+    overrides) and ``projection_limits``. An existing session is re-bound instead, so one codex thread survives
+    an AIAgent rebuild within the same Hermes session. Either way the approval and display hooks are built for
+    ``agent`` on the calling thread — call this from the agent's turn thread, where the CLI installs its approval
+    callback. The session stays the caller's: Hermes does not retire it, override its turns' model or record its
+    thread as the session's resumable codex thread."""
+    from agent.transports.codex_app_server_session import CodexAppServerSession
+    approval_callback, routing = _codex_request_hooks(agent)
+    on_event = make_codex_app_server_event_bridge(agent)
+    if session is None:
+        from agent.runtime_cwd import resolve_agent_cwd
+        from hermes_cli.codex_runtime_switch import get_configured_codex_binary
+        from hermes_cli.config import load_config
+        session = CodexAppServerSession(
+            cwd=cwd or getattr(agent, "session_cwd", None) or str(resolve_agent_cwd()),
+            codex_bin=get_configured_codex_binary(load_config()), approval_callback=approval_callback,
+            request_routing=routing, on_event=on_event, thread_start_params=thread_start_params,
+            projection_limits=projection_limits,
+        )
+    else:
+        session.rebind(approval_callback=approval_callback, on_event=on_event, request_routing=routing)
+    agent._codex_session = session
+    return session
 
 
 def _consume_user_interrupt(agent, active: bool = True) -> tuple[bool, Any]:
@@ -620,6 +684,16 @@ def _codex_turn_service_tier(agent) -> str | None:
     return CODEX_TIER_WORDS.get(effective_request_overrides(agent).get("service_tier"))
 
 
+def _codex_turn_settings(agent, hermes_owned: bool) -> dict[str, Any]:
+    """``run_turn`` keywords for this turn: Hermes' model, effort and tier for Hermes' own session; nothing
+    for an owner-attached one, whose owner picks its runtime (codex's own config, a plugin backend)."""
+    if not hermes_owned:
+        return {}
+    wire_model = _codex_wire_model(agent, getattr(agent, "_codex_session_model_provider", None))
+    return {"model": wire_model, "reasoning_effort": _codex_turn_effort(agent, wire_model),
+            "service_tier": _codex_turn_service_tier(agent)}
+
+
 def _ensure_codex_session(agent, messages: list[dict[str, Any]] | None = None) -> None:
     """Lazily spawn one CodexAppServerSession per AIAgent (reused across turns, closed by the _cleanup hook).
     A live session whose thread was started with a different prompt composition (TUI/Desktop ``/personality``
@@ -630,35 +704,21 @@ def _ensure_codex_session(agent, messages: list[dict[str, Any]] | None = None) -
     developer_instructions = _codex_developer_instructions(agent)
     model_provider = _codex_model_provider(agent)
     if getattr(agent, "_codex_session", None) is not None:
-        # Only a session whose recorded composition differs is stale; one attached without a record is kept.
-        # The provider is fixed per thread (turn/start can switch the model, not the provider), so an
-        # in-place switch to or from a named custom provider retires the thread too.
+        # A session its owner attached is kept as-is. Of Hermes' own sessions only one whose recorded
+        # composition differs is stale. The provider is fixed per thread (turn/start can switch the model,
+        # not the provider), so an in-place switch to or from a named custom provider retires the thread too.
         recorded = getattr(agent, "_codex_session_prompt", None)
-        if recorded is None or (recorded == developer_instructions
-                                and getattr(agent, "_codex_session_model_provider", None) == model_provider):
+        if not _codex_session_is_hermes_owned(agent) or (
+                recorded == developer_instructions
+                and getattr(agent, "_codex_session_model_provider", None) == model_provider):
             return
         _close_codex_session(agent)
     resume_thread_id = None if getattr(agent, "_codex_session_prompt", None) is not None else _stored_codex_thread_id(agent)
     from agent.runtime_cwd import resolve_agent_cwd
-    from agent.transports.codex_app_server_session import CodexAppServerSession, _ServerRequestRouting
+    from agent.transports.codex_app_server_session import CodexAppServerSession
     from hermes_cli.codex_runtime_switch import get_configured_codex_binary
     from hermes_cli.config import load_config
-    # Approval callback: Hermes' standard prompt flow when a CLI thread installed one. `hermes chat -q`, cron and
-    # unattended platforms can have one registered with nobody to answer it, so they get none and fail closed at once.
-    approval_callback = None
-    with suppress(Exception):
-        from tools.approval_context import _no_user_can_answer
-        from tools.terminal_tool import _get_approval_callback
-        if not _no_user_can_answer():
-            approval_callback = _get_approval_callback()
-    # Gateway/cron have no UI for codex approval requests, so exec/apply_patch fail closed by default. Only an
-    # explicit approval bypass (approvals.mode: off, /yolo, --yolo, HERMES_YOLO_MODE) hands policy to codex's sandbox.
-    auto_approve_requests = False
-    try:
-        from tools.approval import is_approval_bypass_active
-        auto_approve_requests = is_approval_bypass_active()
-    except Exception:
-        logger.debug("codex app-server: approval-bypass lookup failed; keeping fail-closed default", exc_info=True)
+    approval_callback, request_routing = _codex_request_hooks(agent)
     # Bridge codex JSON-RPC notifications (item/started, item/completed, item/agentMessage/delta, ...) into
     # Hermes' gateway UI callbacks (tool_progress_callback, _fire_stream_delta,
     # _emit_interim_assistant_message). Without this, Discord/Telegram users see no live tool-progress or
@@ -678,13 +738,13 @@ def _ensure_codex_session(agent, messages: list[dict[str, Any]] | None = None) -
     # so omitting it ran codex's own default instead of the selection.
     agent._codex_session = CodexAppServerSession(
         cwd=getattr(agent, "session_cwd", None) or str(resolve_agent_cwd()), approval_callback=approval_callback,
-        codex_bin=get_configured_codex_binary(load_config()),
-        request_routing=_ServerRequestRouting(auto_approve_exec=auto_approve_requests, auto_approve_apply_patch=auto_approve_requests),
+        codex_bin=get_configured_codex_binary(load_config()), request_routing=request_routing,
         on_event=make_codex_app_server_event_bridge(agent),
         developer_instructions=developer_instructions or None,
         model=_codex_wire_model(agent, model_provider), model_provider=model_provider,
         resume_thread_id=resume_thread_id, history_seed=history_seed,
     )
+    agent._codex_session_hermes_owned = agent._codex_session
 
 
 def _persist_projected_messages(agent, turn, messages: list[dict[str, Any]]) -> bool:
@@ -781,13 +841,14 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
         raise _checkpoint_blocked("codex_app_server owns the authoritative thread and compacts it "
                                   "without a truthful pre-compaction transcript boundary")
     _ensure_codex_session(agent, messages)
+    # Every codex turn streams from a clean segment, as the loop resets per API call: a previous turn's text
+    # (an interrupted stream never reaches its item/completed) must not be compared against this turn's.
+    _call_guarded(getattr(agent, "_reset_stream_delivery_tracking", None), "stream tracking reset raised")
+    agent._stream_needs_break = False
+    hermes_owned = _codex_session_is_hermes_owned(agent)
     try:
         _start_codex_thread(agent)
-        wire_model = _codex_wire_model(agent, getattr(agent, "_codex_session_model_provider", None))
-        turn = agent._codex_session.run_turn(
-            user_input=user_message,
-            model=wire_model, reasoning_effort=_codex_turn_effort(agent, wire_model),
-            service_tier=_codex_turn_service_tier(agent))
+        turn = agent._codex_session.run_turn(user_input=user_message, **_codex_turn_settings(agent, hermes_owned))
     except Exception as exc:
         logger.exception("codex app-server turn failed")
         _close_codex_session(agent)
@@ -802,9 +863,11 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
         logger.warning("codex app-server session retired (turn error: %s)", turn.error)
         _close_codex_session(agent)
     reply = _transform_codex_reply(agent, turn, turn_id)
-    # The binding is published only once the transcript it belongs to is durable, and never for a
-    # retired thread (the next agent would only resume into the same wedge).
-    if _persist_projected_messages(agent, turn, messages) and not getattr(turn, "should_retire", False):
+    # The binding is published only once the transcript it belongs to is durable, never for a retired
+    # thread (the next agent would only resume into the same wedge), and never for an owner-attached
+    # session: its thread (or a non-codex backend's session id) is not Hermes' to resume.
+    if (_persist_projected_messages(agent, turn, messages) and not getattr(turn, "should_retire", False)
+            and hermes_owned):
         _store_codex_thread_id(agent, turn.thread_id)
     usage_result = _finish_codex_turn(
         agent, turn, messages, original_user_message=original_user_message, should_review_memory=should_review_memory,
@@ -1499,6 +1562,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
 
 __all__ = [
     "_consume_codex_event_stream",
+    "attach_codex_app_server_session",
     "make_codex_app_server_event_bridge",
     "run_codex_app_server_turn",
     "run_codex_stream",

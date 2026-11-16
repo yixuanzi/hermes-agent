@@ -22,7 +22,7 @@ from agent.redact import redact_sensitive_text
 from agent.transports.codex_app_server import (
     CodexAppServerClient, CodexAppServerError, CodexAppServerTransportError,
 )
-from agent.transports.codex_event_projector import CodexEventProjector, ProjectionResult
+from agent.transports.codex_event_projector import CodexEventProjector, ProjectionLimits, ProjectionResult
 from agent.transports.hermes_tools_mcp_server import HERMES_TOOLS_MCP_SERVER_NAME
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,8 @@ _STDERR_TAIL_LINES = 12  # stderr tail on generic errors: legible, yet enough fo
 _TIER_UNKNOWN = object()  # thread resumed: the tier it carries is not known
 
 # Hermes' tools.terminal.security_mode -> Codex permissions profile id.
-# Missing config -> workspace-write (Codex's own default).
+# Missing config -> workspace-write (Codex's own default). This is the REQUESTED profile only: it is not
+# sent on thread/start, and what codex actually applies comes back as ``CodexAppServerSession.effective_policy``.
 _HERMES_TO_CODEX_PERMISSION_PROFILE = {
     "auto": "workspace-write", "approval-required": "read-only-with-approval",
     "unrestricted": "full-access", "yolo": "full-access",  # yolo: backstop alias used by some skills/tests
@@ -182,6 +183,22 @@ def _classify_oauth_failure(primary: str = "", *, stderr: str = "") -> Optional[
     return _OAUTH_REAUTH_HINT if any(n in stderr_l for n in _OAUTH_REFRESH_FAILURE_HINTS) else None
 
 
+def _effective_policy_from_thread_start(result: dict) -> dict:
+    """The sandbox / approval policy codex reports on a thread/start (or thread/resume) response."""
+    sandbox = result.get("sandbox") if isinstance(result.get("sandbox"), dict) else {}
+    profile = result.get("activePermissionProfile")
+    workspace_write = sandbox.get("type") == "workspaceWrite"
+    return {
+        "permission_profile": profile.get("id") if isinstance(profile, dict) else profile,
+        "approval_policy": result.get("approvalPolicy"),
+        "sandbox": sandbox.get("type"),
+        "network_access": sandbox.get("networkAccess"),
+        "writable_roots": list(sandbox.get("writableRoots") or []),
+        "slash_tmp_writable": workspace_write and not sandbox.get("excludeSlashTmp", False),
+        "tmpdir_writable": workspace_write and not sandbox.get("excludeTmpdirEnvVar", False),
+    }
+
+
 @dataclass
 class _ServerRequestRouting:
     """Default approval policies when no interactive approval_callback is wired in (tests, cron)."""
@@ -217,9 +234,17 @@ class CodexAppServerSession:
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
         model: Optional[str] = None, model_provider: Optional[str] = None,
         developer_instructions: Optional[str] = None, resume_thread_id: Optional[str] = None,
-        history_seed: Optional[str] = None,
+        history_seed: Optional[str] = None, thread_start_params: Optional[dict] = None,
+        projection_limits: Optional[ProjectionLimits] = None,
     ) -> None:
         self._cwd = cwd or os.getcwd()
+        # Stable thread/start fields an owner pins per thread (``sandbox``, ``approvalPolicy``, ``config``):
+        # a per-thread override that leaves ~/.codex untouched. Hermes' own fields (cwd, ...) always win.
+        self._thread_start_params = dict(thread_start_params or {})
+        # None keeps the full projection; an owner may clamp what its threads write into Hermes history.
+        self._projection_limits = projection_limits
+        # What codex reported on thread/start or thread/resume; None until a thread is open.
+        self._effective_policy: Optional[dict] = None
         self._codex_bin = codex_bin
         self._codex_home = codex_home
         # A codex thread id persisted by an earlier process for this Hermes session: the first
@@ -258,6 +283,41 @@ class CodexAppServerSession:
         self._pending_file_changes: dict[str, str] = {}
         self._closed = False
 
+    @property
+    def cwd(self) -> str:
+        return self._cwd
+
+    @property
+    def thread_start_params(self) -> dict:
+        return dict(self._thread_start_params)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def turn_active(self) -> bool:
+        with self._active_turn_lock:
+            return self._active_turn_id is not None
+
+    @property
+    def effective_policy(self) -> Optional[dict]:
+        """What codex applies to this thread (None until started): permission_profile, approval_policy,
+        sandbox, network_access, writable_roots, slash_tmp_writable, tmpdir_writable. Codex resolves these
+        from ~/.codex/config.toml, the cwd's project trust and ``thread_start_params``, not Hermes."""
+        return dict(self._effective_policy) if self._effective_policy else None
+
+    def rebind(
+        self, *, approval_callback: Optional[Callable[..., str]], on_event: Optional[Callable[[dict], None]],
+        request_routing: Optional[_ServerRequestRouting] = None,
+    ) -> None:
+        """Point the owner-bound hooks at a new AIAgent between turns, so one codex thread can outlive the
+        agent that created it (a gateway agent-cache rebuild within the same Hermes session). The subprocess
+        and thread are untouched."""
+        self._approval_callback = approval_callback
+        self._on_event = on_event
+        self._routing = request_routing or _ServerRequestRouting()
+
     def ensure_started(self) -> str:
         """Spawn, handshake, and ``thread/start`` (or ``thread/resume`` for a stored id); idempotent, returns
         the codex thread id. A failed resume raises :class:`CodexThreadResumeError` once; the next call
@@ -271,7 +331,7 @@ class CodexAppServerSession:
         # behind experimentalApi + a matching ``[permissions]`` table in ~/.codex/config.toml.
         # Hermes supplies the agent identity through its own system prompt; ``personality: "none"`` strips
         # codex's built-in "# Personality" section from the base instructions so it cannot compete (#72104).
-        params: dict[str, Any] = {"cwd": self._cwd, "personality": "none"}
+        params: dict[str, Any] = {**self._thread_start_params, "cwd": self._cwd, "personality": "none"}
         if self._developer_instructions and self._developer_instructions.strip():
             params["developerInstructions"] = self._developer_instructions
         if self._model_provider:
@@ -296,7 +356,11 @@ class CodexAppServerSession:
                     code=-32603, message=f"codex thread/start returned no thread id (payload keys: {sorted(result.keys())})",
                 )
             self._service_tier_sent = None  # a new thread runs codex's own configured tier
-            logger.info("codex app-server thread started: id=%s profile=%s cwd=%s", thread_id[:8], self._permission_profile, self._cwd)
+            self._effective_policy = _effective_policy_from_thread_start(result)
+            policy = self._effective_policy
+            logger.info("codex app-server thread started: id=%s cwd=%s profile=%s sandbox=%s approval=%s network=%s",
+                        thread_id[:8], self._cwd, policy["permission_profile"], policy["sandbox"],
+                        policy["approval_policy"], policy["network_access"])
         self._thread_id = thread_id
         return thread_id
 
@@ -311,6 +375,7 @@ class CodexAppServerSession:
         thread_id = _extract_thread_id(result)
         if thread_id != wanted:
             raise CodexThreadResumeError(wanted, f"app-server answered with thread {str(thread_id)[:8]!r}")
+        self._effective_policy = _effective_policy_from_thread_start(result)
         return wanted
 
     def close(self) -> None:
@@ -495,7 +560,7 @@ class CodexAppServerSession:
         post_tool_quiet_timeout: float,
     ) -> None:
         """Drive an accepted ``turn/start`` to completion: quiet warning, approvals, projection."""
-        projector = CodexEventProjector()
+        projector = CodexEventProjector(self._projection_limits)
         client = self._client
         result.turn_id = (ts.get("turn") or {}).get("id")
         with self._active_turn_lock:
@@ -632,7 +697,7 @@ class CodexAppServerSession:
         if not self._start_for(result):
             return result
         self._interrupt_event.clear()
-        projector = CodexEventProjector()
+        projector = CodexEventProjector(self._projection_limits)
 
         if self._request_for(result, "thread/compact/start", {"threadId": self._thread_id}, "thread/compact/start") is None:
             return result
