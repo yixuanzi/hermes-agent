@@ -20,11 +20,8 @@ from __future__ import annotations
 import contextvars
 import json
 import re
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-import roles
+from . import roles
 
 _VALID_ROLES = tuple(roles.PERSISTED_ROLES)
 

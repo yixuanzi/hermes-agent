@@ -55,13 +55,13 @@ _LEGACY_UNKNOWN_ROLE = "unknown"
 
 
 def _resolve_role_rules_path() -> Path:
+    """``role_rules.json`` beside this file, unless ``AEGIS_RBAC_RULES_PATH`` names another one
+    (a relative value is taken from the active profile's HERMES_HOME)."""
     configured = (os.environ.get(_ROLE_RULES_ENV) or "").strip()
-    path = Path(configured) if configured else Path("plugins/rbac-guard/role_rules.json")
-    if path.is_absolute():
-        return path
-    # roles.py is <hermes-root>/plugins/rbac-guard/roles.py for both the
-    # checkout and the standard ~/.hermes/plugins installation layout.
-    return Path(__file__).resolve().parents[2] / path
+    if not configured:
+        return Path(__file__).with_name("role_rules.json")
+    path = Path(configured).expanduser()
+    return path if path.is_absolute() else get_hermes_home() / path
 
 
 _ROLE_RULES_PATH = _resolve_role_rules_path()
@@ -74,7 +74,7 @@ class RoleRulesConfigError(ValueError):
 def _load_role_rules_config(path: Path | None = None) -> tuple[dict[str, dict], re.Pattern[str]]:
     path = (path or _resolve_role_rules_path()).resolve()
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RoleRulesConfigError(f"Unable to load {path.name}: {exc}") from exc
     if not isinstance(payload, dict):

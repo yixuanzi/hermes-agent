@@ -41,7 +41,7 @@ Hermes core: resolve_pre_tool_block()
 
 - `plugin.yaml` — manifest
 - `__init__.py` — hooks + 管理工具注册
-- `role_rules.json` — 角色规则配置（危险命令正则、prompt 约束、工具白名单/黑名单、参数正则约束）
+- `role_rules.json` — 角色规则配置（危险命令正则、prompt 约束、工具白名单/黑名单、参数正则约束）；部署配置，不入库（参考 `role_rules.json.example`）。默认读本插件目录下的这个文件；设 `AEGIS_RBAC_RULES_PATH` 可指向别处（相对路径按当前 profile 的 `HERMES_HOME` 解析）
 - `roles.py` — 数据库身份映射、配置加载校验、权限判定与审计日志
 - `<HERMES_HOME>/aegis.db:user_roles` — 运行期角色表，Users 页面修改后下一次判定立即生效
 - `data/audit.log` — JSONL 审计：context_injected / tool_blocked / escalate_approval / role_set / tool_executed；默认关闭，仅 `AEGIS_RBAC_AUDIT=true` 时输出
