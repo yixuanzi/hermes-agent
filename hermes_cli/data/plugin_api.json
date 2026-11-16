@@ -183,6 +183,33 @@
         "hermes_cli.session_worktree:restore",
         "hermes_cli.session_worktree:finish"
       ]
+    },
+    {
+      "source": "Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md)",
+      "entries": [
+        "tools.user_env_runtime:get_current_user_env_identity",
+        "tools.user_env_store",
+        "tools.cronjob_visibility:caller_identity",
+        "tools.cronjob_visibility:resolve_caller_job",
+        "agent.codex_runtime:attach_codex_app_server_session",
+        "agent.codex_runtime:owner_session_approval",
+        "agent.codex_owner_runtime",
+        "agent.transports.codex_app_server:check_codex_binary",
+        "agent.transports.codex_app_server_session:CodexAppServerSession",
+        "agent.transports.codex_app_server_session:TurnResult",
+        "agent.transports.codex_event_projector:ProjectionLimits"
+      ]
+    },
+    {
+      "source": "Aegis fork § generic helpers its bundled plugins need (aegis/docs/hermes/plugin-api.md)",
+      "entries": [
+        "hermes_cli.process_identity:spawn_owned",
+        "hermes_cli.process_identity:release_process_group_once_empty",
+        "tools.environments.local:hermes_subprocess_env",
+        "tools.approval:is_approval_bypass_active",
+        "tools.approval:is_approval_bypass_active_for_session",
+        "gateway.session:neutralize_untrusted_inline_text"
+      ]
     }
   ]
 }

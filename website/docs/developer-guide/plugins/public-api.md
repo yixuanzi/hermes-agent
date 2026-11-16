@@ -135,3 +135,20 @@ with a name allows that one name only.
 | `hermes_cli.session_worktree` | `create` | user-guide/features/plugins.md § A plugin with its own chat client |
 | `hermes_cli.session_worktree` | `restore` | user-guide/features/plugins.md § A plugin with its own chat client |
 | `hermes_cli.session_worktree` | `finish` | user-guide/features/plugins.md § A plugin with its own chat client |
+| `tools.user_env_runtime` | `get_current_user_env_identity` | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
+| `tools.user_env_store` | whole module | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
+| `tools.cronjob_visibility` | `caller_identity` | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
+| `tools.cronjob_visibility` | `resolve_caller_job` | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
+| `agent.codex_runtime` | `attach_codex_app_server_session` | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
+| `agent.codex_runtime` | `owner_session_approval` | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
+| `agent.codex_owner_runtime` | whole module | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
+| `agent.transports.codex_app_server` | `check_codex_binary` | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
+| `agent.transports.codex_app_server_session` | `CodexAppServerSession` | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
+| `agent.transports.codex_app_server_session` | `TurnResult` | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
+| `agent.transports.codex_event_projector` | `ProjectionLimits` | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
+| `hermes_cli.process_identity` | `spawn_owned` | Aegis fork § generic helpers its bundled plugins need (aegis/docs/hermes/plugin-api.md) |
+| `hermes_cli.process_identity` | `release_process_group_once_empty` | Aegis fork § generic helpers its bundled plugins need (aegis/docs/hermes/plugin-api.md) |
+| `tools.environments.local` | `hermes_subprocess_env` | Aegis fork § generic helpers its bundled plugins need (aegis/docs/hermes/plugin-api.md) |
+| `tools.approval` | `is_approval_bypass_active` | Aegis fork § generic helpers its bundled plugins need (aegis/docs/hermes/plugin-api.md) |
+| `tools.approval` | `is_approval_bypass_active_for_session` | Aegis fork § generic helpers its bundled plugins need (aegis/docs/hermes/plugin-api.md) |
+| `gateway.session` | `neutralize_untrusted_inline_text` | Aegis fork § generic helpers its bundled plugins need (aegis/docs/hermes/plugin-api.md) |
