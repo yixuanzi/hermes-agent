@@ -67,6 +67,7 @@ try:  # sibling modules; support both package and flat plugin-dir import
     from .adapter_reactions_context import slack_reactions_marker
     from .adapter_socket_lifecycle import SlackSocketLifecycleMixin
     from .adapter_vault_code import SlackVaultCodeMixin
+    from .adapter_aegis_delegate import SlackDelegateMixin
     from .adapter_image_batch import collect_image_uploads
     from .adapter_forwarded import (
         append_forwards, files_with_forwarded, is_forward, own_bot_ids, shared_message_sections,
@@ -81,6 +82,7 @@ except ImportError:  # pragma: no cover - plugin loaded outside package context
     from adapter_reactions_context import slack_reactions_marker  # type: ignore
     from adapter_socket_lifecycle import SlackSocketLifecycleMixin  # type: ignore
     from adapter_vault_code import SlackVaultCodeMixin  # type: ignore
+    from adapter_aegis_delegate import SlackDelegateMixin  # type: ignore
     from adapter_image_batch import collect_image_uploads  # type: ignore
 
 
@@ -991,7 +993,7 @@ def _is_transient_transport_error(e: BaseException) -> bool:
         and not is_permanent_tls_error)
 
 
-class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformAdapter):
+class SlackAdapter(SlackDelegateMixin, SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformAdapter):
     """Slack bot adapter (Socket Mode).
     Needs SLACK_BOT_TOKEN (xoxb-, API calls) and SLACK_APP_TOKEN (xapp-, Socket Mode). DMs +
     mention-gated channels, threads, attachments, slash commands, status text."""
@@ -1653,14 +1655,15 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
 
         # Approval buttons, slash-confirm buttons (tools/slash_confirm.py), feedback.
         for _action_id in self._APPROVAL_CHOICES:
-            self._app.action(_action_id)(self._handle_approval_action)
+            self._app.action(_action_id)(self._route_delegate_approval_action)
         for _action_id in self._CONFIRM_CHOICES:
             self._app.action(_action_id)(self._handle_slash_confirm_action)
         self._app.action("hermes_feedback")(self._handle_feedback_action)
         # Clarify buttons (tools/clarify_gateway.py); indexed action IDs because
         # Block Kit requires unique IDs within an actions block.
-        self._app.action(re.compile(r"^hermes_clarify_choice_\d+$"))(self._handle_clarify_action)
-        self._app.action("hermes_clarify_other")(self._handle_clarify_action)
+        self._app.action(re.compile(r"^hermes_clarify_choice_\d+$"))(self._route_delegate_clarify_action)
+        self._app.action("hermes_clarify_other")(self._route_delegate_clarify_action)
+        self._app.action("hermes_clarify_submit")(self._route_delegate_clarify_action)  # delegate multi-select
         # Register Block Kit action handlers for the model picker
         # (provider/model static_select + Back/Cancel buttons).
         for _action_id in _MODEL_PICKER_ACTION_IDS:
@@ -3344,8 +3347,7 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
         try:
             payload = await self._users_info_payload(user_id, chat_id, team_id)
             if not payload:
-                self._user_is_bot_cache[cache_key] = False
-                self._user_name_cache.setdefault(cache_key, user_id)
+                self._user_is_bot_cache[cache_key] = False  # no name cached: the name lookup retries
                 return False
             name, is_bot = self._parse_users_info(payload, user_id)
             self._user_is_bot_cache[cache_key] = is_bot
@@ -4686,7 +4688,7 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
         assistant_meta = self._lookup_assistant_thread_metadata(
             event, channel_id=channel_id, thread_ts=event.get("thread_ts", ""),
             team_id=outer_team_id, body=payload)
-        user_id = event.get("user") or assistant_meta.get("user_id", "")
+        user_id = event.get("user") or assistant_meta.get("user_id", "") or str(event.get("bot_id") or "")
         if not channel_id:
             channel_id = assistant_meta.get("channel_id", "")
         # File-upload events may omit team_id; recover it for multi-workspace token lookup —
@@ -4775,6 +4777,8 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
                 routing_text, bot_uid, channel_id=channel_id, opens_own_session=thread_ts == ts,
                 channel_thread_followup=is_thread_reply and not is_dm,
                 addressed=is_one_to_one_dm or is_mentioned or is_command_text or force_process))
+        if await self._route_inbound_to_delegate(msg_event, original_text=original_text, bot_uid=bot_uid):
+            return self._remember_processed_message_ts(ts) if ts else None
         # React only when directly addressed; MPIMs are shared, so they need a
         # mention like any channel.
         if (is_one_to_one_dm or is_mentioned) and self._reactions_enabled():
@@ -4801,7 +4805,9 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
         if is_command_text:
             text = command_probe_text
         msg_type = MessageType.COMMAND if is_command_text else self._media_message_type(media_types)
-        user_name = await self._resolve_user_name(user_id, chat_id=channel_id, team_id=team_id)
+        user_name = self._bot_fallback_sender_name(event, user_id)  # bot_id is no users.info id
+        if user_name is None:
+            user_name = await self._resolve_user_name(user_id, chat_id=channel_id, team_id=team_id)
         channel_name = await self._resolve_channel_name(channel_id, team_id=team_id)
         if is_dm and thread_ts and msg_type != MessageType.COMMAND:  # titles the AI Agent Messages tab
             await self._set_assistant_thread_title(

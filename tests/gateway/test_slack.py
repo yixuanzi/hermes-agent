@@ -93,6 +93,21 @@ _slack_mod.SLACK_AVAILABLE = True
 from plugins.platforms.slack.adapter import SlackAdapter
 
 
+class _SlackResponseLike:
+    """Minimal stand-in for the Slack SDK's non-dict SlackResponse."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def get(self, key, default=None):
+        if isinstance(self.data, dict):
+            return self.data.get(key, default)
+        return default
+
+    def __getitem__(self, key):
+        return self.data[key]
+
+
 class _StreamExpiredError(Exception):
     """slack_sdk.SlackApiError's shape (``exc.response["error"]``) without importing the SDK,
     which CI stubs as a bare module. The adapter only reads the response mapping."""
@@ -3229,6 +3244,31 @@ class TestUserNameResolution:
         name = await adapter._resolve_user_name("U123")
         assert name == "Tyler B"
 
+    @pytest.mark.asyncio
+    async def test_channel_source_uses_display_name_from_slack_response_wrapper(self, adapter):
+        adapter._app.client.users_info = AsyncMock(return_value=_SlackResponseLike({
+            "ok": True,
+            "user": {"is_bot": False, "profile": {"display_name": "Alice", "real_name": "Alice Example"}},
+        }))
+
+        await adapter._handle_slack_message({
+            "text": "<@U_BOT> hello", "user": "U123", "channel": "C123", "channel_type": "channel",
+            "ts": "171.000", "team": "T123",
+        })
+
+        message_event = adapter.handle_message.call_args.args[0]
+        assert message_event.source.user_id == "U123"
+        assert message_event.source.user_name == "Alice"
+        assert adapter._user_name_cache[("T123", "U123")] == "Alice"
+
+    @pytest.mark.asyncio
+    async def test_invalid_slack_response_does_not_poison_name_cache(self, adapter):
+        adapter._app.client.users_info = AsyncMock(return_value=_SlackResponseLike(None))
+
+        assert await adapter._resolve_user_is_bot("U123", chat_id="C123", team_id="T123") is False
+        assert ("T123", "U123") not in adapter._user_name_cache
+        assert await adapter._resolve_user_name("U123", chat_id="C123", team_id="T123") == "U123"
+
 
 # ---------------------------------------------------------------------------
 # TestSlashCommands — expanded command set
@@ -3308,6 +3348,20 @@ class TestSlashCommands:
         await adapter._handle_slash_command(command)
         msg = adapter.handle_message.call_args[0][0]
         assert msg.text == "/btw run the tests"
+
+    @pytest.mark.asyncio
+    async def test_legacy_hermes_freeform_question_keeps_the_invoker_name(self, adapter):
+        """/hermes <free-form text> stays raw text and carries the invoking user's display name."""
+        adapter._app.client.users_info = AsyncMock(
+            return_value={"user": {"profile": {"display_name": "Alice", "real_name": "Alice Example"}}})
+        command = {
+            "command": "/hermes", "text": "what's the weather today?", "user_id": "U1", "user_name": "alice",
+            "channel_id": "C1",
+        }
+        await adapter._handle_slash_command(command)
+        msg = adapter.handle_message.call_args[0][0]
+        assert msg.text == "what's the weather today?"
+        assert msg.source.user_name == "Alice"
 
 
 # ---------------------------------------------------------------------------
@@ -3702,7 +3756,9 @@ class TestSlackThreadParentContext:
             history=[{"role": "user", "content": "original task"}],
         )
 
-        assert prepared == "one more detail"
+        # Slack turns carry the fork's structured <source> header ahead of the body.
+        assert prepared.endswith("\n\none more detail")
+        assert prepared.startswith("<source>")
         assert "[Replying to:" not in prepared
 
 
