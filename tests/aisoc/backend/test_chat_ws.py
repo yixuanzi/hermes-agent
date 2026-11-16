@@ -510,6 +510,15 @@ class _ApprovalAgent:
         }
 
 
+
+def _ask_via_clarify_tool(callback, question: str, choices=None):
+    """Ask through the real clarify tool, so the fake agent drives the callback contract agents use."""
+    from tools.clarify_tool import clarify_tool
+
+    entry = {"question": question, **({"choices": choices} if choices else {})}
+    return json.loads(clarify_tool([entry], callback=callback))["responses"][0]["user_response"]
+
+
 class _ClarifyChoicesAgent:
     def __init__(self, session_id: str):
         self.session_id = session_id
@@ -530,12 +539,7 @@ class _ClarifyChoicesAgent:
         del system_message, conversation_history, task_id, stream_callback, persist_user_message
         answer = ""
         if callable(self.clarify_callback):
-            answer = str(
-                self.clarify_callback(
-                    "Which route should I take?",
-                    ["alpha", "beta"],
-                )
-            )
+            answer = str(_ask_via_clarify_tool(self.clarify_callback, "Which route should I take?", ["alpha", "beta"]))
         return {"final_response": f"clarify choice: {answer or '<missing>'}", "completed": True}
 
 
@@ -559,7 +563,7 @@ class _ClarifyOpenEndedAgent:
         del system_message, conversation_history, task_id, stream_callback, persist_user_message
         answer = ""
         if callable(self.clarify_callback):
-            answer = str(self.clarify_callback("Describe the target scope.", None))
+            answer = str(_ask_via_clarify_tool(self.clarify_callback, "Describe the target scope."))
         return {"final_response": f"clarify freeform: {answer or '<missing>'}", "completed": True}
 
 
@@ -2073,7 +2077,7 @@ def test_chat_ws_emits_clarify_request_and_accepts_choice_response(
             clarify = _recv_until(ws, "clarify.request")
             assert clarify["session_id"] == session_id
             assert clarify["question"] == "Which route should I take?"
-            assert clarify["choices"] == ["alpha", "beta"]
+            assert clarify["choices"] == ["alpha (Recommended)", "beta"]
             assert clarify["turn_id"] == accepted["turn_id"]
 
             ws.send_json(

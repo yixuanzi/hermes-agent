@@ -1338,12 +1338,26 @@ class ChatSessionActor:
             turn_id=self._turn_id,
         )
 
-    def _clarify_callback_sync(
+    def _clarify_callback_sync(self, questions) -> dict:
+        """``clarify_tool``'s batch contract: one ``clarify.request`` per question, in order; the
+        first one left unanswered ends the batch, and an empty answer is a skip (``None``)."""
+        answers: dict[str, str | None] = {}
+        for entry in questions:
+            answer = self._ask_clarify(entry["question"], entry.get("choices"), bool(entry.get("multi_select")))
+            if answer is None:
+                minutes = max(1, int(_clarify_timeout_seconds() / 60))
+                return {"answers": answers, "outcome": "timed_out",
+                        "notice": f"user did not respond within {minutes}m"}
+            answers[entry["qid"]] = answer.strip() or None
+        return {"answers": answers, "outcome": "submitted"}
+
+    def _ask_clarify(
         self,
         question: str,
         choices: list[str] | None,
         multi_select: bool = False,
-    ) -> str:
+    ) -> str | None:
+        """One ``clarify.request``; the answer, or None when the user never responded."""
         normalized_question = str(question or "").strip()
         normalized_choices = [str(choice).strip() for choice in (choices or []) if str(choice).strip()]
         pending = ClarifyRequestState(
@@ -1380,8 +1394,7 @@ class ChatSessionActor:
             turn_id=self._turn_id,
         )
         self._set_run_state("running", source=self._foreground_source)
-        timeout_minutes = max(1, int(_clarify_timeout_seconds() / 60))
-        return f"[user did not respond within {timeout_minutes}m]"
+        return None
 
     def _run_turn(
         self,

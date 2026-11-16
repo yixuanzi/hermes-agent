@@ -85,6 +85,8 @@ POST /a2a/hermes/steer
 }
 ```
 
+`clarify` 工具一次调用可以带 1–5 个问题（`questions=[{question, choices?, multi_select?}]`），而本协议的 `clarify_request` 只承载一个问题。executor 因此按顺序把每个问题发成独立的 `clarify_request`，逐个等待回答；第一个没有得到回答的问题结束整批（超时为 `timed_out`，取消为 `cancelled`），已得到的回答照常交回工具。展示给用户的 `choices` 是工具的展示副本，首个选项带 `(Recommended)` 标记，回答原样回传即可，工具会还原成原始选项。
+
 同一 task 可以继续发送普通 working/tool/delta 事件，但一个 pending interaction 的 `interaction_id` 只对应一个等待。解析成功后，服务端再次发送 `TaskState.WORKING` metadata：
 
 ```json

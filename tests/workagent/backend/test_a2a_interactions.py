@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import pytest
 from a2a.client import ClientConfig, ClientFactory
 from a2a.types import (
+    GetTaskRequest,
     Message,
     Part,
     Role,
     SendMessageConfiguration,
     SendMessageRequest,
+    TaskState,
 )
 
 from tools.approval import (
@@ -52,12 +55,16 @@ class _ClarifyAgent:
 
     def run_conversation(self, *args, **kwargs):
         del args, kwargs
-        self.answer = self.clarify_callback(
-            "Which targets should be checked?",
-            ["linux", "windows", "macos"],
-            multi_select=True,
-        )
-        return {"final_response": f"clarify:{self.answer}"}
+        from tools.clarify_tool import clarify_tool
+
+        # Through the real clarify tool: its callback contract is a question batch in, answers out.
+        result = json.loads(clarify_tool(
+            [{"question": "Which targets should be checked?", "choices": ["linux", "windows", "macos"],
+              "multi_select": True}],
+            callback=self.clarify_callback,
+        ))
+        self.answer = result["responses"][0]["user_response"]
+        return {"final_response": f"clarify:{json.dumps(self.answer)}"}
 
 
 async def _start_request(client, text: str):
@@ -172,6 +179,8 @@ async def test_workagent_a2a_clarify_accepts_multi_select_json_answer():
         record = next(iter(app.state.a2a_executor.interactions._records.values()))
         assert record.kind == "clarify"
         assert record.payload["multi_select"] is True
+        assert record.payload["question"] == "Which targets should be checked?"
+        assert record.payload["choices"] == ["linux (Recommended)", "windows", "macos"]
 
         mismatch = await http_client.post(
             "/a2a/hermes/interaction/respond",
@@ -197,6 +206,12 @@ async def test_workagent_a2a_clarify_accepts_multi_select_json_answer():
         )
         assert response.status_code == 200
         await asyncio.wait_for(send_task, timeout=3)
+        for _ in range(100):
+            task = await client.get_task(GetTaskRequest(id=record.task_id))
+            if task.status.state == TaskState.TASK_STATE_COMPLETED:
+                break
+            await asyncio.sleep(0.01)
+        assert task.status.message.parts[0].text == 'clarify:["linux", "macos"]'
         await client.close()
 
 

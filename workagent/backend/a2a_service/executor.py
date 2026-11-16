@@ -397,47 +397,7 @@ class HermesA2AExecutor(AgentExecutor):
             )
             _schedule_interaction(metadata)
 
-        def _clarify_callback(
-            question: str,
-            choices: list[str] | None = None,
-            multi_select: bool = False,
-        ) -> str:
-            interaction_id = f"clarify_{uuid.uuid4().hex}"
-            normalized_choices = [
-                str(choice).strip() for choice in (choices or []) if str(choice).strip()
-            ]
-            metadata = {
-                "kind": "clarify_request",
-                "interaction_id": interaction_id,
-                "task_id": task.id,
-                "context_id": task.context_id,
-                "question": str(question or ""),
-                "choices": normalized_choices or None,
-                "multi_select": bool(multi_select),
-            }
-            clarify_gateway.register(
-                interaction_id,
-                agent_session_id,
-                str(question or ""),
-                normalized_choices or None,
-                multi_select=bool(multi_select),
-            )
-            self.interactions.register(
-                interaction_id=interaction_id,
-                task_id=task.id,
-                context_id=task.context_id,
-                session_key=agent_session_id,
-                kind="clarify",
-                payload=metadata,
-                resolver=lambda answer: clarify_gateway.resolve_gateway_clarify(
-                    interaction_id, answer
-                ),
-            )
-            _schedule_interaction(metadata)
-            return_value = clarify_gateway.wait_for_response(
-                interaction_id, clarify_gateway.get_clarify_timeout()
-            )
-            return str(return_value or "")
+        _clarify_callback = self._clarify_callback(task, agent_session_id, _schedule_interaction)
 
         register_gateway_notify(agent_session_id, _approval_notify)
         if self._enable_streaming:
@@ -531,6 +491,54 @@ class HermesA2AExecutor(AgentExecutor):
             await updater.requires_input(response_message)
         else:
             await updater.complete(response_message)
+
+    def _clarify_callback(self, task, session_key: str, publish):
+        """``clarify_tool``'s callback for this task: ``questions`` in, ``{"answers", "outcome"}`` out.
+
+        The interaction wire protocol carries one question, so each becomes its own
+        ``clarify_request``, in order, and the first one left unanswered ends the batch, as the
+        messaging gateway does; a skip answers ``None``.
+        """
+        def ask(question: str, choices, multi_select: bool):
+            interaction_id = f"clarify_{uuid.uuid4().hex}"
+            normalized_choices = [str(choice).strip() for choice in (choices or []) if str(choice).strip()]
+            metadata = {
+                "kind": "clarify_request",
+                "interaction_id": interaction_id,
+                "task_id": task.id,
+                "context_id": task.context_id,
+                "question": str(question or ""),
+                "choices": normalized_choices or None,
+                "multi_select": bool(multi_select),
+            }
+            clarify_gateway.register(
+                interaction_id, session_key, str(question or ""), normalized_choices or None,
+                multi_select=bool(multi_select),
+            )
+            self.interactions.register(
+                interaction_id=interaction_id,
+                task_id=task.id,
+                context_id=task.context_id,
+                session_key=session_key,
+                kind="clarify",
+                payload=metadata,
+                resolver=lambda answer: clarify_gateway.resolve_gateway_clarify(interaction_id, answer),
+            )
+            publish(metadata)
+            return clarify_gateway.wait_for_response(interaction_id, clarify_gateway.get_clarify_timeout())
+
+        def callback(questions) -> dict:
+            answers: dict[str, object] = {}
+            for entry in questions:
+                raw = ask(entry["question"], entry.get("choices"), bool(entry.get("multi_select")))
+                if raw == clarify_gateway.CANCELLED:
+                    return {"answers": answers, "outcome": "cancelled"}
+                if raw is None:
+                    return {"answers": answers, "outcome": "timed_out"}
+                answers[entry["qid"]] = None if raw == clarify_gateway.SKIPPED else (str(raw).strip() or None)
+            return {"answers": answers, "outcome": "submitted"}
+
+        return callback
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         task = context.current_task
