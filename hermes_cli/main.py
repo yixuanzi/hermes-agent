@@ -258,13 +258,12 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-
 from hermes_cli.subcommands.cron import build_cron_parser
 from hermes_cli.subcommands.gateway import build_gateway_parser
 from hermes_cli.subcommands.profile import build_profile_parser
 from hermes_cli.subcommands.model import build_model_parser
 from hermes_cli.subcommands.setup import build_setup_parser
-
+from hermes_cli.subcommands.products import PRODUCT_COMMANDS, build_product_parsers, cmd_aegis, cmd_aisoc, cmd_workagent
 from hermes_cli.subcommands.whatsapp import build_whatsapp_parser, build_whatsapp_cloud_parser
 from hermes_cli.subcommands.slack import build_slack_parser
 from hermes_cli.subcommands.login import build_login_parser
@@ -2579,7 +2578,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "usage", "vault",
         "webhook", "whatsapp", "whatsapp-cloud", "worktree", "chat", "secrets", "security",
         "browser",
-        "verify",
+        "verify", *PRODUCT_COMMANDS,
         # Plugin commands missing from top-level --help is an accepted trade-off.
         "help",
     }
@@ -3169,6 +3168,7 @@ def _build_cli_parser():
     build_config_parser(subparsers, cmd_config=cmd_config)
     build_skin_parser(subparsers, cmd_skin=cmd_skin)
     build_console_parser(subparsers, cmd_console=cmd_console)
+    build_product_parsers(subparsers, commands={"aegis": cmd_aegis, "aisoc": cmd_aisoc, "workagent": cmd_workagent})
     build_pairing_parser(subparsers, cmd_pairing=cmd_pairing)
     build_skills_parser(subparsers, cmd_skills=cmd_skills)
     build_bundles_parser(subparsers)

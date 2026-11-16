@@ -109,6 +109,9 @@ The install also ships `hermes-agent`, a minimal runner that sends one query and
 | `hermes serve` | Start the Hermes backend server (headless; powers the desktop app and remote backends). |
 | `hermes webapp` | Open the Desktop workspace in a browser, served by the gateway. |
 | `hermes desktop` (alias `gui`) | Build and launch the native Electron desktop app. |
+| `hermes aegis` | Aegis fork: start the Aegis web console (agent orchestration and routing policy; default port 9130). |
+| `hermes aisoc` | Aegis fork: start the AISOC console (`--module server\|a2a\|extcli`; default port 9120). |
+| `hermes workagent` | Aegis fork: start the WorkAgent console or its A2A service (`--module server\|a2a\|extcli`). |
 | `hermes profile` | Manage profiles — multiple isolated Hermes instances. |
 | `hermes completion` | Print shell completion scripts (bash/zsh/fish). |
 | `hermes --version` | Show version information. |
