@@ -71,6 +71,17 @@ class GatewayInboundHooksMixin:
         from gateway.run_inbound_consumer import run_post_admission_hook
         return await run_post_admission_hook(self, event, source, session_key)
 
+    def _hm_hook_session_key(self, source: SessionSource) -> str:
+        """The route key this message's session uses, for ``pre_gateway_dispatch`` plugins: a plugin
+        command that must find its session (ext-tools ``/codex``) runs before the turn binds
+        ``HERMES_SESSION_KEY``. ``""`` when this runner cannot derive one (bare test runners)."""
+        if getattr(self, "session_store", None) is None:
+            return ""
+        try:
+            return self._session_key_for_source(source)
+        except AttributeError:
+            return ""
+
     async def _hm_pre_gateway_dispatch_hook(
         self, event: MessageEvent, source: SessionSource
     ) -> Optional[MessageEvent]:
@@ -92,6 +103,7 @@ class GatewayInboundHooksMixin:
                 "pre_gateway_dispatch", event=event, gateway=self,
                 # getattr: bare-runner tests build GatewayRunner via object.__new__ without __init__.
                 session_store=getattr(self, "session_store", None),
+                session_key=self._hm_hook_session_key(source),
             )
         except Exception as _hook_exc:  # health: allow BLE001 -- moved unchanged from run_inbound.py (main has the same handler): a plugin hook must never stop dispatch
             logger.warning("pre_gateway_dispatch invocation failed: %s", _hook_exc)

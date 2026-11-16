@@ -287,14 +287,23 @@ class FakeRunner:
     def __init__(self, session_id):
         self.session_store = SimpleNamespace(peek_session_id=lambda key: session_id)
 
-    def _session_key_for_source(self, source):
-        return f"agent:main:feishu:group:{source.chat_id}"
+
+def _gateway_key(source) -> str:
+    return f"agent:main:feishu:group:{source.chat_id}"
+
+
+def _dispatch(event, runner) -> None:
+    """Deliver the pre_gateway_dispatch payload the gateway sends for this message."""
+    codex_cmd.on_pre_gateway_dispatch(
+        event=event, gateway=runner, session_store=runner.session_store,
+        session_key=_gateway_key(event.source) if hasattr(event.source, "chat_id") else "",
+    )
 
 
 def _gateway_command(runner, raw_args, *, uid="ou_admin", chat="oc_1"):
     source = SimpleNamespace(platform=SimpleNamespace(value="feishu"), user_id=uid, chat_id=chat)
     event = SimpleNamespace(get_command=lambda: "claude", source=source)
-    codex_cmd.on_pre_gateway_dispatch(event=event, gateway=runner)
+    _dispatch(event, runner)
     token = set_current_user_env_identity("feishu", uid, "name")
     try:
         result = claude_cmd.claude_command(raw_args)
@@ -346,9 +355,7 @@ def test_on_inside_event_loop_starts_off_loop(monkeypatch):
 
     async def _gateway_turn():
         source = SimpleNamespace(platform=SimpleNamespace(value="feishu"), user_id="ou_admin", chat_id="oc_1")
-        codex_cmd.on_pre_gateway_dispatch(
-            event=SimpleNamespace(get_command=lambda: "claude", source=source), gateway=runner,
-        )
+        _dispatch(SimpleNamespace(get_command=lambda: "claude", source=source), runner)
         token = set_current_user_env_identity("feishu", "ou_admin", "name")
         try:
             result = claude_cmd.claude_command("on")

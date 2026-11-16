@@ -121,6 +121,33 @@ async def test_hook_fires_without_session_store_attribute(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_hook_receives_the_route_key_of_the_message_session(monkeypatch):
+    """Plugins get the session key the gateway routes this message to.
+
+    Plugin slash commands run before the turn binds HERMES_SESSION_KEY, so a command that must
+    find its session (ext-tools /codex) reads the key captured from this hook.
+    """
+    _clear_auth_env(monkeypatch)
+    seen = {}
+
+    async def _fake_hook(name, **kwargs):
+        if name == "pre_gateway_dispatch":
+            seen["session_key"] = kwargs.get("session_key", "MISSING")
+            return [{"action": "skip", "reason": "plugin-handled"}]
+        return []
+
+    monkeypatch.setattr("hermes_cli.plugins.ainvoke_hook", _fake_hook)
+    runner, _adapter = _make_runner(Platform.WHATSAPP)
+    event = _make_event("hi")
+    runner.session_store._generate_session_key = lambda source: f"agent:main:whatsapp:dm:{source.chat_id}"
+
+    await runner._handle_message(event)
+
+    assert seen == {"session_key": runner._session_key_for_source(event.source)}
+    assert seen["session_key"] == "agent:main:whatsapp:dm:15551234567@s.whatsapp.net"
+
+
+@pytest.mark.asyncio
 async def test_async_hook_callback_is_awaited_on_the_gateway_loop(monkeypatch):
     """An ``async def`` pre_gateway_dispatch callback is awaited on the gateway's own loop.
 

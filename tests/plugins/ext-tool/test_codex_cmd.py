@@ -332,14 +332,23 @@ class FakeRunner:
     def __init__(self, session_id):
         self.session_store = SimpleNamespace(peek_session_id=lambda key: session_id)
 
-    def _session_key_for_source(self, source):
-        return f"agent:main:feishu:group:{source.chat_id}"
+
+def _gateway_key(source) -> str:
+    return f"agent:main:feishu:group:{source.chat_id}"
+
+
+def _dispatch(event, runner) -> None:
+    """Deliver the pre_gateway_dispatch payload the gateway sends for this message."""
+    codex_cmd.on_pre_gateway_dispatch(
+        event=event, gateway=runner, session_store=runner.session_store,
+        session_key=_gateway_key(event.source) if hasattr(event.source, "chat_id") else "",
+    )
 
 
 def _gateway_command(runner, raw_args, *, uid="ou_admin", chat="oc_1"):
     source = SimpleNamespace(platform=SimpleNamespace(value="feishu"), user_id=uid, chat_id=chat)
     event = SimpleNamespace(get_command=lambda: "codex", source=source)
-    codex_cmd.on_pre_gateway_dispatch(event=event, gateway=runner)
+    _dispatch(event, runner)
     token = set_current_user_env_identity("feishu", uid, "name")
     try:
         return codex_cmd.codex_command(raw_args)
@@ -415,7 +424,7 @@ def test_gateway_capture_must_match_caller(monkeypatch):
     monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(None))
     source = SimpleNamespace(platform=SimpleNamespace(value="feishu"), user_id="ou_a", chat_id="oc_1")
     event = SimpleNamespace(get_command=lambda: "codex", source=source)
-    codex_cmd.on_pre_gateway_dispatch(event=event, gateway=FakeRunner("sess-gw"))
+    _dispatch(event, FakeRunner("sess-gw"))
     token = set_current_user_env_identity("feishu", "ou_b", "b")
     try:
         assert codex_cmd.codex_command("on").startswith("❌")
@@ -426,7 +435,7 @@ def test_gateway_capture_must_match_caller(monkeypatch):
 
 def test_gateway_hook_only_captures_codex_messages():
     event = SimpleNamespace(get_command=lambda: "status", source=object())
-    codex_cmd.on_pre_gateway_dispatch(event=event, gateway=FakeRunner("s"))
+    _dispatch(event, FakeRunner("s"))
     assert codex_cmd._gateway_dispatch.get() is None
 
 

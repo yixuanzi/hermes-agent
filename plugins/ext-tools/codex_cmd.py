@@ -247,8 +247,8 @@ _modes_by_sid: dict[str, CodexMode] = {}
 # gateway 首条消息前会话还没建：先按 gateway session_key 挂起，首轮再绑定 session_id
 _pending_by_gateway_key: dict[str, CodexMode] = {}
 
-# pre_gateway_dispatch 捕获的 (runner 弱引用, source)。只在 /codex 消息上设置，
-# 同一 _handle_message 协程里随后的插件命令分发读取。
+# pre_gateway_dispatch 捕获的 (session_store, source, session_key)。只在 /codex 消息上设置，
+# 同一 _handle_message 协程里随后的插件命令分发读取（插件命令先于回合绑定 HERMES_SESSION_KEY）。
 _gateway_dispatch: contextvars.ContextVar = contextvars.ContextVar(
     "ext_codex_gateway_dispatch", default=None
 )
@@ -335,10 +335,9 @@ def _gateway_scope() -> Optional[_Scope]:
     captured = _gateway_dispatch.get()
     if not captured:
         return None
-    runner_ref, source = captured
-    runner = runner_ref()
+    store, source, session_key = captured
     identity = _current_identity()
-    if runner is None or source is None or identity is None:
+    if not session_key or source is None or identity is None:
         return None
     platform = source.platform.value if getattr(source, "platform", None) else ""
     # 防串：捕获的 source 必须就是 gateway 为本次插件命令绑定的调用者
@@ -348,8 +347,6 @@ def _gateway_scope() -> Optional[_Scope]:
     ):
         return None
     try:
-        session_key = runner._session_key_for_source(source)
-        store = getattr(runner, "session_store", None)
         session_id = store.peek_session_id(session_key) if store is not None else None
     except Exception:
         logger.warning("/codex: gateway session lookup failed", exc_info=True)
@@ -371,8 +368,7 @@ def ensure_gateway_session(scope: _Scope) -> _Scope:
     if scope.surface != "gateway" or scope.session_id:
         return scope
     captured = _gateway_dispatch.get()
-    runner = captured[0]() if captured else None
-    store = getattr(runner, "session_store", None)
+    store = captured[0] if captured else None
     if store is None:
         return scope
     try:
@@ -589,8 +585,8 @@ def on_pre_llm_call(session_id="", platform="", sender_id="", parent_session_id=
     return
 
 
-def on_pre_gateway_dispatch(event=None, gateway=None, **_):
-    """只为 /codex、/claude 消息捕获 (runner, source)，供随后的插件命令识别会话。不影响分发。
+def on_pre_gateway_dispatch(event=None, gateway=None, session_store=None, session_key="", **_):
+    """只为 /codex、/claude 消息捕获 (session_store, source, session_key)，供随后的插件命令识别会话。不影响分发。
 
     也在这里给 runner 装上入站消息原文的记录（见 raw_prompt）。"""
     if event is None or gateway is None:
@@ -601,7 +597,7 @@ def on_pre_gateway_dispatch(event=None, gateway=None, **_):
     except Exception:
         return
     if command in SESSION_COMMANDS:
-        _gateway_dispatch.set((weakref.ref(gateway), event.source))
+        _gateway_dispatch.set((session_store, event.source, session_key))
     return
 
 

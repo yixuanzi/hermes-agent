@@ -397,7 +397,7 @@ def register(ctx):
 | `on_skill_lifecycle` | 观察者 | 权威 skill 使用状态变更后；忽略返回值。 | `action`, `skill_name`, `provenance`, `task_id`, `session_id`, `use_count`, `reused`, `reuse_after_patch` | 暴露本地 skill 名和 provenance。 |
 | `subagent_start` | 观察者 | 子 agent 已构造、即将运行；忽略返回值。 | `parent_session_id`, `parent_turn_id`, `parent_subagent_id`, `child_session_id`, `child_subagent_id`, `child_role`, `child_goal` | Child goal 可能含用户/项目内容。 |
 | `subagent_stop` | 观察者 | 子 agent 退出；忽略返回值。 | `parent_session_id`, `parent_turn_id`, `child_session_id`, `child_role`, `child_summary`, `child_status`, `tool_call_history`, `duration_ms` | Summary 和已脱敏 tool-history metadata 仍可能暴露项目结构。 |
-| `pre_gateway_dispatch` | 指令/控制 | 非 internal 入站消息在 auth/pairing/dispatch 前；第一个有效 `skip`、`rewrite` 或 `allow` 控制流程。 | `event`, `gateway`, `session_store` | 极高权限的进程内对象会暴露入站用户/routing 数据和 host handle。 |
+| `pre_gateway_dispatch` | 指令/控制 | 非 internal 入站消息在 auth/pairing/dispatch 前；第一个有效 `skip`、`rewrite` 或 `allow` 控制流程。 | `event`, `gateway`, `session_store`, `session_key` | 极高权限的进程内对象会暴露入站用户/routing 数据和 host handle。 |
 | `pre_approval_request` | 观察者 | Prompted 或 smart approval 前；忽略返回值。 | `command`, `description`, `pattern_key`, `pattern_keys`, `session_key`, `surface`, `turn_id`, `tool_call_id` | 命令可能含 secret；smart observer preparation 会强制脱敏，但各 surface 并非完全相同。 |
 | `post_approval_response` | 观察者 | 决策、timeout 或 gateway 通知失败后；忽略返回值。 | `command`, `description`, `pattern_key`, `pattern_keys`, `session_key`, `surface`, `turn_id`, `tool_call_id`, `choice`；smart 路径可增加 `decided_by` | 同样的命令敏感性，加决策 metadata。 |
 | `kanban_task_claimed` | 观察者 | Claim commit 后，在 dispatcher 进程 spawn worker 前；忽略返回值。 | `task_id`, `profile_name`, `board`, `assignee`, `run_id` | Board/task/profile/assignee 标识。 |
@@ -888,6 +888,7 @@ def my_callback(event, gateway, session_store, **kwargs):
 | `event` | `MessageEvent` | 标准化的入站消息（包含 `.text`、`.source`、`.message_id`、`.internal` 等）。 |
 | `gateway` | `GatewayRunner` | 活跃的 gateway 运行器，插件可调用 `gateway.adapters[platform].send(...)` 进行旁路回复（所有者通知等）。 |
 | `session_store` | `SessionStore` | 用于通过 `session_store.append_to_transcript(...)` 静默摄入转录。 |
+| `session_key` | `str` | 该消息所属会话的路由 key（runner 无法推导时为 `""`）。插件斜杠命令在回合绑定 `HERMES_SESSION_KEY` 之前运行，需要找到自身会话的命令可读取这里捕获的 key。 |
 
 **触发位置：** `gateway/run.py` 中的 `GatewayRunner._handle_message()` 内，`is_internal` 计算后立即触发。**内部事件完全跳过此 hook**（它们是系统生成的——后台进程完成等——不得被面向用户的策略拦截）。
 
