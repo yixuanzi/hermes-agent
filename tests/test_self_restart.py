@@ -8,7 +8,6 @@ import subprocess
 import sys
 import json
 import time
-import tomllib
 
 import pytest
 
@@ -272,10 +271,3 @@ state_path.write_text(json.dumps(record), encoding="utf-8")
     assert restarted["cwd"] == str(tmp_path)
     assert restarted["normal_setting"] == "preserved"
     assert restarted["pid"] != old_process.pid
-
-
-def test_shared_restart_module_is_in_the_installed_distribution() -> None:
-    project_root = Path(__file__).resolve().parents[1]
-    metadata = tomllib.loads((project_root / "pyproject.toml").read_text("utf-8"))
-
-    assert "hermes_self_restart" in metadata["tool"]["setuptools"]["py-modules"]

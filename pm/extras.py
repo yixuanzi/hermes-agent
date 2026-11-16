@@ -39,6 +39,7 @@ ANCHORS: dict[str, str | tuple[str, ...]] = {
     "wake-sherpa": "sherpa_onnx",
     "wake-porcupine": "pvporcupine",
     "fal": "fal_client",
+    "a2a": ("a2a.client", "a2a.types"),
     "messaging": "telegram",
     "telegram": "telegram",
     "discord": "discord",
