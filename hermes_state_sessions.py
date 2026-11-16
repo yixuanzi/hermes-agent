@@ -24,6 +24,7 @@ from hermes_state_common import (
     _source_match_clause, emit_session_deleted, launch_stub_filter_sql,
 )
 from hermes_state_compression import _CHAIN_CAP, _UNSET_CREATED_SQL
+from hermes_state_owner import owner_clause, owner_filter
 
 # caplog tests pin the "hermes_state" logger name.
 logger = logging.getLogger("hermes_state")
@@ -116,7 +117,7 @@ def _session_filter_where(
     session_key: str | None = None, exclude_sources: list[str] | None = None, cwd_prefix: str | None = None,
     min_message_count: int = 0, archived_only: bool = False, include_archived: bool = False,
     include_subagents: bool = False, local_created_sources: Sequence[str] | None = None,
-    workspace_key: str | None = None,
+    workspace_key: str | None = None, owner: tuple[str, bool] | None = None,
 ) -> tuple[list[str], list[Any]]:
     """Shared ``sessions s`` WHERE builder so counts line up with listed rows. ``exclude_children``
     hides sub-agent runs and compression continuations but keeps branch/reset children
@@ -144,6 +145,7 @@ def _session_filter_where(
         (f"s.source NOT IN ({_session_ids_placeholders(exclude_sources or ())})", exclude_sources or []),
         (_cwd_prefix_clause(cwd_prefix) if cwd_prefix else ("", [])),
         (_workspace_key_clause(workspace_key) if workspace_key else ("", [])),
+        (owner_clause(owner) if owner else ("", [])),
         ("s.message_count >= ?", [min_message_count] if min_message_count > 0 else []),
     ):
         if values:
@@ -1314,7 +1316,7 @@ class SessionSessionsMixin:
         id_query: str | None = None, search_query: str | None = None, compact_rows: bool = False,
         include_pinned: bool = False, session_key: str | None = None, include_hidden: bool = False,
         include_subagents: bool = False, local_created_sources: Sequence[str] | None = None,
-        workspace_key: str | None = None,
+        workspace_key: str | None = None, user_id: str | None = None, include_ownerless: bool = True,
     ) -> list[dict[str, Any]]:
         """List sessions with preview and ``last_active`` in one query. ``order_by_last_active`` sorts
         by the chain TIP via a recursive CTE (the only path honouring ``id_query`` / ``search_query``);
@@ -1330,7 +1332,7 @@ class SessionSessionsMixin:
             exclude_children=not include_children, source=source, sources=sources, session_key=session_key,
             exclude_sources=exclude_sources, cwd_prefix=cwd_prefix, min_message_count=min_message_count,
             archived_only=archived_only, include_archived=include_archived, include_subagents=include_subagents,
-            local_created_sources=local_created_sources, workspace_key=workspace_key,
+            local_created_sources=local_created_sources, workspace_key=workspace_key, owner=owner_filter(user_id, include_ownerless),
         )
         # The archived-only view is the recovery surface for rows that dropped out of every
         # default list: a session that is archived AND hidden (Bot Mode marks its sessions
@@ -1439,7 +1441,7 @@ class SessionSessionsMixin:
                 session_key=session_key, exclude_sources=exclude_sources, cwd_prefix=cwd_prefix,
                 min_message_count=min_message_count, archived_only=False, include_archived=True,
                 include_subagents=include_subagents, local_created_sources=local_created_sources,
-                workspace_key=workspace_key,
+                workspace_key=workspace_key, owner=owner_filter(user_id, include_ownerless),
             )
             if not include_hidden and not archived_only:
                 pinned_clauses.append("s.hidden = 0")
@@ -1583,14 +1585,14 @@ class SessionSessionsMixin:
         self, source: str | None = None, sources: list[str] | None = None, cwd_prefix: str | None = None,
         min_message_count: int = 0, include_archived: bool = False, archived_only: bool = False,
         exclude_children: bool = False, exclude_sources: list[str] | None = None, include_subagents: bool = False,
-        local_created_sources: Sequence[str] | None = None,
+        local_created_sources: Sequence[str] | None = None, user_id: str | None = None, include_ownerless: bool = True,
     ) -> int:
         """Count sessions with list_sessions_rich's filters so a paired "load more" total matches."""
         where_clauses, params = _session_filter_where(
             exclude_children=exclude_children, source=source, sources=sources,
             exclude_sources=exclude_sources, cwd_prefix=cwd_prefix, min_message_count=min_message_count,
             archived_only=archived_only, include_archived=include_archived, include_subagents=include_subagents,
-            local_created_sources=local_created_sources,
+            local_created_sources=local_created_sources, owner=owner_filter(user_id, include_ownerless),
         )
         if exclude_children:
             from hermes_state_local import exclude_superseded_segments
