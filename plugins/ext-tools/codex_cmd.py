@@ -69,10 +69,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-
-import raw_prompt
-import tool_record
+from . import raw_prompt, tool_record
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +211,8 @@ SESSION_COMMANDS = frozenset({"codex", "claude"})
 # 首次切到 codex 前的宿主运行时快照，挂在 agent 实例上；off 时据此恢复。
 _HOST_ATTR = "_ext_codex_host"
 _MISSING = object()
+# register() 收到的 PluginContext：CLI 下识别当前会话（session_surface / session_id）
+_plugin_ctx: Any = None
 
 
 @dataclass
@@ -388,17 +387,11 @@ def ensure_gateway_session(scope: _Scope) -> _Scope:
 
 
 def _cli_scope() -> Optional[_Scope]:
-    try:
-        from hermes_cli.plugins import get_plugin_manager
-
-        cli = getattr(get_plugin_manager(), "_cli_ref", None)
-    except Exception:
+    ctx = _plugin_ctx
+    if ctx is None or ctx.session_surface() != "cli":
         return None
-    if cli is None:
-        return None
-    agent = getattr(cli, "agent", None)
-    sid = getattr(agent, "session_id", None) or getattr(cli, "session_id", None)
-    return _Scope("cli", str(sid)) if sid else None
+    sid = ctx.session_id()
+    return _Scope("cli", sid) if sid else None
 
 
 def _tui_scope() -> tuple[Optional[_Scope], str]:
@@ -469,50 +462,6 @@ def _owner_matches(mode: CodexMode, platform: str, sender_id: str) -> bool:
 
 
 # -------------------------------------------------------- agent 运行时切换 ----
-def _publish_aux_runtime(agent: Any, api_mode: str) -> None:
-    """按宿主 api_mode 重新发布本轮辅助调用的主运行时（turn_context 在切换前已发布过一次）。"""
-    try:
-        from agent.auxiliary_client import set_runtime_main
-
-        set_runtime_main(
-            getattr(agent, "provider", "") or "",
-            getattr(agent, "model", "") or "",
-            requested_provider=getattr(agent, "requested_provider", "") or "",
-            base_url=getattr(agent, "base_url", "") or "",
-            api_key=getattr(agent, "api_key", "") or "",
-            api_mode=api_mode or "",
-            auth_mode=getattr(agent, "auth_mode", "") or "",
-            session_id=getattr(agent, "session_id", "") or "",
-        )
-    except Exception:
-        logger.debug("/codex: aux runtime publish failed", exc_info=True)
-
-
-def _pin_host_main_runtime(agent: Any) -> None:
-    """让 agent._current_main_runtime() 报告宿主 api_mode。
-
-    后台 review fork 与压缩可行性检查从这里取运行时；core 对 codex_app_server 的
-    处理是降级成 codex_responses（原生 runtime 只服务 openai-codex），会把
-    chat_completions / anthropic_messages 宿主 provider 路由到错误协议。
-    """
-    class_impl = getattr(type(agent), "_current_main_runtime", None)
-    if not callable(class_impl):
-        return
-    agent_ref = weakref.ref(agent)
-
-    def _current_main_runtime():
-        target = agent_ref()
-        if target is None:
-            return {}
-        runtime = class_impl(target)
-        host = target.__dict__.get(_HOST_ATTR)
-        if host and runtime.get("api_mode") == CODEX_API_MODE:
-            runtime["api_mode"] = host["api_mode"]
-        return runtime
-
-    agent.__dict__["_current_main_runtime"] = _current_main_runtime
-
-
 def _close_codex_session(agent: Any) -> None:
     session = getattr(agent, "_codex_session", None)
     if session is None:
@@ -532,21 +481,18 @@ def _effective_cwd(agent: Any) -> str:
 
 
 def enter_codex(agent: Any, mode: CodexMode) -> bool:
-    """把 agent 切到 codex_app_server。返回 False 表示已是全局 codex runtime，未接管。"""
+    """把 agent 切到会话后端的线程。返回 False 表示已是全局 codex runtime，未接管。
+
+    api_mode 的切换与宿主运行时保真（辅助调用、后台 review、压缩可行性检查仍按宿主 api_mode
+    路由）由 core 的 agent.codex_owner_runtime 负责；本插件只记 session_cwd 快照。"""
+    from agent.codex_owner_runtime import enter_owner_codex_runtime
+
     host = agent.__dict__.get(_HOST_ATTR)
-    current = getattr(agent, "api_mode", "") or ""
     if host is None:
-        if current == CODEX_API_MODE:
+        if (getattr(agent, "api_mode", "") or "") == CODEX_API_MODE:
             return False
-        host = {
-            "api_mode": current,
-            "session_cwd": agent.__dict__.get("session_cwd", _MISSING),
-        }
+        host = {"session_cwd": agent.__dict__.get("session_cwd", _MISSING)}
         agent.__dict__[_HOST_ATTR] = host
-        _pin_host_main_runtime(agent)
-    elif current != CODEX_API_MODE:
-        # 期间宿主运行时被 /model 等改过，以最新值为准
-        host["api_mode"] = current
 
     if mode.cwd:
         agent.session_cwd = mode.cwd
@@ -555,9 +501,7 @@ def enter_codex(agent: Any, mode: CodexMode) -> bool:
     else:
         agent.session_cwd = host["session_cwd"]
     _bind_codex_session(agent, mode)
-
-    agent.api_mode = CODEX_API_MODE
-    _publish_aux_runtime(agent, host["api_mode"])
+    enter_owner_codex_runtime(agent)
     return True
 
 
@@ -599,19 +543,18 @@ def _bind_codex_session(agent: Any, mode: CodexMode) -> None:
 
 def leave_codex(agent: Any, *, close_session: bool) -> bool:
     """恢复宿主运行时。返回 False 表示该 agent 未被本插件切换过。"""
+    from agent.codex_owner_runtime import leave_owner_codex_runtime
+
     host = agent.__dict__.pop(_HOST_ATTR, None)
     if host is None:
         return False
-    agent.__dict__.pop("_current_main_runtime", None)
-    if getattr(agent, "api_mode", None) == CODEX_API_MODE:
-        agent.api_mode = host["api_mode"]
     if host["session_cwd"] is _MISSING:
         agent.__dict__.pop("session_cwd", None)
     else:
         agent.session_cwd = host["session_cwd"]
     if close_session:
         _close_codex_session(agent)
-    _publish_aux_runtime(agent, getattr(agent, "api_mode", "") or "")
+    leave_owner_codex_runtime(agent)
     return True
 
 
@@ -699,6 +642,7 @@ def _help_text() -> str:
         "    • 再次 `on` 不带 cwd 时沿用上次指定的目录；更换目录会在下一轮重开 codex 线程\n"
         "  sandbox=read|network|full — 仅 `on` 可用，codex 线程的沙箱档位，默认 `network`\n"
         "    • `read`：只读沙箱，不能写文件，网络关闭；越出沙箱需审批\n"
+        # no-tmp: ok — describes codex's own sandbox (what codex lets its commands write), not a Hermes path
         "    • `network`（默认）：工作区可写（cwd、/tmp、$TMPDIR），网络开启；越出沙箱需审批\n"
         "    • `full`：⚠️ 无沙箱，任意命令、任意文件、网络均不受限，且从不请求审批\n"
         "    • 每次 `on` 不带 sandbox 时恢复默认 `network`；切换档位会重开 codex 线程\n"
@@ -792,7 +736,7 @@ def _policy_lines(policy: dict, scope: _Scope) -> list[str]:
     if sandbox == "workspaceWrite":
         writable = ["cwd"] + [f"`{root}`" for root in policy.get("writable_roots") or []]
         if policy.get("slash_tmp_writable"):
-            writable.append("/tmp")
+            writable.append("/tmp")  # no-tmp: ok — label for codex's reported writable /tmp, not a path we use
         if policy.get("tmpdir_writable"):
             writable.append("$TMPDIR")
         sandbox_text += f"（可写：{'、'.join(writable)}）"
@@ -1267,6 +1211,8 @@ def codex_command(raw_args: str = ""):
 
 
 def register(ctx):
+    global _plugin_ctx
+    _plugin_ctx = ctx
     ctx.register_command(
         name="codex",
         handler=codex_command,

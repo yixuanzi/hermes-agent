@@ -34,9 +34,8 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, ClassVar, Optional
 
-import codex_cmd
-import tool_record
-from claude_acp import (
+from . import codex_cmd, tool_record
+from .claude_acp import (
     ACP_COMMAND_ENV,
     BYPASS_MODE,
     DEFAULT_ACP_PACKAGE,
@@ -71,19 +70,11 @@ _BYPASS_WARNING = (
 
 
 def _session_hooks(agent: Any) -> dict:
-    """在 agent 线程上取显示桥、审批回调（CLI 按线程安装）与审批豁免状态，与 codex 运行时一致。"""
-    try:
-        from tools.terminal_tool import _get_approval_callback
+    """在 agent 线程上取显示桥、审批回调（CLI 按线程安装）与审批豁免状态：与 Hermes 自己的 codex 会话
+    同一套策略（无人能应答的入口不给回调、直接拒绝；仅显式审批豁免时自动批准）。"""
+    from agent.codex_runtime import owner_session_approval
 
-        approval_callback = _get_approval_callback()
-    except Exception:
-        approval_callback = None
-    try:
-        from tools.approval import is_approval_bypass_active
-
-        auto_approve = bool(is_approval_bypass_active())
-    except Exception:
-        auto_approve = False
+    approval_callback, auto_approve = owner_session_approval(agent)
     return {
         "on_event": ClaudeEventBridge(agent),
         "approval_callback": approval_callback,

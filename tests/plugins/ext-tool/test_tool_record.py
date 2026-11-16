@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "plugins" / "ext-tools"))
 
 import tool_record
 from agent.transports.codex_app_server_session import TurnResult

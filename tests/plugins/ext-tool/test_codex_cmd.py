@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "plugins" / "ext-tools"))
 
 import codex_cmd
 from agent.subagent_lifecycle import bind_subagent_parent
@@ -52,9 +51,14 @@ def _isolated(monkeypatch):
     codex_cmd._modes_by_sid.clear()
     codex_cmd._pending_by_gateway_key.clear()
     codex_cmd._gateway_dispatch.set(None)
+    # The api_mode auxiliary routing is republished with when an owner switches the agent.
+    from agent import codex_owner_runtime
+
     published = []
     monkeypatch.setattr(
-        codex_cmd, "_publish_aux_runtime", lambda agent, mode: published.append(mode)
+        codex_owner_runtime,
+        "_republish_main_runtime",
+        lambda agent: published.append(codex_owner_runtime.main_runtime_api_mode(agent)),
     )
     monkeypatch.setattr(codex_cmd, "_codex_binary", lambda: (True, "0.144.1"))
     monkeypatch.setattr(codex_cmd, "_rbac_role", lambda platform, uid: None)
@@ -91,13 +95,20 @@ def _isolated(monkeypatch):
 
 
 def _use_cli(monkeypatch, agent):
-    import hermes_cli.plugins as plugins_mod
-
     cli = SimpleNamespace(agent=agent, session_id=getattr(agent, "session_id", None))
-    monkeypatch.setattr(
-        plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=cli)
-    )
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(cli))
     return cli
+
+
+def _ctx_for(cli):
+    """A plugin context whose session lookup runs the real ``plugin_session`` helpers over ``cli``."""
+    from hermes_cli.plugin_session import context_session_id, context_surface
+
+    manager = SimpleNamespace(_cli_ref=cli)
+    return SimpleNamespace(
+        session_surface=lambda: context_surface(manager),
+        session_id=lambda: context_session_id(manager),
+    )
 
 
 def _turn(agent, **kwargs):
@@ -111,11 +122,7 @@ def test_help_unknown_and_bad_args():
 
 
 def test_no_args_shows_full_help_without_a_session(monkeypatch):
-    import hermes_cli.plugins as plugins_mod
-
-    monkeypatch.setattr(
-        plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None)
-    )
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(None))
     text = codex_cmd.codex_command("")
     assert text == codex_cmd.codex_command("help")
     for fragment in ("/codex on [cwd=DIR] [sandbox=read|network|full]", "/codex off",
@@ -129,11 +136,7 @@ def test_no_args_shows_full_help_without_a_session(monkeypatch):
 
 
 def test_without_session_fails_closed(monkeypatch):
-    import hermes_cli.plugins as plugins_mod
-
-    monkeypatch.setattr(
-        plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None)
-    )
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(None))
     assert codex_cmd.codex_command("on").startswith("❌")
     assert not codex_cmd._modes_by_sid
 
@@ -174,8 +177,10 @@ def test_turn_switches_to_codex_and_back(monkeypatch, tmp_path, _isolated):
     _turn(agent)
     assert agent.api_mode == "codex_app_server"
     assert agent.session_cwd == str(tmp_path.resolve())
-    # 辅助调用与 review fork 仍按宿主协议路由
-    assert agent._current_main_runtime()["api_mode"] == "codex_responses"
+    # 辅助调用与 review fork 仍按宿主协议路由（core: agent.codex_owner_runtime）
+    from agent.codex_owner_runtime import host_api_mode, main_runtime_api_mode
+
+    assert main_runtime_api_mode(agent) == "codex_responses"
     assert _isolated[-1] == "codex_responses"
     # 线程由插件在轮次边界创建（尚未 spawn），cwd 为会话指定目录
     session = agent._codex_session
@@ -192,7 +197,7 @@ def test_turn_switches_to_codex_and_back(monkeypatch, tmp_path, _isolated):
     _turn(agent)
     assert agent.api_mode == "codex_responses"
     assert "session_cwd" not in agent.__dict__
-    assert "_current_main_runtime" not in agent.__dict__
+    assert host_api_mode(agent) is None
     assert agent._codex_session is None
 
 
@@ -343,9 +348,7 @@ def _gateway_command(runner, raw_args, *, uid="ou_admin", chat="oc_1"):
 
 
 def test_gateway_owner_only_turns(monkeypatch):
-    import hermes_cli.plugins as plugins_mod
-
-    monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None))
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(None))
     runner = FakeRunner("sess-gw")
     assert "只有你的消息走 Codex" in _gateway_command(runner, "on")
     assert codex_cmd.get_mode("sess-gw").owner == ("feishu", "ou_admin")
@@ -364,9 +367,7 @@ def test_gateway_owner_only_turns(monkeypatch):
 
 
 def test_gateway_pending_session_binds_on_first_turn(monkeypatch):
-    import hermes_cli.plugins as plugins_mod
-
-    monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None))
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(None))
     _gateway_command(FakeRunner(None), "on")
     assert "agent:main:feishu:group:oc_1" in codex_cmd._pending_by_gateway_key
 
@@ -380,9 +381,7 @@ def test_gateway_pending_session_binds_on_first_turn(monkeypatch):
 
 def test_gateway_on_precreates_missing_session(monkeypatch):
     """首条消息 on 时会话未建：插件先建会话，模式直接绑 session_id，不再依赖按 key 挂起。"""
-    import hermes_cli.plugins as plugins_mod
-
-    monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None))
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(None))
     created = []
     runner = FakeRunner(None)
     runner.session_store.get_or_create_session = lambda source: (
@@ -400,9 +399,7 @@ def test_gateway_on_precreates_missing_session(monkeypatch):
 
 
 def test_gateway_requires_rbac_admin(monkeypatch):
-    import hermes_cli.plugins as plugins_mod
-
-    monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None))
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(None))
     monkeypatch.setattr(codex_cmd, "_rbac_role", lambda platform, uid: "user")
     assert "仅 admin" in _gateway_command(FakeRunner("sess-gw"), "on")
     assert codex_cmd.get_mode("sess-gw") is None
@@ -415,9 +412,7 @@ def test_gateway_requires_rbac_admin(monkeypatch):
 
 
 def test_gateway_capture_must_match_caller(monkeypatch):
-    import hermes_cli.plugins as plugins_mod
-
-    monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None))
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(None))
     source = SimpleNamespace(platform=SimpleNamespace(value="feishu"), user_id="ou_a", chat_id="oc_1")
     event = SimpleNamespace(get_command=lambda: "codex", source=source)
     codex_cmd.on_pre_gateway_dispatch(event=event, gateway=FakeRunner("sess-gw"))
@@ -437,9 +432,7 @@ def test_gateway_hook_only_captures_codex_messages():
 
 # ------------------------------------------------------------------ TUI ----
 def test_tui_single_session_only(monkeypatch):
-    import hermes_cli.plugins as plugins_mod
-
-    monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None))
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(None))
     sessions = {"sid1": {"agent": None, "session_key": "sess-tui"}}
     fake_server = SimpleNamespace(
         _sessions=sessions,
@@ -515,10 +508,9 @@ def test_on_inside_event_loop_starts_codex_off_loop(monkeypatch):
     import asyncio
     import threading
 
-    import hermes_cli.plugins as plugins_mod
     from agent.transports.codex_app_server_session import CodexAppServerSession
 
-    monkeypatch.setattr(plugins_mod, "get_plugin_manager", lambda: SimpleNamespace(_cli_ref=None))
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(None))
     start_threads = []
     original = CodexAppServerSession.ensure_started
 

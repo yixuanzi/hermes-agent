@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO / "plugins" / "ext-tools"))
 
 import userenv_cmd
 from tools.user_env_runtime import (
@@ -97,11 +96,7 @@ def test_register_commands():
     userenv_cmd.register(ctx)
     assert "userenv" in ctx.cmds
 
-    spec = importlib.util.spec_from_file_location(
-        "ext_tools_under_test", REPO / "plugins" / "ext-tools" / "__init__.py"
-    )
-    package = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(package)
+    package = sys.modules["hermes_plugins.ext_tools"]  # loaded as the plugin loader does (conftest)
     pkg_ctx = FakeCtx()
     package.register(pkg_ctx)
     assert "userenv" in pkg_ctx.cmds

@@ -1,37 +1,29 @@
-"""cron_prompt — 返回计划任务的全量 prompt（带 Owner 身份严格校验）。
+"""cron_prompt — 返回计划任务的全量 prompt（仅限调用者自己的任务与无主任务）。
 
 设计要点：
-  - 身份来源是 tools.user_env_runtime.get_current_user_env_identity()（由
-    tool_executor 在每次工具调用前绑定），不取自 LLM 提供的参数 —— 调用者
-    身份不可伪造。
-  - 校验规则（无任何角色豁免，admin 同样受检）：
-      * job 带 identify 字段 → 调用者 (platform, user_id) 必须与
-        identify 严格相等才返回 prompt；否则拒绝且不回显任何 prompt 片段。
-      * job 无 identify 字段 → 视为无主任务，直接返回。
-  - 复用 cron.jobs 的 resolve_job_ref 与 cron.jobs_identify 的 parse_job_identify /
-    is_job_visible_to_identity，与 cronjob 工具的可见性语义保持一致。
+  - 调用者身份是 tool_executor 在每次工具调用前绑定的平台用户（tools.cronjob_visibility
+    .caller_identity），不取自 LLM 提供的参数 —— 调用者身份不可伪造。
+  - 可见性与 cronjob 工具完全一致（tools.cronjob_visibility.resolve_caller_job）：无任何
+    角色豁免（admin 同样受检）；别人的任务、属主记录损坏的任务对调用者而言就是不存在，
+    既不回显 prompt 片段，也不透露任务是否存在、归谁所有；重名只在调用者自己的任务里判定。
 """
 
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-
-from cron.jobs import AmbiguousJobReference, resolve_job_ref
-from cron.jobs_identify import is_job_visible_to_identity, parse_job_identify
 
 
 def _current_identity():
     """当前调用者身份（ContextVar，由 tool_executor 绑定；LLM 无法伪造）。"""
-    try:
-        from tools.user_env_runtime import get_current_user_env_identity
+    from tools.cronjob_visibility import caller_identity
 
-        return get_current_user_env_identity()
-    except Exception:
-        return None
+    return caller_identity()
+
+
+def _resolve_job(ref: str):
+    from tools.cronjob_visibility import resolve_caller_job
+
+    return resolve_caller_job(ref)
 
 
 def _caller_label(identity) -> str:
@@ -40,62 +32,29 @@ def _caller_label(identity) -> str:
     return f"{identity.platform}:{identity.user_id}"
 
 
-def _owner_label(identify: dict) -> str:
+def _owner_label(job: dict):
+    identify = job.get("identify")
+    if not isinstance(identify, dict):
+        return None
     return f"{identify.get('platform', '?')}:{identify.get('user_id', '?')}"
 
 
+def _error(message: str) -> str:
+    return json.dumps({"success": False, "error": message}, ensure_ascii=False)
+
+
 def cron_prompt(job_id: str = "") -> str:
-    """按任务 ID 或名称取回计划任务的全量 prompt（先做 Owner 身份校验）。"""
+    """按任务 ID 或名称取回调用者可见的计划任务的全量 prompt。"""
     ref = str(job_id or "").strip()
     if not ref:
-        return json.dumps(
-            {"success": False, "error": "job_id is required (job ID or name)"},
-            ensure_ascii=False,
-        )
-
-    # 1. 定位任务（ID 优先，名称不区分大小写；重名抛 AmbiguousJobReference）
+        return _error("job_id is required (job ID or name)")
     try:
-        job = resolve_job_ref(ref)
-    except AmbiguousJobReference as exc:
-        return json.dumps(
-            {"success": False, "error": str(exc)}, ensure_ascii=False
-        )
+        # ID 优先，名称不区分大小写；只在调用者可见的任务里定位，重名抛 AmbiguousJobReference
+        job = _resolve_job(ref)
+    except LookupError as exc:
+        return _error(str(exc))
     if job is None:
-        return json.dumps(
-            {"success": False, "error": f"cron job not found: {ref}"},
-            ensure_ascii=False,
-        )
-
-    # 2. 身份校验（取回数据前完成；无任何角色豁免）
-    identity = _current_identity()
-    try:
-        identify = parse_job_identify(job.get("identify"))
-    except ValueError as exc:
-        # identify 字段存在但格式非法 —— 视为不可归属，fail-closed 拒绝
-        return json.dumps(
-            {
-                "success": False,
-                "error": f"job identify field is invalid: {exc}",
-                "job_id": job.get("id"),
-            },
-            ensure_ascii=False,
-        )
-
-    if identify is not None:
-        if not is_job_visible_to_identity(job, identity):
-            return json.dumps(
-                {
-                    "success": False,
-                    "error": "permission denied: caller is not the job owner",
-                    "job_id": job.get("id"),
-                    "owner": _owner_label(identify),
-                    "caller": _caller_label(identity),
-                },
-                ensure_ascii=False,
-            )
-    # identify 为 None（无身份字段）→ 直接放行
-
-    # 3. 返回全量 prompt + 元信息
+        return _error(f"cron job not found: {ref}")
     return json.dumps(
         {
             "success": True,
@@ -103,8 +62,8 @@ def cron_prompt(job_id: str = "") -> str:
             "name": job.get("name"),
             "schedule": job.get("schedule_display") or "?",
             "state": job.get("state"),
-            "owner": _owner_label(identify) if identify else None,
-            "caller": _caller_label(identity),
+            "owner": _owner_label(job),
+            "caller": _caller_label(_current_identity()),
             "prompt": job.get("prompt") or "",
         },
         ensure_ascii=False,
@@ -117,7 +76,7 @@ _SCHEMA = {
     "name": "cron_prompt",
     "description": (
         "按任务 ID 或名称返回计划任务（cron job）的全量 prompt。"
-        "仅任务 Owner 本人可读取（admin 亦不豁免）；任务无身份字段时直接返回。"
+        "仅能读取调用者自己的任务与无主任务（admin 亦不豁免）。"
     ),
     "parameters": {
         "type": "object",

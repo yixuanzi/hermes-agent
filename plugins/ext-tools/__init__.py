@@ -14,15 +14,10 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent))
-
-import claude_cmd as _claude_cmd
-import codex_cmd as _codex_cmd
-import cron_prompt as _cron_prompt
-import userenv_cmd as _userenv_cmd
+from . import claude_cmd as _claude_cmd
+from . import codex_cmd as _codex_cmd
+from . import cron_prompt as _cron_prompt
+from . import userenv_cmd as _userenv_cmd
 
 
 def register(ctx):

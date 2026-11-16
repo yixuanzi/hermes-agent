@@ -240,16 +240,17 @@ class AcpConnection:
     """
 
     def __init__(self, argv: list[str], *, cwd: str, env: dict[str, str]) -> None:
-        popen_kwargs: dict[str, Any] = {}
-        if os.name == "posix":
-            # npx → node → claude 及其后台任务整组回收
-            popen_kwargs["start_new_session"] = True
-        else:
-            from hermes_cli._subprocess_compat import windows_hide_flags
+        from hermes_cli.process_identity import spawn_owned
 
-            popen_kwargs["creationflags"] = windows_hide_flags()
-        self._proc = subprocess.Popen(
+        popen_kwargs: dict[str, Any] = {}
+        if os.name != "posix":
+            # 不弹控制台窗口；管道照常
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # POSIX 上 spawn_owned 让 npx → node → claude 及其后台任务自成一组，交给属主看护进程：
+        # Hermes 被 SIGKILL / OOM 时整组随之结束，不留孤儿
+        self._proc = spawn_owned(
             argv,
+            purpose="ext-tools claude-agent-acp",
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -362,14 +363,17 @@ class AcpConnection:
             try:
                 self._proc.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
-                self._signal_tree(signal.SIGKILL if os.name == "posix" else signal.SIGTERM)
-        # 主进程退出后，组内残留（Claude Code 的后台命令等）一并结束
+                self._signal_tree(getattr(signal, "SIGKILL", signal.SIGTERM))
+        # 主进程退出后，组内残留（Claude Code 的后台命令等）一并结束；组空了再交还看护
         self._signal_tree(signal.SIGTERM, group_only=True)
+        from hermes_cli.process_identity import release_process_group_once_empty
+
+        release_process_group_once_empty(self._proc.pid, proc=self._proc, timeout=0)
 
     def _signal_tree(self, sig: int, *, group_only: bool = False) -> None:
         if os.name == "posix":
             try:
-                os.killpg(self._proc.pid, sig)
+                os.killpg(self._proc.pid, sig)  # windows-footgun: ok — POSIX-only branch
             except (ProcessLookupError, PermissionError, OSError):
                 pass
         elif not group_only:

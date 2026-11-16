@@ -14,7 +14,6 @@ from unittest.mock import patch
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "plugins" / "ext-tools"))
 
 import claude_acp
 import claude_cmd
@@ -86,11 +85,19 @@ def fake_codex(monkeypatch):
 
 
 def _use_cli(monkeypatch, agent):
-    import hermes_cli.plugins as plugins_mod
-
     cli = SimpleNamespace(agent=agent, session_id=getattr(agent, "session_id", None))
-    # Only the CLI reference is faked: the real manager keeps serving the turn loop (held transforms, hooks).
-    monkeypatch.setattr(plugins_mod.get_plugin_manager(), "_cli_ref", cli, raising=False)
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(cli))
+
+
+def _ctx_for(cli):
+    """A plugin context whose session lookup runs the real ``plugin_session`` helpers over ``cli``."""
+    from hermes_cli.plugin_session import context_session_id, context_surface
+
+    manager = SimpleNamespace(_cli_ref=cli)
+    return SimpleNamespace(
+        session_surface=lambda: context_surface(manager),
+        session_id=lambda: context_session_id(manager),
+    )
 
 
 def _turn(agent, **kwargs):
@@ -104,9 +111,7 @@ def _session(sid="sess-cli") -> ClaudeAcpSession:
 
 # ------------------------------------------------------------ command ----
 def test_help_and_bad_args(monkeypatch):
-    import hermes_cli.plugins as plugins_mod
-
-    monkeypatch.setattr(plugins_mod.get_plugin_manager(), "_cli_ref", None, raising=False)
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(None))
     text = claude_cmd.claude_command("")
     assert text == claude_cmd.claude_command("help")
     for fragment in ("/claude on [cwd=DIR] [mode=default|acceptEdits|plan|auto|bypass]", "/claude off",
@@ -197,7 +202,9 @@ def test_turn_routes_to_claude_session_and_back(monkeypatch, tmp_path):
     assert agent.api_mode == "codex_app_server"
     assert agent._codex_session is prestarted  # 第一轮直接复用 on 时启动的会话
     assert agent.session_cwd == str(tmp_path.resolve())
-    assert agent._current_main_runtime()["api_mode"] == "chat_completions"
+    from agent.codex_owner_runtime import main_runtime_api_mode
+
+    assert main_runtime_api_mode(agent) == "chat_completions"  # 辅助调用仍按宿主协议路由
     # 显示回调已绑定到 agent
     prestarted._on_event({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hi"}})
     assert agent.deltas == ["hi"]
@@ -302,9 +309,7 @@ def _gateway_command(runner, raw_args, *, uid="ou_admin", chat="oc_1"):
 
 
 def test_gateway_owner_only_and_auto_deny_notice(monkeypatch):
-    import hermes_cli.plugins as plugins_mod
-
-    monkeypatch.setattr(plugins_mod.get_plugin_manager(), "_cli_ref", None, raising=False)
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(None))
     runner = FakeRunner("sess-gw")
     text = _gateway_command(runner, "on")
     assert "只有你的消息走 Claude Code" in text and "自动拒绝" in text
@@ -319,9 +324,7 @@ def test_gateway_owner_only_and_auto_deny_notice(monkeypatch):
 
 
 def test_gateway_requires_rbac_admin(monkeypatch):
-    import hermes_cli.plugins as plugins_mod
-
-    monkeypatch.setattr(plugins_mod.get_plugin_manager(), "_cli_ref", None, raising=False)
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(None))
     monkeypatch.setattr(codex_cmd, "_rbac_role", lambda platform, uid: "user")
     assert "仅 admin 可开启 Claude Code 模式" in _gateway_command(FakeRunner("sess-gw"), "on")
     assert codex_cmd.get_mode("sess-gw") is None
@@ -330,9 +333,7 @@ def test_gateway_requires_rbac_admin(monkeypatch):
 def test_on_inside_event_loop_starts_off_loop(monkeypatch):
     import asyncio
 
-    import hermes_cli.plugins as plugins_mod
-
-    monkeypatch.setattr(plugins_mod.get_plugin_manager(), "_cli_ref", None, raising=False)
+    monkeypatch.setattr(codex_cmd, "_plugin_ctx", _ctx_for(None))
     threads = []
     original = ClaudeAcpSession.ensure_started
 

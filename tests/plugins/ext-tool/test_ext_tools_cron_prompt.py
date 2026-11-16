@@ -1,11 +1,13 @@
 """ext-tools / cron_prompt 验证测试（只读，不修改真实数据）。
 
-用例：
+可见性走 core 的 tools.cronjob_visibility（与 cronjob 工具同一套规则），这里只替换任务存储
+查询与绑定的调用者身份：
   1. 无 identify 的任务 → 直接返回全量 prompt
   2. 有 identify 且 Owner 匹配 → 放行
-  3. 有 identify 但调用者不匹配 → 拒绝（即使调用者是"管理员"——本工具无角色豁免）
+  3. 有 identify 但调用者不匹配 → 当作不存在（即使调用者是"管理员"——本工具无角色豁免），
+     不回显 prompt，也不透露任务归谁
   4. 任务不存在 / 重名 → 明确报错
-  5. 无身份（CLI 等场景）读带 identify 的任务 → 拒绝
+  5. 无身份（CLI 等场景）读带 identify 的任务 → 当作不存在
 """
 import json
 import sys
@@ -15,7 +17,6 @@ from unittest import mock
 import pytest
 
 REPO = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO / "plugins" / "ext-tools"))
 
 import cron_prompt as cp
 from tools.user_env_runtime import UserEnvIdentity
@@ -56,8 +57,10 @@ def ident(platform, uid):
 
 
 def run(ref, identity):
-    with mock.patch.object(cp, "resolve_job_ref", fake_resolve), \
-         mock.patch.object(cp, "_current_identity", lambda: identity):
+    import tools.cronjob_visibility as visibility
+
+    with mock.patch.object(visibility, "resolve_job_ref", fake_resolve), \
+         mock.patch.object(visibility, "caller_identity", lambda: identity):
         return json.loads(cp.cron_prompt(job_id=ref))
 
 
@@ -78,7 +81,8 @@ def test_other_caller_denied_even_if_admin(uid):
     out = run("bbb2", ident("feishu", uid))
     assert out["success"] is False
     assert "P-SECRET" not in json.dumps(out)
-    assert out.get("error", "").startswith("permission denied")
+    assert out["error"] == "cron job not found: bbb2"
+    assert "slack:U1" not in json.dumps(out)  # 也不透露任务归谁
 
 
 def test_missing_job():
