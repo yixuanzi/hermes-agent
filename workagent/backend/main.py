@@ -22,6 +22,8 @@ from hermes_constants import find_node_executable
 REPO_ROOT = Path(project_root_str())
 WORKAGENT_FRONTEND_DIR = REPO_ROOT / "workagent" / "frontend"
 WORKAGENT_DIST_DIR = REPO_ROOT / "workagent" / "backend" / "web_dist"
+# The A2A module listens apart from the console so both can run side by side.
+DEFAULT_PORTS = {"server": 9120, "a2a": 9086}
 
 
 def configure_workagent_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -39,7 +41,12 @@ def configure_workagent_parser(parser: argparse.ArgumentParser) -> argparse.Argu
         default="server",
         help="WORKAGENT service module to start (default: server)",
     )
-    parser.add_argument("--port", type=int, default=9120, help="Port (default 9120)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Port (default 9120 for server, 9086 for a2a)",
+    )
     parser.add_argument("--host", default="127.0.0.1", help="Host (default 127.0.0.1)")
     parser.add_argument(
         "--no-open", action="store_true", help="Don't open browser automatically"
@@ -303,12 +310,13 @@ def cmd_workagent(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
     module = getattr(args, "module", "server") or "server"
+    port = args.port if args.port is not None else DEFAULT_PORTS.get(module)
     if module == "a2a":
         from workagent.backend.a2a_server import start_a2a_server
 
         start_a2a_server(
             host=args.host,
-            port=args.port,
+            port=port,
             allow_public=getattr(args, "insecure", False),
             name=getattr(args, "name", None),
             description=getattr(args, "description", None),
@@ -331,7 +339,7 @@ def cmd_workagent(args: argparse.Namespace) -> None:
     embedded_chat = args.tui or os.environ.get("HERMES_WORKAGENT_TUI") == "1"
     start_server(
         host=args.host,
-        port=args.port,
+        port=port,
         open_browser=not args.no_open,
         allow_public=getattr(args, "insecure", False),
         embedded_chat=embedded_chat,

@@ -31,7 +31,7 @@ hermes workagent --module server --port 9120 --tui
 
 常用参数：
 - `--module server|a2a|extcli`：选择启动模块，默认 `server`
-- `--port 9120`：服务端口（默认 9120）
+- `--port`：服务端口（`server` 默认 9120，`a2a` 默认 9086）
 - `--host 127.0.0.1`：监听地址（默认 loopback）
 - `--no-open`：不自动打开浏览器，仅 `server` 模块使用
 - `--insecure`：允许非 loopback 绑定（有安全风险）
@@ -41,7 +41,7 @@ hermes workagent --module server --port 9120 --tui
 A2A 模块启动形态：
 
 ```bash
-hermes workagent --module a2a --host 127.0.0.1 --port 9086
+hermes workagent --module a2a --host 127.0.0.1   # 默认端口 9086
 ```
 
 A2A 模块默认允许直接连接；设置 `WORKAGENT_A2A_AUTH=true` 后，会在 HTTP 中间件层对 A2A RPC 请求启用 Bearer Token 认证。
