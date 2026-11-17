@@ -48,6 +48,11 @@ _INTERPRETER_PREFIXES = tuple({
 # resolve once at import, as before: they are fixed for the process lifetime.
 _normcase = os.path.normcase
 _INTERPRETER_PREFIX_STRS = tuple(_normcase(os.fspath(p)) for p in _INTERPRETER_PREFIXES)
+# ``hermes_bootstrap`` activates dependencies on first import, and ``pm.environments._payload_manifest``
+# asks whether the checkout is a sealed payload by reading ``<checkout>/../manifest.json``. A default
+# install keeps the checkout inside the home, so that probe lands on ``<home>/manifest.json``; a test
+# that first imports an entry-point module (``gateway.run``) lazily would otherwise trip the guard.
+_PAYLOAD_MANIFEST_STR = _normcase(os.fspath(Path(__file__).resolve().parent.parent.parent / "manifest.json"))
 
 
 def _within(path: str, prefix: str) -> bool:
@@ -120,6 +125,8 @@ class HomeIOGuard:
             for prefix in _INTERPRETER_PREFIX_STRS:
                 if _within(absolute, prefix) or (metadata and _contains(absolute, prefix)):
                     return
+            if absolute == _PAYLOAD_MANIFEST_STR:
+                return
             # Check the lexical path first: resolving must not probe a protected
             # tree merely to decide that the original path was forbidden.
             for root in roots:

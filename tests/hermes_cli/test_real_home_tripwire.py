@@ -212,6 +212,8 @@ def test_checkout_inside_a_guarded_root_is_not_hermes_state():
     guard = HomeIOGuard(lambda: [PROJECT_ROOT.parent])
     guard.check(PROJECT_ROOT / "tests" / "home_io_guard.py")
     guard.check(PROJECT_ROOT / ".venv" / "bin" / "python", metadata=True)
+    # The sealed-payload probe PM runs when an entry-point module is first imported.
+    guard.check(PROJECT_ROOT.parent / "manifest.json")
     with pytest.raises(AssertionError, match="REAL hermes home"):
         guard.check(PROJECT_ROOT.parent / "config.yaml")
 
