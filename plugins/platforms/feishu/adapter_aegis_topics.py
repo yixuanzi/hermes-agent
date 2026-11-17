@@ -41,10 +41,11 @@ _FEISHU_OUTCOME_UNKNOWN_CODES = frozenset({2200})
 _FEISHU_AUTO_THREAD_SOFT_FAILURE_LIMIT = 2
 
 
-#: A topic (``omt_*``) accepts text and cards as ``receive_id_type=thread_id``
-#: but rejects an attachment keyed that way with a bare field-validation
-#: error.  The reply API places the same upload inside the topic fine, so
-#: this code means "re-anchor", not "give up" — see
+#: Feishu's bare field-validation error.  ``message.create`` keyed by
+#: ``receive_id_type=thread_id`` gets it for every message type (text, cards,
+#: attachments), which is why ``_topic_reply_anchor`` replies into a real topic
+#: instead.  The send path only falls back to that create when no anchor could be
+#: found; this code then means "re-anchor", not "give up" — see
 #: ``_send_attachment_message``.
 _FEISHU_ATTACHMENT_THREAD_RECEIVE_CODE = 99992402
 
@@ -67,6 +68,37 @@ class FeishuAutoTopicMixin:
         so the initiating turn and later replies can share one session key.
         """
         return str(thread_id or "").startswith("om_")
+
+    def _note_topic_root(self, thread_id: Any, root_message_id: Any) -> None:
+        """Remember the root message of a real ``omt_*`` topic (seen on an inbound message)."""
+        if str(thread_id or "").startswith("omt_") and root_message_id:
+            roots = self._auto_thread_state("_topic_root_messages")
+            roots[str(thread_id)] = str(root_message_id)
+            roots.move_to_end(str(thread_id))
+            self._trim_oldest_dict_entries(roots, self.CHAT_LOCK_MAX_SIZE)
+
+    async def _topic_reply_anchor(self, metadata: Optional[dict[str, Any]]) -> Optional[str]:
+        """A message to reply to (``reply_in_thread``) so a send lands inside ``metadata``'s topic.
+
+        Feishu rejects ``message.create`` with ``receive_id_type=thread_id`` (99992402) for
+        every message type, so a send into a real ``omt_*`` topic must go through the reply API.
+        Senders that carry no reply target of their own — delegate approval/clarify cards, card
+        deliveries outside a turn, notices — would otherwise never reach a topic the user opened
+        themselves (2026-11-17). An ``om_*`` thread id is its own anchor; an ``omt_*`` topic is
+        anchored on its root, learned from inbound messages or looked up once and cached.
+        """
+        thread_id = str((metadata or {}).get("thread_id") or "")
+        explicit = (metadata or {}).get("reply_to_message_id")
+        if explicit or not thread_id or self._is_message_thread_anchor(thread_id):
+            return explicit or thread_id or None
+        roots = self._auto_thread_state("_topic_root_messages")
+        if thread_id not in roots:
+            root = await self._fetch_last_message_in_thread(thread_id)  # oldest first: the topic root
+            if not root:
+                logger.warning("[Feishu] no reply anchor found in topic %s", thread_id)
+                return None
+            self._note_topic_root(thread_id, root)
+        return roots.get(thread_id)
 
     def _auto_thread_state(self, name: str) -> OrderedDict[str, None]:
         state = getattr(self, name, None)

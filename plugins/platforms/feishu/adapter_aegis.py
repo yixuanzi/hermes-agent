@@ -246,6 +246,8 @@ class FeishuAegisMixin(
         # A few embedders and test adapters return a partial source: route on the resolved identities.
         source_chat_type = getattr(source, "chat_type", None) or self._resolve_source_chat_type(
             chat_info=chat_info, event_chat_type=chat_type)
+        # A topic message names its root (root_id); a topic's first message is its own root.
+        self._note_topic_root(getattr(message, "thread_id", None), getattr(message, "root_id", None) or message_id)
         self._key_auto_topic(source=source, message=message, message_id=message_id, chat_type=source_chat_type,
                              force_reply_thread=jev_gate_pending)
         if await self._route_to_delegate(source=source, text=text, chat_id=chat_id, chat_type=source_chat_type,

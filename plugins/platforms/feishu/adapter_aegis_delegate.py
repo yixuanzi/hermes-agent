@@ -630,10 +630,9 @@ class FeishuDelegateMixin:
                 chat_id=chat_id,
                 msg_type="interactive",
                 payload=json.dumps(card, ensure_ascii=False),
-                # Let _send_raw_message pick the target from metadata: an om_*
-                # anchor is replied to, a real omt_* topic id is posted into.
-                # Passing omt_* as reply_to hits the reply API with a non-message
-                # id and the card is silently lost.
+                # Let _send_raw_message pick the target from metadata (an om_* anchor,
+                # or a real omt_* topic's root via _topic_reply_anchor). Passing omt_*
+                # as reply_to hits the reply API with a non-message id and is lost.
                 reply_to=None,
                 metadata=metadata,
             )

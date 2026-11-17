@@ -3689,7 +3689,7 @@ class FeishuAdapter(FeishuAegisMixin, FeishuChoiceCardsMixin, FeishuSyntheticEve
         )
 
     async def _fetch_last_message_in_thread(self, thread_id: str) -> Optional[str]:
-        """Fetch the last message_id in a thread for reply-based routing."""
+        """Fetch a thread's first message_id (the topic root; default ascending order) for reply routing."""
         if not self._client or not thread_id:
             return None
         if self._is_message_thread_anchor(thread_id):
@@ -3710,8 +3710,7 @@ class FeishuAdapter(FeishuAegisMixin, FeishuChoiceCardsMixin, FeishuSyntheticEve
         self, *, chat_id: str, msg_type: str, payload: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
     ) -> Any:
         thread_id = (metadata or {}).get("thread_id")
-        effective_reply_to = (reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
-                              or (str(thread_id) if str(thread_id or "").startswith("om_") else None))  # om_*: topic root
+        effective_reply_to = reply_to or (await self._topic_reply_anchor(metadata) if thread_id else None)
         if effective_reply_to:
             body = self._build_reply_message_body(
                 content=payload, msg_type=msg_type, reply_in_thread=bool(thread_id), uuid_value=str(uuid.uuid4()),
@@ -3719,7 +3718,7 @@ class FeishuAdapter(FeishuAegisMixin, FeishuChoiceCardsMixin, FeishuSyntheticEve
             request = self._build_reply_message_request(effective_reply_to, body)
             return await self._run_blocking(self._client.im.v1.message.reply, request)
         if thread_id:
-            # reply→create fallback inside a topic: thread_id as receive_id keeps it in the topic.
+            # No anchor found in the topic: last resort (Feishu answers 99992402, see _topic_reply_anchor).
             receive_id, receive_id_type = thread_id, "thread_id"
         elif chat_id.startswith("feishu_user_id:"):
             receive_id, receive_id_type = chat_id.split(":", 1)[1], "user_id"

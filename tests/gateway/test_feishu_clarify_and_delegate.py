@@ -296,10 +296,15 @@ def _raw_send_recorder(adapter):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["approval", "clarify"])
-async def test_feishu_delegate_card_posts_into_topic_for_omt_thread(kind):
-    """A real topic id (omt_*) must never be sent to the reply API."""
+async def test_feishu_delegate_card_replies_into_existing_topic(kind):
+    """A card for a user-opened topic (omt_*) replies in-thread to the topic root.
+
+    Feishu rejects ``message.create`` keyed by ``receive_id_type=thread_id`` with
+    99992402, so that path lost every delegate card in an existing topic.
+    """
     adapter = _make_adapter()
     calls = _raw_send_recorder(adapter)
+    adapter._note_topic_root("omt_topic", "om_root")  # learned from the inbound topic message
     payload = {"interaction_id": f"{kind}-1", "command": "ls", "question": "Q?", "choices": ["a"]}
     sender = adapter.send_delegate_exec_approval if kind == "approval" else adapter.send_delegate_clarify
     result = await sender(chat_id="oc_group", payload=payload, responder=None, metadata={"thread_id": "omt_topic"})
@@ -307,10 +312,31 @@ async def test_feishu_delegate_card_posts_into_topic_for_omt_thread(kind):
     assert result.success is True
     assert len(calls) == 1
     fn, request = calls[0]
-    assert fn is adapter._client.im.v1.message.create
-    assert request[0] == "create" and request[1] == "thread_id"
-    assert request[2]["receive_id"] == "omt_topic"
+    assert fn is adapter._client.im.v1.message.reply
+    assert request == ("reply", "om_root")
     assert f"{kind}-1" in adapter._delegate_interactions
+    assert adapter._delegate_interactions[f"{kind}-1"]["thread_id"] == "omt_topic"
+
+
+@pytest.mark.asyncio
+async def test_feishu_send_into_unseen_topic_looks_up_root_once():
+    """Without an inbound root, the topic is listed once and the root is cached."""
+    adapter = _make_adapter()
+    calls = _raw_send_recorder(adapter)
+    bodies = []
+    adapter._build_reply_message_body = lambda **kw: bodies.append(kw) or kw
+    adapter._fetch_last_message_in_thread = AsyncMock(return_value="om_root")
+
+    for _ in range(2):
+        response = await adapter._send_raw_message(
+            chat_id="oc_group", msg_type="text", payload="{}", reply_to=None, metadata={"thread_id": "omt_new"},
+        )
+        assert response.success()
+
+    adapter._fetch_last_message_in_thread.assert_awaited_once_with("omt_new")
+    assert [request for fn, request in calls] == [("reply", "om_root"), ("reply", "om_root")]
+    assert all(fn is adapter._client.im.v1.message.reply for fn, _ in calls)
+    assert all(body["reply_in_thread"] is True for body in bodies)
 
 
 @pytest.mark.asyncio

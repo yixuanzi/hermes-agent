@@ -2754,10 +2754,10 @@ def test_processing_failure_skips_cross_mark_when_typing_removal_fails(fake_lark
 class TestFeishuAttachmentTopicRouting(unittest.TestCase):
     """Attachments rejected by topic routing must be re-anchored, not dropped.
 
-    A message created with ``receive_id_type=thread_id`` is fine for text and
-    cards but comes back 99992402 for every attachment kind, so a file the user
-    asked for inside a Feishu topic used to be lost while the identical request
-    in the main chat worked.
+    A message created with ``receive_id_type=thread_id`` comes back 99992402
+    (the send path only uses it when no topic anchor was found), so a file the
+    user asked for inside a Feishu topic used to be lost while the identical
+    request in the main chat worked.
     """
 
     def _adapter(self):
