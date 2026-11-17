@@ -309,10 +309,11 @@ _FEISHU_OUTCOME_UNKNOWN_CODES = frozenset({2200})
 #: before one flat message is sent instead.  Two, so a single transient error
 #: is retried in place rather than costing the whole turn its topic.
 _FEISHU_AUTO_THREAD_SOFT_FAILURE_LIMIT = 2
-#: A topic (``omt_*``) accepts text and cards as ``receive_id_type=thread_id``
-#: but rejects an attachment keyed that way with a bare field-validation
-#: error.  The reply API places the same upload inside the topic fine, so
-#: this code means "re-anchor", not "give up" — see
+#: Feishu's bare field-validation error.  ``message.create`` keyed by
+#: ``receive_id_type=thread_id`` gets it for every message type (text, cards,
+#: attachments), which is why ``_topic_reply_anchor`` replies into a real topic
+#: instead.  The send path only falls back to that create when no anchor could be
+#: found; this code then means "re-anchor", not "give up" — see
 #: ``_send_attachment_message``.
 _FEISHU_ATTACHMENT_THREAD_RECEIVE_CODE = 99992402
 
@@ -2042,6 +2043,37 @@ class FeishuAdapter(BasePlatformAdapter):
         """
         return str(thread_id or "").startswith("om_")
 
+    def _note_topic_root(self, thread_id: Any, root_message_id: Any) -> None:
+        """Remember the root message of a real ``omt_*`` topic (seen on an inbound message)."""
+        if str(thread_id or "").startswith("omt_") and root_message_id:
+            roots = self._auto_thread_state("_topic_root_messages")
+            roots[str(thread_id)] = str(root_message_id)
+            roots.move_to_end(str(thread_id))
+            self._trim_oldest_dict_entries(roots, self.CHAT_LOCK_MAX_SIZE)
+
+    async def _topic_reply_anchor(self, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+        """A message to reply to (``reply_in_thread``) so a send lands inside ``metadata``'s topic.
+
+        Feishu rejects ``message.create`` with ``receive_id_type=thread_id`` (99992402) for
+        every message type, so a send into a real ``omt_*`` topic must go through the reply API.
+        Senders that carry no reply target of their own — delegate approval/clarify cards, card
+        deliveries outside a turn, notices — would otherwise never reach a topic the user opened
+        themselves (2026-11-17). An ``om_*`` thread id is its own anchor; an ``omt_*`` topic is
+        anchored on its root, learned from inbound messages or looked up once and cached.
+        """
+        thread_id = str((metadata or {}).get("thread_id") or "")
+        explicit = (metadata or {}).get("reply_to_message_id")
+        if explicit or not thread_id or self._is_message_thread_anchor(thread_id):
+            return explicit or thread_id or None
+        roots = self._auto_thread_state("_topic_root_messages")
+        if thread_id not in roots:
+            root = await self._fetch_last_message_in_thread(thread_id)  # oldest first: the topic root
+            if not root:
+                logger.warning("[Feishu] no reply anchor found in topic %s", thread_id)
+                return None
+            self._note_topic_root(thread_id, root)
+        return roots.get(thread_id)
+
     def _auto_thread_state(self, name: str) -> "OrderedDict[str, None]":
         state = getattr(self, name, None)
         if state is None:
@@ -3271,8 +3303,8 @@ class FeishuAdapter(BasePlatformAdapter):
                 chat_id=chat_id,
                 msg_type="interactive",
                 payload=json.dumps(card, ensure_ascii=False),
-                # Let _send_raw_message pick the target from metadata: an om_*
-                # anchor is replied to, a real omt_* topic id is posted into.
+                # Let _send_raw_message pick the target from metadata (an om_*
+                # anchor, or a real omt_* topic's root via _topic_reply_anchor).
                 # Passing omt_* as reply_to hits the reply API with a non-message
                 # id and the card is silently lost.
                 reply_to=None,
@@ -5509,6 +5541,8 @@ class FeishuAdapter(BasePlatformAdapter):
 
         actual_thread_id = getattr(message, "thread_id", None) or None
         root_message_id = getattr(message, "root_id", None) or None
+        # A topic message names its root (root_id); a topic's first message is its own root.
+        self._note_topic_root(actual_thread_id, root_message_id or message_id)
         thread_id = actual_thread_id or root_message_id or None
         reply_to_message_id = (
             getattr(message, "parent_id", None)
@@ -7162,7 +7196,7 @@ class FeishuAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(exc))
 
     async def _fetch_last_message_in_thread(self, thread_id: str) -> Optional[str]:
-        """Fetch the last message_id in a thread for reply-based routing."""
+        """Fetch a thread's first message_id (the topic root; default ascending order) for reply routing."""
         if not self._client or not thread_id:
             return None
         if self._is_message_thread_anchor(thread_id):
@@ -7371,9 +7405,7 @@ class FeishuAdapter(BasePlatformAdapter):
         metadata_thread_id = (metadata or {}).get("thread_id")
         effective_reply_to = reply_to
         if not effective_reply_to and metadata_thread_id:
-            effective_reply_to = (metadata or {}).get("reply_to_message_id")
-            if not effective_reply_to and self._is_message_thread_anchor(metadata_thread_id):
-                effective_reply_to = str(metadata_thread_id)
+            effective_reply_to = await self._topic_reply_anchor(metadata)
         reply_in_thread = bool(metadata_thread_id)
         if effective_reply_to:
             body = self._build_reply_message_body(
@@ -7385,9 +7417,8 @@ class FeishuAdapter(BasePlatformAdapter):
             request = self._build_reply_message_request(effective_reply_to, body)
             return await self._run_blocking(self._client.im.v1.message.reply, request)
 
-        # For topic/thread messages that fell back from reply→create, use
-        # thread_id as receive_id so the message lands in the topic instead of
-        # the main chat.
+        # No anchor found in the topic: last resort (Feishu answers 99992402,
+        # see _topic_reply_anchor).
         _thread_id = metadata_thread_id
         if _thread_id:
             body = self._build_create_message_body(
