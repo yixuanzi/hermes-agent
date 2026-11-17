@@ -196,6 +196,25 @@ def test_settings_still_resolve_when_the_config_file_is_unreadable(monkeypatch):
     assert settings.complexity_routing is False
 
 
+@pytest.mark.parametrize("failed_read", [True, False], ids=["fallback_config", "readable_config"])
+def test_admission_fails_closed_on_any_config_read_failure(monkeypatch, failed_read):
+    """Defaults and last-known-good both come back as ``FailedConfigRead``: admission cannot trust
+    the master switch from either, while the settings still resolve for every other consumer."""
+    import hermes_cli.config as hermes_config
+    from hermes_cli.config_read_errors import FailedConfigRead
+
+    for name in _JEV_ENV:
+        monkeypatch.delenv(name, raising=False)
+    config = {"jev": {"autoreply": False, "complexity_routing": True}}
+    served = FailedConfigRead(config, error=OSError("EIO")) if failed_read else config
+    monkeypatch.setattr(hermes_config, "load_config_readonly", lambda: served)
+
+    settings = jev_policy.load_jev_settings()
+    assert settings.complexity_routing is True
+    expected = jev_policy.SILENCE if failed_read else jev_policy.NORMAL
+    assert jev_policy.channel_admission_mode(settings) == expected
+
+
 # --- feature gates ---------------------------------------------------------
 
 

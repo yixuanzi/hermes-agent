@@ -7,10 +7,10 @@ failures fall back to one flat message only when a topic can never exist under t
 from __future__ import annotations
 
 import logging
-import os
 from collections import OrderedDict
 from typing import Any, Optional
 
+from plugins.platforms.feishu.adapter_aegis_admission import _scoped_flag
 
 logger = logging.getLogger("plugins.platforms.feishu.adapter")
 
@@ -49,20 +49,6 @@ _FEISHU_AUTO_THREAD_SOFT_FAILURE_LIMIT = 2
 _FEISHU_ATTACHMENT_THREAD_RECEIVE_CODE = 99992402
 
 
-def _env_boolean_default_true(name: str) -> bool:
-    """Parse a user-facing boolean environment flag with a safe-on default."""
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return True
-    normalized = raw.strip().lower()
-    if normalized in {"true", "1", "yes", "on"}:
-        return True
-    if normalized in {"false", "0", "no", "off"}:
-        return False
-    logger.warning("[Feishu] Invalid %s=%r; defaulting to true", name, raw)
-    return True
-
-
 class FeishuAutoTopicMixin:
     """Mixed into ``FeishuAdapter`` ahead of ``BasePlatformAdapter``."""
 
@@ -70,7 +56,7 @@ class FeishuAutoTopicMixin:
         configured = getattr(self, "_reply_thread_enabled_setting", None)
         if configured is not None:
             return bool(configured)
-        return _env_boolean_default_true("FEISHU_REPLY_THREAD")
+        return _scoped_flag("FEISHU_REPLY_THREAD", default=True)
 
     @staticmethod
     def _is_message_thread_anchor(thread_id: Any) -> bool:

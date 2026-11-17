@@ -1,12 +1,12 @@
 """Feishu Jev channel admission, recent group history and sender names (Aegis).
 
 The Jev gate judges unaddressed human group messages and fails closed; group history is fetched
-for the first turn of a new group session and carried on event metadata, never in the text."""
+for the first turn of a new group session and rides the event's ``channel_context``, never the text.
+The fork's Feishu settings are read here through the adapter's scoped reader."""
 
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Any, Optional
 
@@ -64,30 +64,42 @@ def _coerce_positive_float(value: Any, default: float) -> float:
     return parsed
 
 
-def _env_boolean_default_false(name: str) -> bool:
-    """Parse a user-facing boolean environment flag that is off by default.
+def _scoped_env(name: str) -> Optional[str]:
+    """A profile env value through the adapter reader (``get_scoped_secret``), or None when unset.
 
-    Mirrors :func:`_env_boolean_default_true` so an operator can spell the
-    value any of the usual ways.  Not expressible with ``_to_boolean``, which
-    only accepts the literal string ``"true"`` — ``FEISHU_CARD_OUTPUT=1``
-    would silently read as off.
+    Every fork Feishu setting reads through here: under a multiplexing gateway ``os.environ`` holds
+    the launch profile's values, so a bare ``os.getenv`` gave a secondary profile's adapter the
+    default profile's switches.
     """
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return False
-    normalized = raw.strip().lower()
+    value = str(_fa()._get_scoped_secret(name, "") or "").strip()
+    return value or None
+
+
+def _scoped_flag(name: str, *, default: bool) -> bool:
+    """A user-facing boolean setting, spelled any of the usual ways.
+
+    Not expressible with ``_to_boolean``, which only accepts the literal string ``"true"`` —
+    ``FEISHU_CARD_OUTPUT=1`` would silently read as off.
+    """
+    raw = _scoped_env(name)
+    if raw is None:
+        return default
+    normalized = raw.lower()
     if normalized in {"true", "1", "yes", "on"}:
         return True
     if normalized in {"false", "0", "no", "off"}:
         return False
-    logger.warning("[Feishu] Invalid %s=%r; defaulting to false", name, raw)
-    return False
+    logger.warning("[Feishu] Invalid %s=%r; defaulting to %s", name, raw, str(default).lower())
+    return default
 
 
-def _scoped_env(name: str) -> Optional[str]:
-    """A profile env value through the adapter reader (``get_scoped_secret``), or None when unset."""
-    value = str(_fa()._get_scoped_secret(name, "") or "").strip()
-    return value or None
+def _scoped_float(name: str, default: float) -> float:
+    """A numeric setting, or ``default`` when unset or not a number."""
+    raw = _scoped_env(name)
+    try:
+        return float(raw) if raw is not None else default
+    except ValueError:
+        return default
 
 
 class FeishuAdmissionMixin:
@@ -105,7 +117,7 @@ class FeishuAdmissionMixin:
 
             return jev_policy.load_jev_settings(read=_scoped_env)
         except Exception:
-            logger.debug("[Feishu] Jev policy unavailable", exc_info=True)
+            logger.warning("[Feishu] Jev settings failed to load", exc_info=True)
             return None
 
     def _jev_admission_mode(self, *, in_thread: bool = False) -> str:
@@ -114,23 +126,26 @@ class FeishuAdmissionMixin:
         Resolved in one call so the master switch's inversion of the
         sub-switches lives in the policy layer — see
         ``jev_policy.channel_admission_mode``.
+
+        Fails closed: when the policy module, its settings or the mode check
+        fail, nothing can say the master switch is off, so the message is
+        silenced. ``normal`` would hand it to the mention gate, which answers it
+        outright in a ``require_mention: false`` group.
         """
         try:
             from agent import jev_policy
         except Exception:
-            logger.debug("[Feishu] Jev policy unavailable", exc_info=True)
-            return "normal"
+            logger.warning("[Feishu] Jev policy unavailable; staying quiet", exc_info=True)
+            return "silence"
 
         settings = self._jev_settings()
         if settings is None:
-            # The policy module loaded but its settings did not resolve. Under
-            # the master switch that is still a gate we cannot vouch for.
-            return "normal"
+            return jev_policy.SILENCE
         try:
             return jev_policy.channel_admission_mode(settings, in_thread=in_thread)
         except Exception:
-            logger.debug("[Feishu] Jev admission mode check failed", exc_info=True)
-            return jev_policy.SILENCE if settings.autoreply_gate else jev_policy.NORMAL
+            logger.warning("[Feishu] Jev admission mode check failed; staying quiet", exc_info=True)
+            return jev_policy.SILENCE
 
     async def _jev_message_in_scope(
         self, *, text: str, chat_name: str, sender_name: str,

@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from dataclasses import replace as _dc_replace
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -18,6 +17,7 @@ from gateway.platforms.base import (
     ProcessingOutcome,
     SendResult,
 )
+from plugins.platforms.feishu.adapter_aegis_admission import _scoped_env
 
 logger = logging.getLogger("plugins.platforms.feishu.adapter")
 
@@ -80,7 +80,7 @@ def _cardkit_module() -> Any:
 
 
 def _card_copy_from_env() -> Any:
-    """Build the card's user-visible strings, honouring env overrides.
+    """Build the card's user-visible strings, honouring the profile's env overrides.
 
     Deployments localize or rebrand the card without touching code:
     ``FEISHU_CARD_TITLE``, ``FEISHU_CARD_DELEGATE_TITLE`` (may contain
@@ -95,7 +95,7 @@ def _card_copy_from_env() -> Any:
         ("FEISHU_CARD_TRACE_TITLE", "trace_title"),
         ("FEISHU_CARD_ATTACHMENT_NOTE", "attachment_note"),
     ):
-        raw = os.getenv(env_name, "").strip()
+        raw = _scoped_env(env_name)
         if raw:
             overrides[field_name] = raw
     if not overrides:

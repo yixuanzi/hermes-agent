@@ -7,7 +7,6 @@ import concurrent.futures
 import json
 import logging
 import math
-import os
 import random
 import threading
 import time
@@ -20,6 +19,7 @@ from xml.sax.saxutils import escape
 
 import httpx
 
+from agent.secret_scope import get_secret
 from hermes_cli.profiles import get_active_profile_name
 from hermes_constants import get_hermes_home
 from tools import a2a_delegate_aegis
@@ -771,7 +771,7 @@ def _build_a2a_stop_final_response(last_text: str | None) -> str:
 
 
 def _read_a2a_poll_setting(env_name: str, default: float) -> float:
-    raw_value = os.getenv(env_name)
+    raw_value = get_secret(env_name)  # the turn's profile, not the launch profile's os.environ
     if raw_value is None or not raw_value.strip():
         return default
     try:

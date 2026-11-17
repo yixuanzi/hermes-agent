@@ -9,7 +9,6 @@ dispatch, and the pending-topic send path.
 from __future__ import annotations
 
 import asyncio
-import os
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, fields
@@ -25,8 +24,10 @@ from plugins.platforms.feishu.adapter_aegis_admission import (
     _FEISHU_GROUP_HISTORY_PAGE_SIZE_MAX,
     FeishuAdmissionMixin,
     _coerce_positive_float,
-    _env_boolean_default_false,
     _group_history,
+    _scoped_env,
+    _scoped_flag,
+    _scoped_float,
 )
 from plugins.platforms.feishu.adapter_aegis_card_media import FeishuCardMediaMixin
 from plugins.platforms.feishu.adapter_aegis_cards import (
@@ -36,9 +37,8 @@ from plugins.platforms.feishu.adapter_aegis_cards import (
     _cardkit_module,
 )
 from plugins.platforms.feishu.adapter_aegis_delegate import FeishuDelegateMixin
-from plugins.platforms.feishu.adapter_aegis_topics import FeishuAutoTopicMixin, _env_boolean_default_true
+from plugins.platforms.feishu.adapter_aegis_topics import FeishuAutoTopicMixin
 from plugins.platforms.feishu.adapter_choice_cards import FeishuChoiceCardsMixin
-from utils import env_float
 
 _DELEGATE_LOOP_CONTROLS = frozenset({"/main", "/exit"})
 
@@ -50,8 +50,8 @@ def _fa():
 
 
 def _setting(extra: dict[str, Any], key: str, env: str) -> Any:
-    """``config.yaml`` (``platforms.feishu.extra``) wins over the environment."""
-    return extra[key] if key in extra else os.getenv(env)
+    """``config.yaml`` (``platforms.feishu.extra``) wins over the profile's environment."""
+    return extra[key] if key in extra else _scoped_env(env)
 
 
 def _history_int(extra, key, env, *, default, min_value, cap=None):
@@ -61,7 +61,10 @@ def _history_int(extra, key, env, *, default, min_value, cap=None):
 
 @dataclass(frozen=True)
 class AegisFeishuSettings:
-    """The fork's Feishu settings: ``config.yaml`` (``platforms.feishu.extra``) wins over the env."""
+    """The fork's Feishu settings: ``config.yaml`` (``platforms.feishu.extra``) wins over the env.
+
+    Loaded at construction, which a multiplexing gateway runs inside the owning profile's scope.
+    """
 
     reply_thread: bool = True
     # Render a turn as one CardKit card; opt-in, text/post stays the default and the fallback.
@@ -85,11 +88,11 @@ class AegisFeishuSettings:
 def load_aegis_settings(extra: dict[str, Any]) -> AegisFeishuSettings:
     to_bool = _fa()._to_boolean
     return AegisFeishuSettings(
-        reply_thread=_env_boolean_default_true("FEISHU_REPLY_THREAD"),
+        reply_thread=_scoped_flag("FEISHU_REPLY_THREAD", default=True),
         card_output=(to_bool(extra["card_output"]) if "card_output" in extra
-                     else _env_boolean_default_false("FEISHU_CARD_OUTPUT")),
+                     else _scoped_flag("FEISHU_CARD_OUTPUT", default=False)),
         group_history_enabled=(to_bool(extra["group_history_enabled"]) if "group_history_enabled" in extra
-                               else _env_boolean_default_false("FEISHU_GROUP_HISTORY")),
+                               else _scoped_flag("FEISHU_GROUP_HISTORY", default=False)),
         group_history_limit=_history_int(
             extra, "group_history_limit", "FEISHU_GROUP_HISTORY_LIMIT", default=_DEFAULT_GROUP_HISTORY_LIMIT,
             min_value=1, cap=_FEISHU_GROUP_HISTORY_PAGE_SIZE_MAX),
@@ -104,7 +107,7 @@ def load_aegis_settings(extra: dict[str, Any]) -> AegisFeishuSettings:
         group_history_source=_group_history.normalize_history_source(
             _setting(extra, "group_history_source", "FEISHU_GROUP_HISTORY_SOURCE")),
         group_history_cli_bin=(str(extra.get("group_history_cli_bin") or "").strip()
-                               or str(os.getenv("FEISHU_GROUP_HISTORY_CLI_BIN") or "").strip()
+                               or _scoped_env("FEISHU_GROUP_HISTORY_CLI_BIN")
                                or _DEFAULT_GROUP_HISTORY_CLI_BIN),
         group_history_card_regions=_group_history.normalize_card_regions(
             _setting(extra, "group_history_card_regions", "FEISHU_GROUP_HISTORY_CARD_REGIONS")),
@@ -143,7 +146,7 @@ class FeishuAegisMixin(
         self._card_copy = _card_copy_from_env()
         self._card_manager = _cardkit_module().FeishuCardOutputManager(
             self, copy=self._card_copy,
-            flush_interval=env_float("HERMES_FEISHU_CARD_FLUSH_INTERVAL", _DEFAULT_CARD_FLUSH_INTERVAL))
+            flush_interval=_scoped_float("HERMES_FEISHU_CARD_FLUSH_INTERVAL", _DEFAULT_CARD_FLUSH_INTERVAL))
         # Per-delegate body accumulation (owner → {block_id, text}), its locks, the owners that
         # streamed during the current exchange, and the per-route ledger of files already sent.
         self._delegate_card_blocks: dict[str, dict[str, Any]] = {}

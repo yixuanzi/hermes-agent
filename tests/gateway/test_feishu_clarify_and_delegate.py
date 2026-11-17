@@ -161,8 +161,9 @@ async def test_feishu_delegate_input_steers_the_remote_turn_in_flight():
 
     assert session.steers == ["focus on X"]
     assert input_adapter.read_line(timeout=0) is None
+    # The ack bypasses the card: as a body it would seal the delegate card mid-answer.
     adapter.send.assert_awaited_once_with(
-        "oc_123", DELEGATE_STEER_ACK, metadata={"thread_id": "th_1"}
+        "oc_123", DELEGATE_STEER_ACK, metadata={"thread_id": "th_1", "hermes_card_bypass": True}
     )
     input_adapter.close()
 

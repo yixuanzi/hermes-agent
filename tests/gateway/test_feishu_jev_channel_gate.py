@@ -100,7 +100,9 @@ def test_the_mode_is_silence_when_the_gate_is_required_but_inactive(monkeypatch)
     assert adapter._jev_admission_mode() == "silence"
 
 
-def test_a_raising_mode_check_falls_back_on_the_master_switch(monkeypatch):
+@pytest.mark.parametrize("master_on", [False, True])
+def test_a_raising_mode_check_keeps_the_bot_quiet(monkeypatch, master_on):
+    """Fail closed: a mode check that raises cannot vouch for the master switch either way."""
     from agent import jev_policy
 
     adapter = make_adapter_skeleton()
@@ -109,18 +111,42 @@ def test_a_raising_mode_check_falls_back_on_the_master_switch(monkeypatch):
         raise RuntimeError("policy exploded")
 
     monkeypatch.setattr(jev_policy, "channel_admission_mode", _boom)
-
     monkeypatch.setattr(
         jev_policy, "load_jev_settings",
-        lambda read=None: SimpleNamespace(name="stub", autoreply_gate=False),
-    )
-    assert adapter._jev_admission_mode() == "normal"
-
-    monkeypatch.setattr(
-        jev_policy, "load_jev_settings",
-        lambda read=None: SimpleNamespace(name="stub", autoreply_gate=True),
+        lambda read=None: SimpleNamespace(name="stub", autoreply_gate=master_on),
     )
     assert adapter._jev_admission_mode() == "silence"
+
+
+def test_an_unimportable_policy_keeps_the_bot_quiet(monkeypatch):
+    import sys
+
+    import agent
+
+    adapter = make_adapter_skeleton()
+    monkeypatch.delattr(agent, "jev_policy", raising=False)
+    monkeypatch.setitem(sys.modules, "agent.jev_policy", None)
+    assert adapter._jev_admission_mode() == "silence"
+
+
+def test_an_unreadable_config_silences_an_unaddressed_message_in_a_mention_optional_group(monkeypatch):
+    """The master switch may live in the config.yaml that failed to read: reading it as "off" let a
+    ``require_mention: false`` group answer every unaddressed message. A mention still gets through."""
+    import hermes_cli.config as hermes_config
+
+    def _boom():
+        raise OSError("config.yaml is unreadable")
+
+    monkeypatch.setattr(hermes_config, "load_config_readonly", _boom)
+    for name in ("HERMES_JEV_AUTOREPLY", "HERMES_JEV_CHANNEL_AUTOREPLY"):
+        monkeypatch.delenv(name, raising=False)
+    adapter = make_adapter_skeleton(require_mention=False, group_policy="open")
+    sender, message = make_sender(), make_message(chat_type="group")
+
+    stub_mention(adapter, False)
+    assert adapter._jev_gate(adapter._admit(sender, message), sender, message) == ("jev_gate_unavailable", False)
+    stub_mention(adapter, True)
+    assert adapter._jev_gate(adapter._admit(sender, message), sender, message) == (None, False)
 
 
 @pytest.mark.parametrize(
@@ -150,10 +176,10 @@ def test_a_raising_classifier_keeps_the_bot_quiet(monkeypatch):
     assert result is False
 
 
-def test_unresolvable_settings_fall_back_to_the_normal_path(monkeypatch):
+def test_unresolvable_settings_keep_the_bot_quiet(monkeypatch):
     adapter = make_adapter_skeleton()
     monkeypatch.setattr(type(adapter), "_jev_settings", lambda self: None)
-    assert adapter._jev_admission_mode() == "normal"
+    assert adapter._jev_admission_mode() == "silence"
     # The verdict stage stays fail-closed regardless.
     assert (
         asyncio.run(adapter._jev_message_in_scope(text="…", chat_name="", sender_name=""))

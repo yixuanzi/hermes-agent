@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
 import threading
 import uuid
@@ -12,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+from agent.secret_scope import get_secret
 from hermes_constants import get_hermes_home
 
 
@@ -86,8 +86,12 @@ class AuditPage:
 
 
 def is_aegis_delegate_security_enabled() -> bool:
-    """Return whether Aegis check and audit are enabled for A2A delegation."""
-    return bool((os.environ.get(AEGIS_BOOTSTRAP_ADMIN_PASSWORD_ENV) or "").strip())
+    """Return whether Aegis check and audit are enabled for A2A delegation.
+
+    Read through the turn's profile scope: under a multiplexing gateway ``os.environ`` holds the
+    launch profile's password, which switched the check on or off for every other profile.
+    """
+    return bool((get_secret(AEGIS_BOOTSTRAP_ADMIN_PASSWORD_ENV) or "").strip())
 
 
 def _utc_timestamp() -> str:

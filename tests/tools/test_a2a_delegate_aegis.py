@@ -333,3 +333,25 @@ def test_checked_delegate_store_initialization_error_fails_closed(
     assert result.authorization == "error"
     assert result.failure_payload is not None
     assert "database unavailable" not in result.failure_payload["error"]
+
+
+@pytest.mark.parametrize(
+    ("profile_secrets", "enabled"),
+    [({}, False), ({"AEGIS_BOOTSTRAP_ADMIN_PASSWORD": "its-own"}, True)],
+    ids=["profile_without_aegis", "profile_with_aegis"],
+)
+def test_the_aegis_gate_follows_the_turns_profile_under_multiplexing(
+    monkeypatch, profile_secrets, enabled,
+) -> None:
+    """``os.environ`` holds the launch profile's password: reading it switched every other
+    profile's delegation check on or off with the launch profile's."""
+    from agent import secret_scope
+
+    monkeypatch.setenv("AEGIS_BOOTSTRAP_ADMIN_PASSWORD", "launch-profile")
+    secret_scope.set_multiplex_active(True)
+    token = secret_scope.set_secret_scope(profile_secrets)
+    try:
+        assert a2a_delegate_aegis.is_aegis_delegate_security_enabled() is enabled
+    finally:
+        secret_scope.reset_secret_scope(token)
+        secret_scope.set_multiplex_active(False)

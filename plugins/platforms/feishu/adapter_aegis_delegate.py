@@ -531,7 +531,10 @@ class FeishuDelegateMixin:
         await self.handle_delegate_stream_segment_break(
             route_key=route.key, chat_id=chat_id, metadata=metadata,
         )
-        if await self._steer_delegate_turn(route.input_adapter, text, chat_id=chat_id, metadata=metadata):
+        # The steer acknowledgement is a notice, not the delegate's answer: as a card body it would
+        # change the speaker and seal the delegate card its answer is still streaming into.
+        ack_metadata = {**(metadata or {}), _CARD_BYPASS_METADATA_KEY: True}
+        if await self._steer_delegate_turn(route.input_adapter, text, chat_id=chat_id, metadata=ack_metadata):
             return True
         if route.input_adapter.push_line(text):
             return True

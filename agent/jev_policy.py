@@ -240,13 +240,24 @@ def _env(name: str) -> Optional[str]:
 
 
 def _jev_config() -> Mapping[str, Any]:
+    """The ``jev`` section of config.yaml, ``{}`` when absent or malformed.
+
+    An unreadable file comes back as a ``FailedConfigRead`` (still a mapping, so settings resolve
+    for every consumer); ``load_jev_settings`` records it for the admission decision.
+    """
+    from hermes_cli.config_read_errors import FailedConfigRead
+
     try:
         from hermes_cli.config import load_config_readonly
 
-        section = load_config_readonly().get("jev")
-    except Exception:
-        return {}
-    return section if isinstance(section, dict) else {}
+        config = load_config_readonly()
+    except Exception as exc:
+        return FailedConfigRead(error=exc)
+    section = config.get("jev")
+    section = section if isinstance(section, dict) else {}
+    if isinstance(config, FailedConfigRead):
+        return FailedConfigRead(section, error=config.read_error)
+    return section
 
 
 def _as_bool(raw: Any, default: bool) -> bool:
@@ -381,6 +392,9 @@ class JevSettings:
     #: Per-band criteria for the complexity question. Missing or empty entries
     #: fall back to ``DEFAULT_COMPLEXITY_CRITERIA``; ``other`` is never here.
     complexity_criteria: dict[str, str] = field(default_factory=dict)
+    #: config.yaml could not be read (served from defaults or last-known-good); admission fails
+    #: closed on it, every other consumer keeps the resolved values.
+    config_unreadable: bool = False
 
     @property
     def configured(self) -> bool:
@@ -570,6 +584,7 @@ def load_jev_settings(read: Optional[Callable[[str], Optional[str]]] = None) -> 
         ),
         tier_models=_resolve_tier_models(config, read),
         complexity_criteria=_resolve_complexity_criteria(config, read),
+        config_unreadable=getattr(config, "read_error", None) is not None,
     )
 
 
@@ -603,7 +618,7 @@ def channel_admission_mode(
     """Decide how an unaddressed group message should be handled.
 
     ``HERMES_JEV_AUTOREPLY`` is the master switch for the whole admission
-    layer, and it is checked *first*:
+    layer, and it is checked before the sub-switches:
 
     * **off** (default) — Jev is never asked. Every message takes the pre-Jev
       path and the mention gate alone decides it. The sub-switches are inert,
@@ -616,12 +631,20 @@ def channel_admission_mode(
       The verdict stage is already fail-closed, so a denial, a transport error
       or an exception also end in silence.
 
+    An unreadable config.yaml is checked before both and is ``SILENCE``: the
+    master switch may live in the file that failed, and reading it as "off"
+    would hand an unaddressed message to a mention gate that may answer it
+    outright.
+
     So the sub-switches never widen the master switch, they only narrow it.
     Returning one decision rather than exposing the flags keeps that ordering
     in one place — a caller reading them separately would have to re-derive it,
     and would get it wrong the day a third category appears.
     """
     settings = settings if settings is not None else load_jev_settings()
+    if settings.config_unreadable:
+        logger.debug("[Jev] config.yaml is unreadable; not answering unaddressed group messages")
+        return SILENCE
     if not settings.autoreply_gate:
         return NORMAL
     if channel_autoreply_active(settings, in_thread=in_thread):
