@@ -9,11 +9,8 @@ from importlib import util
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from aisoc.backend.services.ontology_service import (
-    OntologyService,
-    _PROFILE,
-    _real_home,
-)
+from aisoc.backend.services.ontology_service import OntologyService
+from hermes_constants import get_hermes_home, get_real_home
 
 
 logger = logging.getLogger(__name__)
@@ -23,12 +20,6 @@ class OntologyAIError(RuntimeError):
     pass
 
 
-def _env_path(name: str, default: str) -> Path:
-    return Path(os.environ.get(name, default)).expanduser()
-
-
-AI_HERMES_BIN = os.environ.get("AISOC_ONTOLOGY_HERMES_BIN", "hermes")
-AI_PROFILE = os.environ.get("AISOC_ONTOLOGY_PROFILE", "aisoc")
 AI_SUBPROCESS_TIMEOUT = int(os.environ.get("AISOC_ONTOLOGY_AI_TIMEOUT", "600"))
 AI_JUDGE_BATCH_SIZE = int(os.environ.get("AISOC_ONTOLOGY_AI_BATCH_SIZE", "8"))
 
@@ -61,42 +52,34 @@ class OntologyAIService:
 
     @staticmethod
     def _ontology_path_overrides() -> dict[str, str]:
-        """AISOC_ONTOLOGY_* → absolute-path overrides that make ``_paths.py``
-        (imported by scanner_ai.py, whether run as a subprocess or exec'd
-        in-process) resolve correctly no matter what the current HOME env var
-        happens to be.
-
-        The hermes runtime rewrites HOME to a per-profile sandbox at points
-        that aren't limited to "when it forks a child process" — it can
-        happen to *this* backend process's own env too (we've seen it land on
-        an unrelated profile like search_agent). ``_paths.py``'s ``_resolve()``
-        checks ``os.environ.get(env_name, ...)`` before ever falling back to
-        ``Path.home()``, so setting these explicitly makes it immune to
-        whatever HOME currently is. Deliberately excludes HOME itself — see
-        callers for why we don't touch that.
+        """AISOC_ONTOLOGY_* → absolute-path overrides for the skill's
+        ``_paths.py`` (imported by scanner_ai.py, whether run as a subprocess
+        or exec'd in-process). ``_paths.py`` checks these env vars before
+        falling back to ``Path.home()``, so passing them explicitly makes the
+        skill resolve exactly the paths this backend reads, under the running
+        profile's HERMES_HOME. The evidence sources (wiki, workspace, reports)
+        are the OS user's own directories, not Hermes state.
         """
-        home_dir = _real_home()
+        home_dir = get_real_home()
         return {
-            "AISOC_ONTOLOGY_PROFILE": _PROFILE,
+            "AISOC_ONTOLOGY_PROFILE": str(get_hermes_home()),
             "AISOC_ONTOLOGY_STANDARD_GRAPH": str(OntologyService.STANDARD_GRAPH_ALIAS),
             "AISOC_ONTOLOGY_STANDARD_GRAPH_V3": str(OntologyService.STANDARD_GRAPH_V3),
             "AISOC_ONTOLOGY_SCANS_ROOT": str(OntologyService.SCANS_ROOT),
             "AISOC_ONTOLOGY_SKILL_SCRIPTS": str(OntologyService.SKILL_SCRIPTS),
-            "AISOC_ONTOLOGY_WIKI": f"{home_dir}/aisocwiki",
-            "AISOC_ONTOLOGY_WORKSPACE": f"{home_dir}/workspace",
-            "AISOC_ONTOLOGY_REPORTS": f"{home_dir}/reports",
+            "AISOC_ONTOLOGY_WIKI": os.environ.get("AISOC_ONTOLOGY_WIKI") or f"{home_dir}/aisocwiki",
+            "AISOC_ONTOLOGY_WORKSPACE": os.environ.get("AISOC_ONTOLOGY_WORKSPACE") or f"{home_dir}/workspace",
+            "AISOC_ONTOLOGY_REPORTS": os.environ.get("AISOC_ONTOLOGY_REPORTS") or f"{home_dir}/reports",
         }
 
     @staticmethod
     def _subprocess_env() -> dict[str, str]:
-        """Env passed to skill-script subprocesses (collect()). Builds on
-        ``_ontology_path_overrides()`` and additionally pins HOME — safe here
-        because it's a *child process's* env, not this process's, so it can't
-        disturb whatever sandboxed HOME the hermes runtime wants in effect for
-        unrelated in-process work happening concurrently in this backend.
-        """
-        env = os.environ.copy()
-        env["HOME"] = _real_home()
+        """Env for skill-script subprocesses (collect()): the serving
+        profile's child env (its HERMES_HOME, no provider credentials) plus
+        the ontology path overrides."""
+        from tools.environments.local import served_profile_child_env
+
+        env = served_profile_child_env()
         env.update(OntologyAIService._ontology_path_overrides())
         return env
 
@@ -136,7 +119,12 @@ class OntologyAIService:
 
     @staticmethod
     def _call_hermes(prompt: str) -> str:
-        cmd = [AI_HERMES_BIN, "-z", prompt, "--profile", AI_PROFILE, "--yolo"]
+        from tools.environments.local import served_profile_child_env
+
+        # No --profile: the judge runs as the profile serving this backend (its HERMES_HOME and
+        # credentials via served_profile_child_env). AISOC_ONTOLOGY_PROFILE is the skill
+        # scripts' profile *path*, and score() sets it process-wide while it runs.
+        cmd = [os.environ.get("AISOC_ONTOLOGY_HERMES_BIN", "hermes"), "-z", prompt, "--yolo"]
         try:
             result = subprocess.run(
                 cmd,
@@ -144,11 +132,12 @@ class OntologyAIService:
                 capture_output=True,
                 text=True,
                 timeout=AI_SUBPROCESS_TIMEOUT,
+                env=served_profile_child_env(inherit_credentials=True),
             )
         except subprocess.TimeoutExpired:
             raise OntologyAIError(f"Hermes CLI timed out after {AI_SUBPROCESS_TIMEOUT}s")
         except FileNotFoundError:
-            raise OntologyAIError(f"Hermes CLI not found: {AI_HERMES_BIN}")
+            raise OntologyAIError(f"Hermes CLI not found: {cmd[0]}")
         except subprocess.CalledProcessError as exc:
             logger.exception("Hermes CLI failed (rc=%s): %s", exc.returncode, exc.stderr)
             raise OntologyAIError(f"Hermes CLI failed: {exc.stderr[:2400] if exc.stderr else exc}")
@@ -285,10 +274,8 @@ class OntologyAIService:
         # Unlike collect()/judge(), this runs scanner_ai.py IN-PROCESS via
         # importlib (not as a subprocess), so _subprocess_env()'s child-only
         # env dict never applies here — exec_module reads THIS process's
-        # ambient os.environ directly, which the hermes runtime may have
-        # rewritten HOME on at any point. Temporarily set the ontology path
-        # overrides on our own env for the duration of the exec (not HOME
-        # itself — see _ontology_path_overrides()'s docstring), then restore
+        # ambient os.environ directly. Temporarily set the ontology path
+        # overrides on our own env for the duration of the exec, then restore
         # whatever was there before so we don't leak overrides into unrelated
         # code running concurrently in other threads of this backend.
         overrides = OntologyAIService._ontology_path_overrides()

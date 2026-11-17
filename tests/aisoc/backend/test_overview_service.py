@@ -233,7 +233,7 @@ def test_list_security_events_returns_minimum_shape(monkeypatch, tmp_path) -> No
         db.close()
 
     monkeypatch.setattr(overview_service, "SessionDB", lambda: SessionDB(db_path=db_path))
-    rows = overview_service.list_security_events(limit=15)
+    rows = overview_service.list_security_events(limit=15, user_id="u1")
 
     assert isinstance(rows, list)
     assert len(rows) == 1
@@ -284,13 +284,13 @@ def test_list_keywords_and_keyword_sessions_return_minimum_shape(monkeypatch, tm
     monkeypatch.setattr(overview_service, "SessionDB", lambda: SessionDB(db_path=db_path))
     monkeypatch.setattr(overview_service.time, "time", lambda: now_ts)
 
-    keywords = overview_service.list_keywords()
+    keywords = overview_service.list_keywords(user_id="u1")
     assert isinstance(keywords, list)
     assert keywords
     assert set(keywords[0].keys()) == {"word", "count", "lang"}
     assert keywords[0]["word"] == "attack"
 
-    sessions = overview_service.list_keyword_sessions("attack")
+    sessions = overview_service.list_keyword_sessions("attack", user_id="u1")
     assert isinstance(sessions, list)
     assert sessions
     assert {

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { PageMissionHeader } from "../components/PageMissionHeader";
 import { StateBlock } from "../components/StateBlock";
 import { fetchJSON } from "../lib/api";
+import { useCurrentUser } from "../lib/authContext";
 
 type McpServerTransport = "http" | "stdio" | "unknown";
 
@@ -71,6 +72,10 @@ function summaryToForm(server: McpServerSummary): FormState {
 }
 
 export function McpServersPage() {
+  // MCP servers are host-wide config (stdio entries run host commands): the
+  // backend only lets admins change, probe or reload them, so other users get
+  // a read-only list with credentials masked.
+  const isAdmin = Boolean(useCurrentUser()?.is_admin);
   const [servers, setServers] = useState<McpServerSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -133,7 +138,7 @@ export function McpServersPage() {
   // A server's tool list should already be visible as soon as its details
   // modal is opened, not only after the user clicks "测试连接" manually.
   useEffect(() => {
-    if (!detailName) return;
+    if (!detailName || !isAdmin) return;
     if (testResults[detailName] || testPendingName === detailName) return;
     void testServer(detailName);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -323,17 +328,23 @@ export function McpServersPage() {
     <section className="skills-workbench-page">
       <PageMissionHeader
         title="MCP 服务器管理"
-        subtitle="管理 AISOC agent 运行时使用的 MCP 服务器：新增、编辑、测试连接、工具选择与重载。"
+        subtitle={
+          isAdmin
+            ? "管理 AISOC agent 运行时使用的 MCP 服务器：新增、编辑、测试连接、工具选择与重载。"
+            : "查看 AISOC agent 运行时使用的 MCP 服务器（只读，仅管理员可修改）。"
+        }
         status={<span className="status-badge">{servers.length} 个服务器</span>}
         actions={
-          <>
-            <button type="button" className="ghost-button" disabled={reloadPending} onClick={() => void reload()}>
-              {reloadPending ? "重载中…" : "重载"}
-            </button>
-            <button type="button" onClick={openCreateForm}>
-              新增服务器
-            </button>
-          </>
+          isAdmin ? (
+            <>
+              <button type="button" className="ghost-button" disabled={reloadPending} onClick={() => void reload()}>
+                {reloadPending ? "重载中…" : "重载"}
+              </button>
+              <button type="button" onClick={openCreateForm}>
+                新增服务器
+              </button>
+            </>
+          ) : null
         }
       />
 
@@ -347,7 +358,11 @@ export function McpServersPage() {
         </div>
         {loading ? <StateBlock kind="loading" title="加载中" message="正在获取 /api/mcp-servers。" /> : null}
         {!loading && servers.length === 0 ? (
-          <StateBlock kind="empty" title="暂无 MCP 服务器" message="点击右上角「新增服务器」创建第一个。" />
+          <StateBlock
+            kind="empty"
+            title="暂无 MCP 服务器"
+            message={isAdmin ? "点击右上角「新增服务器」创建第一个。" : "管理员尚未配置 MCP 服务器。"}
+          />
         ) : null}
         <ul className="list-grid cron-jobs-grid">
           {servers.map((server) => (
@@ -361,29 +376,15 @@ export function McpServersPage() {
               <p className="subtle-copy min-w-0 break-all">{server.transport === "stdio" ? server.command : server.url || "--"}</p>
               <p className="subtle-copy min-w-0 break-all">工具：{server.tools ? `${server.tools.length} 个已选` : "全部"}</p>
               <div className="cron-card-actions flex-wrap">
-                <button
-                  type="button"
-                  className="ghost-button cron-icon-button cron-icon-button-detail"
-                  disabled={actionPending === `${server.name}:enabled`}
-                  onClick={() => void toggleEnabled(server)}
-                >
-                  {actionPending === `${server.name}:enabled` ? "…" : server.enabled ? "停用" : "启用"}
-                </button>
-                <button
-                  type="button"
-                  className="ghost-button cron-icon-button cron-icon-button-detail"
-                  onClick={() => openEditForm(server)}
-                >
-                  编辑
-                </button>
-                <button
-                  type="button"
-                  className="ghost-button cron-icon-button cron-icon-button-detail"
-                  disabled={actionPending === `${server.name}:delete`}
-                  onClick={() => void removeServer(server.name)}
-                >
-                  {actionPending === `${server.name}:delete` ? "…" : "删除"}
-                </button>
+                {isAdmin ? (
+                  <ServerAdminActions
+                    server={server}
+                    actionPending={actionPending}
+                    onToggleEnabled={() => void toggleEnabled(server)}
+                    onEdit={() => openEditForm(server)}
+                    onRemove={() => void removeServer(server.name)}
+                  />
+                ) : null}
                 <button type="button" className="cron-icon-button-detail" onClick={() => openDetail(server.name)}>
                   查看
                 </button>
@@ -403,14 +404,16 @@ export function McpServersPage() {
             <div className="cron-detail-modal-header">
               <h4>{detailServer.name}</h4>
               <div className="button-row">
-                <button
-                  type="button"
-                  className="ghost-button"
-                  disabled={testPendingName === detailServer.name}
-                  onClick={() => void testServer(detailServer.name)}
-                >
-                  {testPendingName === detailServer.name ? "测试中…" : "测试连接"}
-                </button>
+                {isAdmin ? (
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={testPendingName === detailServer.name}
+                    onClick={() => void testServer(detailServer.name)}
+                  >
+                    {testPendingName === detailServer.name ? "测试中…" : "测试连接"}
+                  </button>
+                ) : null}
                 <button type="button" className="ghost-button cron-raw-modal-close" onClick={closeDetail} aria-label="关闭">
                   ×
                 </button>
@@ -441,46 +444,17 @@ export function McpServersPage() {
               </div>
 
               <div className="skills-detail-main">
-                {testPendingName === detailServer.name ? (
-                  <StateBlock kind="loading" title="正在测试连接" message="正在连接并获取工具列表…" />
-                ) : detailTestResult ? (
-                  detailTestResult.ok ? (
-                    <div className="flex flex-col gap-[calc(8px*var(--density-scale))]">
-                      <h4>发现的工具（{detailTestResult.tools.length}）</h4>
-                      {detailTestResult.tools.length === 0 ? (
-                        <p className="subtle-copy">该服务器未暴露任何工具。</p>
-                      ) : (
-                        <ul className="flex flex-col gap-[calc(6px*var(--density-scale))]">
-                          {detailTestResult.tools.map((tool) => (
-                            <li key={tool.name} className="detail-panel min-w-0 p-[calc(8px*var(--density-scale))]">
-                              <label className="flex items-center gap-2">
-                                <input
-                                  type="checkbox"
-                                  checked={Boolean(detailToolSelection?.[tool.name])}
-                                  onChange={() => toggleToolSelected(detailServer.name, tool.name)}
-                                />
-                                <strong className="min-w-0 break-all">{tool.name}</strong>
-                              </label>
-                              {tool.description ? <p className="subtle-copy min-w-0 break-all !m-0">{tool.description}</p> : null}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                      {detailTestResult.tools.length > 0 ? (
-                        <div className="button-row">
-                          <button type="button" disabled={toolsSavePending} onClick={() => void saveToolSelection(detailServer.name)}>
-                            {toolsSavePending ? "保存中…" : "保存工具选择"}
-                          </button>
-                        </div>
-                      ) : null}
-                      {toolsSaveMessage ? <p>{toolsSaveMessage}</p> : null}
-                    </div>
-                  ) : (
-                    <StateBlock kind="error" title="连接测试失败" message={detailTestResult.error || "未知错误"} />
-                  )
-                ) : (
-                  <StateBlock kind="empty" title="尚未测试" message="点击「测试连接」获取该服务器的工具列表。" />
-                )}
+                <ServerToolsPanel
+                  server={detailServer}
+                  canManage={isAdmin}
+                  testPending={testPendingName === detailServer.name}
+                  testResult={detailTestResult}
+                  selection={detailToolSelection}
+                  savePending={toolsSavePending}
+                  saveMessage={toolsSaveMessage}
+                  onToggleTool={(toolName) => toggleToolSelected(detailServer.name, toolName)}
+                  onSave={() => void saveToolSelection(detailServer.name)}
+                />
               </div>
             </div>
           </div>
@@ -630,5 +604,110 @@ export function McpServersPage() {
         </div>
       </div>
     </section>
+  );
+}
+
+interface ServerAdminActionsProps {
+  server: McpServerSummary;
+  actionPending: string;
+  onToggleEnabled: () => void;
+  onEdit: () => void;
+  onRemove: () => void;
+}
+
+function ServerAdminActions({ server, actionPending, onToggleEnabled, onEdit, onRemove }: ServerAdminActionsProps) {
+  const togglePending = actionPending === `${server.name}:enabled`;
+  const deletePending = actionPending === `${server.name}:delete`;
+  return (
+    <>
+      <button
+        type="button"
+        className="ghost-button cron-icon-button cron-icon-button-detail"
+        disabled={togglePending}
+        onClick={onToggleEnabled}
+      >
+        {togglePending ? "…" : server.enabled ? "停用" : "启用"}
+      </button>
+      <button type="button" className="ghost-button cron-icon-button cron-icon-button-detail" onClick={onEdit}>
+        编辑
+      </button>
+      <button
+        type="button"
+        className="ghost-button cron-icon-button cron-icon-button-detail"
+        disabled={deletePending}
+        onClick={onRemove}
+      >
+        {deletePending ? "…" : "删除"}
+      </button>
+    </>
+  );
+}
+
+interface ServerToolsPanelProps {
+  server: McpServerSummary;
+  /** Probing a server and saving its tool filter are admin-only. */
+  canManage: boolean;
+  testPending: boolean;
+  testResult: McpTestResult | undefined;
+  selection: Record<string, boolean> | undefined;
+  savePending: boolean;
+  saveMessage: string;
+  onToggleTool: (toolName: string) => void;
+  onSave: () => void;
+}
+
+function ServerToolsPanel(props: ServerToolsPanelProps) {
+  const { server, canManage, testPending, testResult } = props;
+  if (!canManage) {
+    const tools = server.tools ? server.tools.join("、") || "（未选择）" : "全部";
+    return <p className="subtle-copy">工具：{tools}</p>;
+  }
+  if (testPending) {
+    return <StateBlock kind="loading" title="正在测试连接" message="正在连接并获取工具列表…" />;
+  }
+  if (!testResult) {
+    return <StateBlock kind="empty" title="尚未测试" message="点击「测试连接」获取该服务器的工具列表。" />;
+  }
+  if (!testResult.ok) {
+    return <StateBlock kind="error" title="连接测试失败" message={testResult.error || "未知错误"} />;
+  }
+  return <DiscoveredTools {...props} tools={testResult.tools} />;
+}
+
+function DiscoveredTools({
+  tools,
+  selection,
+  savePending,
+  saveMessage,
+  onToggleTool,
+  onSave,
+}: ServerToolsPanelProps & { tools: McpToolInfo[] }) {
+  return (
+    <div className="flex flex-col gap-[calc(8px*var(--density-scale))]">
+      <h4>发现的工具（{tools.length}）</h4>
+      {tools.length === 0 ? (
+        <p className="subtle-copy">该服务器未暴露任何工具。</p>
+      ) : (
+        <ul className="flex flex-col gap-[calc(6px*var(--density-scale))]">
+          {tools.map((tool) => (
+            <li key={tool.name} className="detail-panel min-w-0 p-[calc(8px*var(--density-scale))]">
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={Boolean(selection?.[tool.name])} onChange={() => onToggleTool(tool.name)} />
+                <strong className="min-w-0 break-all">{tool.name}</strong>
+              </label>
+              {tool.description ? <p className="subtle-copy min-w-0 break-all !m-0">{tool.description}</p> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+      {tools.length > 0 ? (
+        <div className="button-row">
+          <button type="button" disabled={savePending} onClick={onSave}>
+            {savePending ? "保存中…" : "保存工具选择"}
+          </button>
+        </div>
+      ) : null}
+      {saveMessage ? <p>{saveMessage}</p> : null}
+    </div>
   );
 }

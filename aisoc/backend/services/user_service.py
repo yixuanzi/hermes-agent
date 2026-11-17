@@ -5,6 +5,7 @@ import re
 import secrets
 import sqlite3
 import os
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -84,11 +85,33 @@ class UserService:
             raise HTTPException(status_code=404, detail=f"User '{uid}' not found.")
         return self._build_user_response(user)
 
-    def get_enabled_user_by_uid(self, uid: str) -> UserResponse:
-        user = self.get_user_by_uid(uid)
-        if user.status != "enabled":
+    def get_user_for_token(self, payload: dict[str, Any]) -> UserResponse:
+        """The enabled user a verified access token speaks for. 401 when the
+        account is disabled or the token was revoked: by logout (its ``jti``)
+        or by a password change / disable since it was issued (its ``ver``;
+        tokens without one predate versioning and count as version 0)."""
+        stored = self._require_user_row(str(payload["sub"]))
+        if stored["status"] != "enabled":
             raise HTTPException(status_code=401, detail="Unauthorized")
-        return user
+        if int(payload.get("ver") or 0) != int(stored["token_version"] or 0):
+            raise HTTPException(status_code=401, detail="Token has been revoked.")
+        jti = payload.get("jti")
+        if jti and self._store.is_token_id_revoked(str(jti)):
+            raise HTTPException(status_code=401, detail="Token has been revoked.")
+        return self._build_user_response(stored)
+
+    def token_version(self, uid: str) -> int:
+        return int(self._require_user_row(uid)["token_version"] or 0)
+
+    def revoke_token(self, payload: dict[str, Any]) -> None:
+        """Revoke one verified access token (logout)."""
+        jti = payload.get("jti")
+        if jti:
+            self._store.revoke_token_id(str(jti), int(payload["exp"]), now=int(time.time()))
+        else:
+            # Issued before tokens carried a jti: it can only be revoked
+            # together with every other token of its user.
+            self._store.bump_token_version(str(payload["sub"]))
 
     def register_user(self, body: AuthRegisterRequest) -> None:
         self._create_user(

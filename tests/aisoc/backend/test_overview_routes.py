@@ -200,8 +200,9 @@ def test_overview_session_detail_truncates_tool_and_skips_empty_assistant(monkey
 def test_overview_security_events_requires_auth_and_shape(monkeypatch) -> None:
     captured: dict[str, int] = {}
 
-    def _fake_events(limit: int):
+    def _fake_events(limit: int, *, user_id: str):
         captured["limit"] = limit
+        captured["user_id"] = user_id
         return [
             {
                 "session_id": "cron_alpha001_run_1",
@@ -249,7 +250,7 @@ def test_overview_keywords_requires_auth_and_shape(monkeypatch) -> None:
     monkeypatch.setattr(
         overview_service,
         "list_keywords",
-        lambda: [{"word": "apollo", "count": 3, "lang": "en"}],
+        lambda *, user_id: [{"word": "apollo", "count": 3, "lang": "en"}],
     )
     client, headers = _auth_client(monkeypatch)
 
@@ -267,8 +268,9 @@ def test_overview_keywords_requires_auth_and_shape(monkeypatch) -> None:
 def test_overview_keyword_sessions_requires_auth_and_shape(monkeypatch) -> None:
     captured: dict[str, str] = {}
 
-    def _fake_sessions(keyword: str):
+    def _fake_sessions(keyword: str, *, user_id: str):
         captured["keyword"] = keyword
+        captured["user_id"] = user_id
         return [
             {
                 "session_id": "s_kw_1",

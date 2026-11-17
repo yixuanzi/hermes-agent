@@ -99,6 +99,9 @@ def _call_cron_for_profile(target_profile: Optional[str], func_name: str, *args,
         cron_jobs.OUTPUT_DIR = cron_jobs.CRON_DIR / "output"
         try:
             result = getattr(cron_jobs, func_name)(*args, **kwargs)
+        except ValueError as exc:
+            # cron.jobs rejects bad schedules, id changes and invalid state moves with ValueError.
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         finally:
             cron_jobs.CRON_DIR = old_cron_dir
             cron_jobs.JOBS_FILE = old_jobs_file
@@ -176,7 +179,6 @@ def create_job(
         script=script,
         workdir=workdir,
         no_agent=no_agent,
-        profile=profile,
     )
 
 

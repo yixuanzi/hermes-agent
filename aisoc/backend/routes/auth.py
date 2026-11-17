@@ -32,7 +32,7 @@ def build_auth_router(settings: AisocSettings, user_service: UserService) -> API
     @router.post("/login", response_model=AuthLoginResponse)
     async def login(body: AuthLoginRequest) -> AuthLoginResponse:
         user = user_service.authenticate_user(body.username, body.password)
-        access_token, expires_in = build_token_payload(user, settings)
+        access_token, expires_in = build_token_payload(user, settings, user_service)
         return AuthLoginResponse(
             authenticated=True,
             access_token=access_token,
@@ -61,7 +61,13 @@ def build_auth_router(settings: AisocSettings, user_service: UserService) -> API
         )
 
     @router.post("/logout", response_model=AuthLogoutResponse)
-    async def logout() -> AuthLogoutResponse:
+    async def logout(request: Request) -> AuthLogoutResponse:
+        # Public and idempotent: a missing or already-unusable token has
+        # nothing left to revoke. Only a live token is revoked, so a dead
+        # legacy token cannot be replayed to sign its user out everywhere.
+        _user, payload = get_optional_user_from_request(request, settings, user_service)
+        if payload is not None:
+            user_service.revoke_token(payload)
         return AuthLogoutResponse(logged_out=True)
 
     @router.put("/password", response_model=AuthPasswordChangeResponse)

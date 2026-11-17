@@ -24,8 +24,9 @@ only manages local state, never skill content ("卸载的话其实就是删除�
 ``~/.agents/skills`` must be listed in ``skills.external_dirs`` for the
 Hermes agent runtime to actually discover skills installed here (it is
 even the canonical example value in ``hermes_cli/config_defaults.py``).
-``_ensure_external_dir_registered`` makes this self-healing on install so a
-fresh tenant deployment doesn't silently install skills nothing can see.
+``_ensure_external_dir_registered`` makes this self-healing after a
+successful install so a fresh tenant deployment doesn't silently install
+skills nothing can see, while a failed install leaves config.yaml alone.
 """
 
 from __future__ import annotations
@@ -63,6 +64,10 @@ def _skillhub_skills_dir() -> Path:
 
 class SkillHubError(Exception):
     """Raised when a SkillHub install/uninstall/sync operation fails."""
+
+
+class SkillHubSkillNotInstalledError(SkillHubError):
+    """The named skill is not installed from SkillHub (404, not a hub failure)."""
 
 
 def _invalidate_skills_prompt_cache() -> None:
@@ -167,11 +172,11 @@ def install_skill(identifier: str) -> dict[str, Any]:
     if not identifier:
         raise ValueError("Skill 名称（identifier）不能为空")
 
-    _ensure_external_dir_registered()
     returncode, output = _run_skillhub_cli(["install", identifier])
     if returncode != 0:
         raise SkillHubError(output or f"安装 '{identifier}' 失败（exit {returncode}）")
 
+    _ensure_external_dir_registered()
     _invalidate_skills_prompt_cache()
     return {"ok": True, "identifier": identifier, "output": output}
 
@@ -183,7 +188,7 @@ def sync_skill(name: str) -> dict[str, Any]:
     if not name:
         raise ValueError("Skill 名称不能为空")
     if not (_skillhub_skills_dir() / name / "SKILL.md").is_file():
-        raise SkillHubError(f"'{name}' 不是通过 SkillHub 安装的 skill，无法同步")
+        raise SkillHubSkillNotInstalledError(f"'{name}' 不是通过 SkillHub 安装的 skill，无法同步")
 
     returncode, output = _run_skillhub_cli(["install", name])
     if returncode != 0:
@@ -207,7 +212,7 @@ def uninstall_skill(name: str) -> dict[str, Any]:
 
     target = _skillhub_skills_dir() / name
     if not target.is_dir() or not (target / "SKILL.md").is_file():
-        raise SkillHubError(f"'{name}' 不是通过 SkillHub 安装的 skill")
+        raise SkillHubSkillNotInstalledError(f"'{name}' 不是通过 SkillHub 安装的 skill")
 
     shutil.rmtree(target)
     _invalidate_skills_prompt_cache()

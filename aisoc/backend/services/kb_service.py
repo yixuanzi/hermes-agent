@@ -57,16 +57,25 @@ def list_tree(cwd: str = "") -> dict[str, Any]:
         raise HTTPException(status_code=403, detail=f"Permission denied: {exc}") from exc
 
     for entry in entries:
-        rel = str(entry.relative_to(root))
-        stat = entry.stat()
+        # Same boundary as read_document: a symlink whose target is missing
+        # or outside the KB is not part of it, and one bad entry must not
+        # fail the whole listing. Symlink loops raise RuntimeError before 3.13.
+        try:
+            resolved = entry.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if not resolved.is_relative_to(root):
+            continue
+        stat = resolved.stat()
+        is_dir = resolved.is_dir()
         node = {
             "name": entry.name,
-            "path": rel,
-            "type": "dir" if entry.is_dir() else "file",
-            "size": stat.st_size if entry.is_file() else 0,
+            "path": str(entry.relative_to(root)),
+            "type": "dir" if is_dir else "file",
+            "size": stat.st_size if resolved.is_file() else 0,
             "modified": int(stat.st_mtime),
         }
-        (dirs if entry.is_dir() else files).append(node)
+        (dirs if is_dir else files).append(node)
 
     return {"root": str(root), "cwd": cwd or "/", "items": dirs + files}
 

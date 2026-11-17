@@ -15,8 +15,7 @@ from aisoc.backend.services.ontology_ai_service import (
 )
 from aisoc.backend.services.ontology_service import (
     OntologyError,
-    _PROFILE,
-    _env_path,
+    _ProfilePath,
 )
 
 
@@ -33,9 +32,8 @@ STALE_JOB_SECONDS = 20 * 60
 # job still marked queued/running is either (a) truly orphaned by a *previous*
 # incarnation of this backend that died mid-scan, or (b) being actively
 # advanced right now by a *different, still-alive* process that happens to
-# share this JOB_ROOT (JOB_ROOT is derived from the OS home directory, not
-# from which hermes profile a given backend was launched with, so two backend
-# processes on different ports can legitimately see the same job files). A
+# share this JOB_ROOT (two backend processes on different ports launched with
+# the same hermes profile legitimately see the same job files). A
 # job in category (b) will have a very recent updated_at (each collect/judge
 # batch/score step writes progress every few seconds to tens of seconds), so
 # a short grace window distinguishes the two without needing STALE_JOB_SECONDS'
@@ -48,12 +46,7 @@ class OntologyJobService:
     job_id; a daemon thread advances the job through collect -> judge -> score
     stages and writes progress to a JSON file the client polls."""
 
-    # Same rationale as OntologyService's constants: use the OS-uid → home path
-    # (via _PROFILE) rather than ~, since hermes runtime rewrites HOME.
-    JOB_ROOT = _env_path(
-        "AISOC_ONTOLOGY_JOBS_ROOT",
-        f"{_PROFILE}/artifacts/ontology/jobs",
-    )
+    JOB_ROOT = _ProfilePath("AISOC_ONTOLOGY_JOBS_ROOT", "artifacts", "ontology", "jobs")
 
     # In-memory pointer to the currently in-flight job, guarded by _lock. Lets
     # create_scan_job() dedupe concurrent "Run Scan" clicks (e.g. a stale
@@ -66,12 +59,15 @@ class OntologyJobService:
 
     @staticmethod
     def _job_path(job_id: str) -> Path:
-        OntologyJobService.JOB_ROOT.mkdir(parents=True, exist_ok=True)
         return OntologyJobService.JOB_ROOT / f"{job_id}.json"
 
     @staticmethod
     def _write(job_id: str, payload: dict[str, Any]) -> None:
-        OntologyJobService._job_path(job_id).write_text(
+        # Only writers create the job root: a GET for an unknown job must not
+        # leave directories behind.
+        path = OntologyJobService._job_path(job_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -104,8 +100,8 @@ class OntologyJobService:
         STARTUP_REAP_GRACE_SECONDS comment for why this uses a short window
         instead of reaping everything queued/running unconditionally — that
         would risk killing a job a different, still-alive process is actively
-        driving right now (JOB_ROOT is shared across all backend processes on
-        this machine, regardless of which hermes profile launched them).
+        driving right now (JOB_ROOT is shared by every backend process
+        serving the same hermes profile).
         """
         if not OntologyJobService.JOB_ROOT.exists():
             return 0

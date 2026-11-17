@@ -45,7 +45,7 @@ def test_only_security_keywords_returned(overview_db):
     _insert_session(overview_db, "s1", now, title="排查 CVE-2026-1234 漏洞")
     _insert_message(overview_db, "s1", "user", "帮我分析这个 phishing 钓鱼攻击", now)
 
-    result = overview_service.list_keywords()
+    result = overview_service.list_keywords(user_id="u1")
     words = {kw["word"] for kw in result}
 
     # security terms present
@@ -62,7 +62,7 @@ def test_non_security_session_yields_nothing(overview_db):
     _insert_session(overview_db, "dev", now, title="写个快速排序函数")
     _insert_message(overview_db, "dev", "user", "用 python 实现一个排序算法就好", now)
 
-    assert overview_service.list_keywords() == []
+    assert overview_service.list_keywords(user_id="u1") == []
 
 
 def test_short_stem_does_not_match_unrelated_word(overview_db):
@@ -71,7 +71,7 @@ def test_short_stem_does_not_match_unrelated_word(overview_db):
     _insert_session(overview_db, "lap", now, title="我的 laptop 坏了帮我看看")
     _insert_message(overview_db, "lap", "user", "laptop 无法开机", now)
 
-    words = {kw["word"] for kw in overview_service.list_keywords()}
+    words = {kw["word"] for kw in overview_service.list_keywords(user_id="u1")}
     assert "apt" not in words
 
 
@@ -80,7 +80,7 @@ def test_lang_tag_and_counts(overview_db):
     _insert_session(overview_db, "s2", now, title="漏洞 漏洞 malware")
     _insert_message(overview_db, "s2", "user", "又一个 malware 恶意样本", now)
 
-    by_word = {kw["word"]: kw for kw in overview_service.list_keywords()}
+    by_word = {kw["word"]: kw for kw in overview_service.list_keywords(user_id="u1")}
     assert by_word["漏洞"]["lang"] == "zh"
     assert by_word["malware"]["lang"] == "en"
     # "漏洞" appears twice in title
@@ -94,4 +94,4 @@ def test_old_session_excluded(overview_db):
     _insert_session(overview_db, "old", old, title="历史 漏洞 攻击 分析")
     _insert_message(overview_db, "old", "user", "老会话 malware", old)
 
-    assert overview_service.list_keywords() == []
+    assert overview_service.list_keywords(user_id="u1") == []

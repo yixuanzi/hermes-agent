@@ -213,7 +213,8 @@ class McpServerUpdate(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     auth: str = "none"
     bearer_token: str | None = None
-    enabled: bool = True
+    # None keeps the stored state: an edit must not re-enable a disabled server.
+    enabled: bool | None = None
 
 
 class McpServerEnabledUpdate(BaseModel):

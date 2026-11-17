@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,30 @@ def _summarize(name: str, cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _mask_url(url: str | None) -> str | None:
+    """Keep scheme and host; hide userinfo, path, query and fragment, any of
+    which can be the credential (a Dify MCP URL's path segment is its key)."""
+    if not url:
+        return url
+    parts = urlsplit(url)
+    host = parts.netloc.rpartition("@")[2]
+    if not parts.scheme or not host:
+        return "***"
+    origin = f"{parts.scheme}://{host}"
+    return f"{origin}/***" if parts.path.strip("/") or parts.query or parts.fragment else origin
+
+
+def mask_for_reader(summary: dict[str, Any]) -> dict[str, Any]:
+    """The view of a server summary for non-admin readers: enough to see what
+    exists and whether it is on, nothing that can authenticate to it."""
+    return {
+        **summary,
+        "url": _mask_url(summary["url"]),
+        "args": ["***" for _ in summary["args"]],
+        "env": {key: "***" for key in summary["env"]},
+    }
+
+
 def _get_server_config(name: str) -> dict[str, Any]:
     from hermes_cli.mcp_config import _get_mcp_servers
 
@@ -114,7 +139,9 @@ def _build_server_config(
     if auth not in {"none", "header"}:
         raise ValueError(f"不支持的鉴权模式: {auth}")
 
-    config: dict[str, Any] = {"enabled": bool(payload.enabled)}
+    config: dict[str, Any] = {}
+    if payload.enabled is not None:
+        config["enabled"] = bool(payload.enabled)
 
     if url:
         if payload.args:
@@ -163,11 +190,33 @@ def create_server(payload: Any) -> dict[str, Any]:
     return get_server(name)
 
 
+# Keys the create/edit form defines in full; every other key of an entry
+# (tools filter, timeouts, sampling, auth mode, ...) is set elsewhere and must
+# survive an edit.
+_FORM_TRANSPORT_KEYS = ("url", "command", "args", "env", "headers")
+
+
+def _merge_form_update(existing: dict[str, Any], form: dict[str, Any]) -> dict[str, Any]:
+    merged = {key: value for key, value in existing.items() if key not in _FORM_TRANSPORT_KEYS}
+    headers = existing.get("headers")
+    # The form manages only the Authorization header; other headers stay.
+    kept_headers = {
+        key: value
+        for key, value in (headers.items() if isinstance(headers, dict) else ())
+        if str(key).lower() != "authorization"
+    }
+    if "url" in form and kept_headers:
+        form = {**form, "headers": {**kept_headers, **form.get("headers", {})}}
+    merged.update(form)
+    return merged
+
+
 def update_server(name: str, payload: Any) -> dict[str, Any]:
     from hermes_cli.mcp_config import _save_mcp_server
 
     existing = _get_server_config(name)
-    config = _build_server_config(name, payload, existing=existing)
+    form = _build_server_config(name, payload, existing=existing)
+    config = _merge_form_update(existing, form)
     if not _save_mcp_server(name, config):
         raise ValueError(f"服务器 '{name}' 因配置校验未通过而未保存")
     return get_server(name)

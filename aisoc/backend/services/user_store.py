@@ -18,8 +18,19 @@ CREATE TABLE IF NOT EXISTS users (
     status TEXT NOT NULL CHECK(status IN ('enabled', 'disabled')),
     create_time TEXT NOT NULL,
     last_login TEXT,
-    display_name TEXT
+    display_name TEXT,
+    token_version INTEGER NOT NULL DEFAULT 0
 );
+
+-- Access tokens revoked before their expiry (logout). Rows are pruned once
+-- the token has expired anyway.
+CREATE TABLE IF NOT EXISTS revoked_tokens (
+    jti TEXT PRIMARY KEY,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires
+    ON revoked_tokens (expires_at);
 
 CREATE TABLE IF NOT EXISTS oidc_login_transactions (
     state TEXT PRIMARY KEY,
@@ -48,7 +59,9 @@ CREATE INDEX IF NOT EXISTS idx_sso_login_tickets_expires
     ON sso_login_tickets (expires_at);
 """
 
-_USER_COLUMNS = "uid, username, passwd, email, oidc_subject, status, create_time, last_login, display_name"
+_USER_COLUMNS = (
+    "uid, username, passwd, email, oidc_subject, status, create_time, last_login, display_name, token_version"
+)
 
 
 class AisocUserStore:
@@ -75,6 +88,8 @@ class AisocUserStore:
             }
             if "oidc_subject" not in columns:
                 conn.execute("ALTER TABLE users ADD COLUMN oidc_subject TEXT")
+            if "token_version" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_oidc_subject "
                 "ON users (oidc_subject) WHERE oidc_subject IS NOT NULL"
@@ -219,14 +234,43 @@ class AisocUserStore:
         return dict(row) if row is not None else None
 
     def update_password(self, uid: str, passwd: str) -> None:
+        """Set the password and revoke every access token issued before it."""
         with self._lock, self._connect() as conn:
-            conn.execute("UPDATE users SET passwd = ? WHERE uid = ?", (passwd, uid))
+            conn.execute(
+                "UPDATE users SET passwd = ?, token_version = token_version + 1 WHERE uid = ?",
+                (passwd, uid),
+            )
             conn.commit()
 
     def update_status(self, uid: str, status: str) -> None:
+        """Set the status; disabling revokes every access token issued so far,
+        so re-enabling the account does not bring them back."""
+        bump = 1 if status == "disabled" else 0
         with self._lock, self._connect() as conn:
-            conn.execute("UPDATE users SET status = ? WHERE uid = ?", (status, uid))
+            conn.execute(
+                "UPDATE users SET status = ?, token_version = token_version + ? WHERE uid = ?",
+                (status, bump, uid),
+            )
             conn.commit()
+
+    def bump_token_version(self, uid: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("UPDATE users SET token_version = token_version + 1 WHERE uid = ?", (uid,))
+            conn.commit()
+
+    def revoke_token_id(self, jti: str, expires_at: int, now: int) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM revoked_tokens WHERE expires_at <= ?", (now,))
+            conn.execute(
+                "INSERT OR IGNORE INTO revoked_tokens (jti, expires_at) VALUES (?, ?)",
+                (jti, expires_at),
+            )
+            conn.commit()
+
+    def is_token_id_revoked(self, jti: str) -> bool:
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT 1 FROM revoked_tokens WHERE jti = ?", (jti,)).fetchone()
+        return row is not None
 
     def update_last_login(self, uid: str, last_login: str) -> None:
         with self._lock, self._connect() as conn:

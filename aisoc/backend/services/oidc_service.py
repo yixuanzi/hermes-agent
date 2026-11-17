@@ -258,5 +258,5 @@ def exchange_ticket(
         raise HTTPException(status_code=403, detail="User account is disabled.")
     from aisoc.backend.auth import build_token_payload
 
-    access_token, expires_in = build_token_payload(user, settings)
+    access_token, expires_in = build_token_payload(user, settings, user_service)
     return access_token, (user, expires_in)

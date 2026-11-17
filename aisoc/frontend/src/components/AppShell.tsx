@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { FloatingChatWidget } from "../chat/FloatingChatWidget";
 import { AisocChatProvider, useOptionalChatRuntime } from "../chat/runtime/chatRuntime";
+import { fetchJSON } from "../lib/api";
 import { clearStoredAuth } from "../lib/auth";
 import { useCurrentUser } from "../lib/authContext";
 import { HudGrid } from "./ambient/HudGrid";
@@ -231,7 +232,10 @@ export function AppShell() {
     navItems[0];
   const showWorkbenchTopbar = activeItem.path !== "/overview";
 
-  function signOut(): void {
+  async function signOut(): Promise<void> {
+    // Revoke this session's token server-side before forgetting it locally.
+    // An unreachable backend must not keep the user signed in here.
+    await fetchJSON("/api/auth/logout", { method: "POST" }).catch(() => undefined);
     clearStoredAuth();
     window.location.href = "/login";
   }
@@ -420,7 +424,7 @@ export function AppShell() {
             <button
               className="ghost-button side-nav-footer-button"
               type="button"
-              onClick={signOut}
+              onClick={() => void signOut()}
               title="Sign Out"
             >
               <span className="nav-link-icon" aria-hidden="true">
@@ -456,7 +460,7 @@ export function AppShell() {
                 <button
                   className="ghost-button workbench-topbar-signout"
                   type="button"
-                  onClick={signOut}
+                  onClick={() => void signOut()}
                   title="Sign Out"
                 >
                   Sign Out

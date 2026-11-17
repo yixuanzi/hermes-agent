@@ -31,6 +31,7 @@ from aisoc.backend.chat.models import (
     DelegateForegroundState,
 )
 from aisoc.backend.chat.attachments import ChatAttachment, ChatAttachmentStore, prepare_turn_message
+from aisoc.backend.chat.drawer import DrawerFileLedger
 from aisoc.backend.chat.runtime import ChatInputAdapter, ChatOutputAdapter
 from aisoc.backend.agent_runtime import default_agent_factory
 from aisoc.backend.agent_runtime import load_conversation_history
@@ -58,10 +59,26 @@ def _conversation_title(seed: str | None, fallback: str = "New Conversation") ->
     return text[:30] + ("..." if len(text) > 30 else "")
 
 
+def _is_owned_runtime_session(session_id: str, user_id: str) -> bool:
+    """True when ``session_id`` already names a persisted session ``user_id`` owns.
+
+    The sessions page lists runtime ids, and the chat UI binds with them to resume a
+    conversation; hashing one again would fork it into a new, empty session.
+    """
+    from hermes_state import SessionDB
+
+    db = SessionDB()
+    try:
+        row = db.get_session(session_id)
+    finally:
+        db.close()
+    return bool(row) and str(row.get("user_id") or "").strip() == user_id
+
+
 def _runtime_session_id(session_id: str, user_id: str | None) -> str:
     """Keep public session ids stable while isolating persisted runtime state."""
     normalized_user_id = str(user_id or "").strip()
-    if not normalized_user_id:
+    if not normalized_user_id or _is_owned_runtime_session(session_id, normalized_user_id):
         return session_id
     digest = hashlib.sha256(
         f"{normalized_user_id}\0{session_id}".encode()
@@ -240,10 +257,12 @@ class ChatSessionActor:
         agent_factory: Callable[..., object],
         user_id: str | None = None,
         user_name: str | None = None,
+        drawer_files: DrawerFileLedger | None = None,
     ) -> None:
         self.session_id = session_id
         self.title = title
         self._agent_factory = agent_factory
+        self._drawer_files = drawer_files
         self._user_id = str(user_id or "").strip()
         self._user_name = str(user_name or "").strip()
         self._runtime_session_id = _runtime_session_id(session_id, self._user_id)
@@ -581,23 +600,15 @@ class ChatSessionActor:
         stripped = str(text or "")
         turn_attachments = list(attachments or [])
         with self._lock:
-            if self._pending_approval is not None:
+            slash_parts = self._native_slash_parts(stripped)
+            rejection = self._message_rejection(routes_elsewhere=slash_parts is not None)
+            if rejection is not None:
+                # Rejected before ``message.accepted``: the client must never
+                # see a turn open for a message the session refused.
+                code, message = rejection
                 self._send_event(
                     "error",
-                    {
-                        "code": "waiting_for_approval",
-                        "message": "Session is waiting for approval.",
-                    },
-                    source=self._foreground_source,
-                )
-                return
-            if self._pending_clarify is not None:
-                self._send_event(
-                    "error",
-                    {
-                        "code": "waiting_for_clarify",
-                        "message": "Session is waiting for clarify input.",
-                    },
+                    {"code": code, "message": message, "client_msg_id": client_msg_id},
                     source=self._foreground_source,
                 )
                 return
@@ -612,7 +623,6 @@ class ChatSessionActor:
                 source=self._foreground_source,
                 turn_id=turn_id,
             )
-            slash_parts = self._native_slash_parts(stripped)
             if slash_parts is not None:
                 command, arg = slash_parts
                 self._turn_id = turn_id
@@ -634,18 +644,6 @@ class ChatSessionActor:
                 self._delegate_input.push_line(stripped)
                 return
 
-            if self._running_thread is not None and self._running_thread.is_alive():
-                self._send_event(
-                    "error",
-                    {
-                        "code": "session_busy",
-                        "message": "Session is currently busy.",
-                    },
-                    source=self._foreground_source,
-                    turn_id=turn_id,
-                )
-                return
-
             self._turn_id = turn_id
             self._main_message_id = f"assistant_{uuid4().hex[:10]}"
             self._foreground_source = "main"
@@ -659,6 +657,20 @@ class ChatSessionActor:
             )
             self._running_thread = worker
             worker.start()
+
+    def _message_rejection(self, *, routes_elsewhere: bool) -> tuple[str, str] | None:
+        """Why a new message cannot be accepted now, or ``None``. Native slash
+        commands and delegate-foreground input never start a main turn, so a
+        running one does not make the session busy for them."""
+        if self._pending_approval is not None:
+            return "waiting_for_approval", "Session is waiting for approval."
+        if self._pending_clarify is not None:
+            return "waiting_for_clarify", "Session is waiting for clarify input."
+        delegate_routed = self._foreground_source == "delegate" and self._delegate_input is not None
+        running = self._running_thread is not None and self._running_thread.is_alive()
+        if running and not routes_elsewhere and not delegate_routed:
+            return "session_busy", "Session is currently busy."
+        return None
 
     def handle_approval_response(self, choice: str) -> None:
         normalized = str(choice or "").strip().lower()
@@ -1056,6 +1068,8 @@ class ChatSessionActor:
                             modified_files.extend(
                                 path for path in landed_files if path not in known_files
                             )
+                        if self._drawer_files is not None:
+                            self._drawer_files.record(self._user_id, landed_files)
                 preview = str(function_result)
                 if len(preview) > 200:
                     preview = preview[:200] + "..."
@@ -1263,6 +1277,7 @@ class ChatSessionManager:
         self._lock = threading.Lock()
         self._sessions: dict[tuple[str, str], ChatSessionActor] = {}
         self.attachments = ChatAttachmentStore()
+        self.drawer_files = DrawerFileLedger()
 
     def set_agent_factory(self, agent_factory: Callable[..., object]) -> None:
         with self._lock:
@@ -1291,6 +1306,7 @@ class ChatSessionManager:
                     agent_factory=self._agent_factory,
                     user_id=user_id,
                     user_name=user_name,
+                    drawer_files=self.drawer_files,
                 )
                 self._sessions[session_key] = actor
             else:

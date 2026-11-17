@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-import pwd
 import subprocess
 import threading
 from pathlib import Path
 from typing import Any
+
+from hermes_constants import get_hermes_home
 
 
 logger = logging.getLogger(__name__)
@@ -31,27 +32,25 @@ _compile_lock = threading.Lock()
 _scan_lock = threading.Lock()
 
 
-def _real_home() -> str:
-    """Return the OS-level home directory for the current uid.
-
-    Distinct from ``Path.home()`` / ``os.environ['HOME']`` — the hermes runtime's
-    ``prepare_hermes_home()`` rewrites ``HOME`` to a per-profile sandbox before
-    this module is imported, which would otherwise poison ``~`` expansion in
-    ``_env_path()`` defaults. ``getpwuid`` reads directly from the passwd
-    database, so it survives HOME manipulation.
-    """
-    return pwd.getpwuid(os.getuid()).pw_dir
+def _ontology_path(env_name: str, *parts: str) -> Path:
+    override = os.environ.get(env_name)
+    if override:
+        return Path(override).expanduser()
+    return get_hermes_home().joinpath(*parts)
 
 
-def _env_path(name: str, default: str) -> Path:
-    return Path(os.environ.get(name, default)).expanduser()
+class _ProfilePath:
+    """Class attribute resolved on every access: the running profile's
+    ``HERMES_HOME`` (or the ``AISOC_ONTOLOGY_*`` override) decides, never the
+    value at import time, which may belong to another profile or to no test
+    sandbox at all."""
 
+    def __init__(self, env_name: str, *parts: str) -> None:
+        self._env_name = env_name
+        self._parts = parts
 
-# Absolute path to the aisoc profile, resolved via the OS uid → home mapping
-# rather than ~. On the canonical deploy host this is /home/amber/.hermes/…;
-# on a Mac dev machine it's /Users/<login>/.hermes/…; either way it's a real
-# on-disk path unaffected by any HOME env manipulation.
-_PROFILE = f"{_real_home()}/.hermes/profiles/aisoc"
+    def __get__(self, instance: object, owner: type) -> Path:
+        return _ontology_path(self._env_name, *self._parts)
 
 
 def _run_ontology_script(script: Path, lock: threading.Lock, label: str) -> dict[str, Any]:
@@ -91,26 +90,17 @@ def _run_ontology_script(script: Path, lock: threading.Lock, label: str) -> dict
 
 class OntologyService:
     # v3 三层图谱是唯一真实来源。compile 只把它写到 alias 路径供旧调用点兼容。
-    # 默认值使用 _PROFILE（getpwuid 拿的真 home）而不是 ~，因为 hermes runtime
-    # 会在这个模块被 import 之前重写 HOME → sandbox 目录，此时 ~ 展开会得到
-    # sandbox 路径，一切都错位。
-    STANDARD_GRAPH_V3 = _env_path(
+    STANDARD_GRAPH_V3 = _ProfilePath(
         "AISOC_ONTOLOGY_STANDARD_GRAPH_V3",
-        f"{_PROFILE}/artifacts/ontology/standard/standard-graph_v3.json",
+        "artifacts", "ontology", "standard", "standard-graph_v3.json",
     )
-    STANDARD_GRAPH_ALIAS = _env_path(
+    STANDARD_GRAPH_ALIAS = _ProfilePath(
         "AISOC_ONTOLOGY_STANDARD_GRAPH",
-        f"{_PROFILE}/artifacts/ontology/standard/standard-graph.json",
+        "artifacts", "ontology", "standard", "standard-graph.json",
     )
     STANDARD_GRAPH = STANDARD_GRAPH_V3
-    SCANS_ROOT = _env_path(
-        "AISOC_ONTOLOGY_SCANS_ROOT",
-        f"{_PROFILE}/artifacts/ontology/scans",
-    )
-    SKILL_SCRIPTS = _env_path(
-        "AISOC_ONTOLOGY_SKILL_SCRIPTS",
-        f"{_PROFILE}/skills/ontology/scripts",
-    )
+    SCANS_ROOT = _ProfilePath("AISOC_ONTOLOGY_SCANS_ROOT", "artifacts", "ontology", "scans")
+    SKILL_SCRIPTS = _ProfilePath("AISOC_ONTOLOGY_SKILL_SCRIPTS", "skills", "ontology", "scripts")
 
     @staticmethod
     def _read_json(path: Path) -> Any:

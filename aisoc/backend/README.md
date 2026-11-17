@@ -62,6 +62,7 @@ python -c "from aisoc.backend.server import start_server; start_server(host='127
 - `AISOC_BOOTSTRAP_ADMIN_PASSWORD`：首次启动播种初始 `admin` 账号所需（≥8 位）；未设置时不会创建 admin，`/api/system/bootstrap` 返回 `admin_setup_required: true`，任何账号均无法登录
 - `AISOC_JWT_SECRET`：若设置，则 JWT 使用该固定密钥签发/校验；未设置时进程启动自动生成随机密钥（不落盘）——**重启且未设置该变量会使所有已登录会话失效**
 - `AISOC_MCP_ACTIVE`：AISOC 聊天 agent 的 MCP 装载开关；默认跟随配置自动加载，设置为 `false/0/no/off` 可在启动时关闭 MCP
+- `AISOC_OIDC_ISSUER` / `AISOC_OIDC_CLIENT_ID` / `AISOC_OIDC_CLIENT_SECRET` / `AISOC_OIDC_REDIRECT_URI` / `AISOC_OIDC_BACKCHANNEL_URL` / `AISOC_OIDC_POST_LOGIN_REDIRECT`：OIDC 单点登录（`/api/sso/*`）；未配置 client 时 `/api/sso/start` 返回 503
 
 ---
 
@@ -91,10 +92,15 @@ python -c "from aisoc.backend.server import start_server; start_server(host='127
   - `/api/auth/register`
   - `/api/auth/session`
   - `/api/auth/logout`
+  - `/api/sso/start`、`/api/sso/callback`、`/api/sso/exchange`
   - `/api/system/bootstrap`
   - `/health`
-- HTTP：`Authorization: Bearer <JWT>`（`/api/auth/login` 换取）
+- HTTP：`Authorization: Bearer <JWT>`（`/api/auth/login` 或 `/api/sso/exchange` 换取）
 - WebSocket：`?token=<JWT>`（浏览器 WS 升级不便带自定义 Authorization）
+- 令牌吊销（HTTP 与 WS 建连时同样校验）：
+  - JWT 携带 `ver`（用户的 `token_version`）与 `jti`；修改自己密码、管理员重置密码、禁用账号都会递增 `token_version`，此前签发的令牌全部失效（重新启用账号也不会复活）
+  - `POST /api/auth/logout` 只吊销所携带的这一个令牌（`jti` 记入 `aisoc.db` 的 `revoked_tokens`，过期后清理），同一用户的其他会话不受影响；不带 `jti` 的旧令牌登出时只能递增 `token_version`，即注销该用户全部会话
+  - 不带 `ver` 的令牌按版本 0 处理
 - 自助注册（`POST /api/auth/register`）默认落地 `status=disabled`，需管理员在 `/api/users` 启用后才能登录
 
 ### 3.3 统一聊天链路设计（1.0）
@@ -103,11 +109,16 @@ python -c "from aisoc.backend.server import start_server; start_server(host='127
   `approval.respond` / `clarify.respond` / `session.interrupt` / `session.resume`；
   服务端事件 envelope（`message.delta/completed`、`run.state`、`tool.*`、
   `delegate.*`、`approval.*`、`clarify.*`、`error`，含 `server_event_id` 去重）。
+  - 非 JSON 文本帧或二进制帧返回 `error`（`code: invalid_message`），连接继续可用；连接以任何方式结束都会释放其绑定的会话。
+  - 会话忙（运行中 / 等待审批 / 等待澄清）时，`message.send` 直接返回 `error`（带 `client_msg_id`），不会先发 `message.accepted`。
+  - 冷启动 `session.bind`（构建 agent）与消息处理在线程池中执行，不阻塞其他请求。
 - `message.send` 文本先经 `QuickCommandService.resolve_text` 做 `@[type_name]`
   快捷指令服务端展开与 `{var}` 参数替换（seed 在 `services/quick_command_seeds.py`，
   可用 `$HERMES_HOME/aisoc_quick_commands.json` 扩展/覆盖）。
 - `GET /api/chat/quick-commands`：composer 快捷指令清单。
-- `GET /api/chat/drawer-html?path=...`：工作区受限的文件预览（A2UI HTML 产物等）。
+- `GET /api/chat/drawer-html?path=...`：文件预览（A2UI HTML 产物等），只返回当前用户自己的 agent 回合
+  （`write_file`/`patch`）写入过的文件（不论位于何处，agent 的文件工具按终端 cwd 解析相对路径），
+  且仍受核心读保护约束；其他路径一律按不存在返回 404，相对路径按 `HERMES_HOME` 解析。
 - `POST /api/chat/attachments`：聊天附件上传。
 - `/agent2ui/*`：Agent2UI bridge 与模板静态资源（匿名，供 sandboxed 预览 iframe 加载）。
 - 会话即 `hermes_state.SessionDB` 会话（`platform=aisoc_web`），`/api/sessions?source=aisoc_web`
@@ -124,8 +135,9 @@ python -c "from aisoc.backend.server import start_server; start_server(host='127
 - `POST /login`
 - `POST /register`（自助注册，落地 `status=disabled`）
 - `GET /session`
-- `POST /logout`
-- `PUT /password`
+- `POST /logout`（吊销所携带的令牌，见 3.2）
+- `PUT /password`（成功后此前签发的令牌失效，需要重新登录）
+- `PUT /profile`（修改 `display_name`）
 
 ### 4.1a Users（仅管理员）
 前缀：`/api/users`
@@ -170,6 +182,8 @@ python -c "from aisoc.backend.server import start_server; start_server(host='127
 - `POST /jobs/{job_id}/trigger`
 - `DELETE /jobs/{job_id}`
 
+非法输入（错误的 schedule、修改 job id、非法状态迁移等）返回 400。
+
 ### 4.6 Skills
 前缀：`/api/skills`
 - `GET /` （skill item 含 `path` 字段）
@@ -187,7 +201,7 @@ python -c "from aisoc.backend.server import start_server; start_server(host='127
 
 ### 4.8 Logs
 前缀：`/api/logs`
-- `GET /`
+- `GET /?file=agent&lines=100&level=&component=&search=`（`lines` 必须 ≥ 1，否则 422；上限 500）
 
 ### 4.9 Knowledge Base
 前缀：`/api/kb`
@@ -197,7 +211,7 @@ python -c "from aisoc.backend.server import start_server; start_server(host='127
 环境变量：`AISOC_WIKI_PATH` 指定知识库根目录，未设置或路径不存在时返回 503。
 
 安全限制：
-- 禁止路径遍历（`..`）和符号链接逃逸
+- 禁止路径遍历（`..`）和符号链接逃逸；`/tree` 跳过目标不存在或指向知识库外的符号链接（逐项跳过，不影响整个列表）
 - 文件大小上限 2 MB（超出返回 413）
 - 非 UTF-8 文本文件返回 415
 
@@ -211,11 +225,46 @@ python -c "from aisoc.backend.server import start_server; start_server(host='127
 - `GET /keywords/{keyword}/sessions`
 - `GET /cron-token-dist`
 - `GET /cronjobs`
+- `GET /model-usage?period=today|7d|30d`
+
+`stats`、`token-trend`、`cron-token-dist`、`model-usage` 是全局聚合；`security-events`、`keywords`、
+`keywords/{keyword}/sessions` 返回会话内容，只包含当前用户自己的会话。
 
 说明（2026-05 更新）：
 - 原 `GET /api/overview/cronjobs/{job_id}/history` 已迁移到 `GET /api/cron/jobs/{job_id}/history`
 - 原 `GET /api/overview/sessions/{session_id}/detail` 已迁移到 `GET /api/sessions/{session_id}/detail`
 - Overview 仅保留总览/聚合接口；明细下钻接口归属到对应业务模块（Cron / Sessions）
+
+### 4.11 MCP Servers
+前缀：`/api/mcp-servers`（读写 `config.yaml` 的 `mcp_servers`，影响所有用户的 agent）
+- `GET /`、`GET /{name}`：所有用户可读；非管理员看到的 URL 只保留 scheme+host（路径/查询替换为 `***`），`args`/`env` 值替换为 `***`
+- `POST /`、`PUT /{name}`、`DELETE /{name}`、`PUT /{name}/enabled`、`PUT /{name}/tools`、`POST /{name}/test`、`POST /reload`：仅管理员（否则 403）
+- `PUT /{name}` 只覆盖表单字段（url/command/args/env/Authorization 头），其他键（工具过滤、超时等）保留；未传 `enabled` 时保持原状态
+
+### 4.12 Skill Hub
+前缀：`/api/skill-hub`（租户 SkillHub，配置项 `skill_hub.url` / `skill_hub.api_key`）
+- `GET /status`
+- `GET /catalog?search=`
+- `GET /skills`
+- `POST /skills`（安装；仅在安装成功后才把 `~/.agents/skills` 加入 `skills.external_dirs`）
+- `POST /skills/{name}/sync`（未安装返回 404）
+- `DELETE /skills/{name}`（未安装返回 404）
+
+### 4.13 Ontology
+前缀：`/api/ontology`（产物默认位于 `$HERMES_HOME/artifacts/ontology/`，技能脚本位于 `$HERMES_HOME/skills/ontology/scripts`，可用 `AISOC_ONTOLOGY_*` 环境变量覆盖；读取接口不会创建目录；AI 判定子进程继承当前 `HERMES_HOME`，始终以 server 所在 profile 运行；`AISOC_ONTOLOGY_PROFILE` 是扫描脚本使用的 profile 目录路径，不是 profile 名）
+- `POST /compile`
+- `POST /scan`（异步 job）
+- `GET /scan/active`
+- `GET /scan/{job_id}`
+- `GET /overview`
+- `GET /artifacts/{name}`
+- `GET /roadmap`
+
+### 4.14 SSO（OIDC）
+前缀：`/api/sso`（白名单）
+- `GET /start`：跳转到 IdP
+- `GET /callback`：IdP 回调，写入一次性登录票据 cookie 后跳转前端
+- `POST /exchange`：用票据 cookie 换取 JWT（与 `/api/auth/login` 相同响应）
 
 ## 5. 关键实现与依赖
 

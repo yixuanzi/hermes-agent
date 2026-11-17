@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
 import { fetchDocument, fetchTree, type DocumentResponse, type TreeItem } from "../lib/kb";
 import remarkObsidian from "../lib/remark-obsidian";
+import { wikiSanitizeSchema } from "../lib/wiki-sanitize";
 
 type DirChildren = Record<string, TreeItem[]>;
 
@@ -177,7 +179,7 @@ export function WikiPage() {
             <div className="wiki-detail-content">
               <Markdown
                 remarkPlugins={[remarkGfm, remarkObsidian]}
-                rehypePlugins={[rehypeRaw]}
+                rehypePlugins={[rehypeRaw, [rehypeSanitize, wikiSanitizeSchema]]}
               >
                 {document.content}
               </Markdown>

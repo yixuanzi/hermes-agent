@@ -620,7 +620,14 @@ def _session_row_to_event(db: SessionDB, row: dict[str, Any], meta: dict[str, st
     }
 
 
-def _recent_security_session_rows(db: SessionDB, since: float, limit: int) -> list[dict[str, Any]]:
+# Content-bearing overview reads follow the sessions API's visibility rule: a user sees their own
+# sessions plus ownerless ones (cron, gateway, legacy rows), never another account's chats.
+_VISIBLE_TO_USER_SQL = "(COALESCE(s.user_id, '') = '' OR s.user_id = ?)"
+
+
+def _recent_security_session_rows(
+    db: SessionDB, since: float, limit: int, *, user_id: str
+) -> list[dict[str, Any]]:
     """Recent non-cron sessions whose title or any message hits a security keyword."""
     like_patterns = [f"%{_escape_like(keyword.lower())}%" for keyword in _SECURITY_KEYWORDS]
     title_ors = " OR ".join(["LOWER(COALESCE(s.title, '')) LIKE ? ESCAPE '\\'"] * len(like_patterns))
@@ -632,6 +639,7 @@ def _recent_security_session_rows(db: SessionDB, since: float, limit: int) -> li
         FROM sessions s
         WHERE s.started_at > ?
           AND COALESCE(s.source, '') != 'cron'
+          AND {_VISIBLE_TO_USER_SQL}
           AND (
             ({title_ors})
             OR EXISTS (
@@ -642,28 +650,28 @@ def _recent_security_session_rows(db: SessionDB, since: float, limit: int) -> li
         ORDER BY s.started_at DESC
         LIMIT ?
     """
-    params = [since, *like_patterns, *like_patterns, limit]
+    params = [since, user_id, *like_patterns, *like_patterns, limit]
     return _query_all(db, sql, tuple(params))
 
 
-def list_security_events(limit: int) -> list[dict[str, Any]]:
+def list_security_events(limit: int, *, user_id: str) -> list[dict[str, Any]]:
     safe_limit = min(max(int(limit or 0), 1), 50)
     db = SessionDB()
     try:
         cron_rows = _query_all(
             db,
-            """
+            f"""
             SELECT id, title, started_at, ended_at, end_reason,
                    COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) AS total_tokens
-            FROM sessions
-            WHERE source = 'cron'
+            FROM sessions s
+            WHERE source = 'cron' AND {_VISIBLE_TO_USER_SQL}
             ORDER BY started_at DESC
             LIMIT ?
             """,
-            (safe_limit,),
+            (user_id, safe_limit),
         )
         session_rows = _recent_security_session_rows(
-            db, time.time() - _SECURITY_SESSION_WINDOW_SECONDS, safe_limit
+            db, time.time() - _SECURITY_SESSION_WINDOW_SECONDS, safe_limit, user_id=user_id
         )
 
         events: list[dict[str, Any]] = []
@@ -687,13 +695,13 @@ def list_security_events(limit: int) -> list[dict[str, Any]]:
         db.close()
 
 
-def list_keywords() -> list[dict[str, Any]]:
+def list_keywords(*, user_id: str) -> list[dict[str, Any]]:
     since = time.time() - _KEYWORD_WINDOW_SECONDS
     db = SessionDB()
     try:
         rows = _query_all(
             db,
-            """
+            f"""
             SELECT s.id, s.title,
                    (
                      SELECT substr(m.content, 1, 240)
@@ -704,10 +712,11 @@ def list_keywords() -> list[dict[str, Any]]:
                    ) AS first_msg
             FROM sessions s
             WHERE s.started_at > ? AND COALESCE(s.message_count, 0) >= 1
+              AND {_VISIBLE_TO_USER_SQL}
             ORDER BY s.started_at DESC
             LIMIT 120
             """,
-            (since,),
+            (since, user_id),
         )
     finally:
         db.close()
@@ -748,7 +757,7 @@ def list_keywords() -> list[dict[str, Any]]:
     return keywords[:20]
 
 
-def list_keyword_sessions(keyword: str) -> list[dict[str, Any]]:
+def list_keyword_sessions(keyword: str, *, user_id: str) -> list[dict[str, Any]]:
     needle = (keyword or "").strip()
     if not needle:
         return []
@@ -759,7 +768,7 @@ def list_keyword_sessions(keyword: str) -> list[dict[str, Any]]:
     try:
         rows = _query_all(
             db,
-            """
+            f"""
             SELECT
               s.id AS session_id,
               COALESCE(
@@ -779,6 +788,7 @@ def list_keyword_sessions(keyword: str) -> list[dict[str, Any]]:
               COALESCE(s.input_tokens, 0) + COALESCE(s.output_tokens, 0) AS tokens
             FROM sessions s
             WHERE s.started_at > ?
+              AND {_VISIBLE_TO_USER_SQL}
               AND (
                 LOWER(COALESCE(s.title, '')) LIKE LOWER(?) ESCAPE '\\'
                 OR EXISTS (
@@ -792,7 +802,7 @@ def list_keyword_sessions(keyword: str) -> list[dict[str, Any]]:
             ORDER BY s.started_at DESC
             LIMIT 10
             """,
-            (since, like_pattern, like_pattern),
+            (since, user_id, like_pattern, like_pattern),
         )
     finally:
         db.close()

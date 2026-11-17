@@ -8,6 +8,7 @@ import hmac
 import os
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import jwt
 from fastapi import HTTPException, Request
@@ -87,7 +88,9 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 
-def create_access_token(user: UserResponse, settings: AisocSettings) -> str:
+def create_access_token(user: UserResponse, settings: AisocSettings, *, token_version: int) -> str:
+    """``ver`` ties the token to the user's current token version (bumped on
+    password change and disable); ``jti`` lets logout revoke just this one."""
     now = _utc_now()
     payload = {
         "sub": user.uid,
@@ -95,6 +98,8 @@ def create_access_token(user: UserResponse, settings: AisocSettings) -> str:
         "email": user.email,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=settings.jwt_expire_seconds)).timestamp()),
+        "ver": token_version,
+        "jti": uuid4().hex,
     }
     return str(jwt.encode(payload, settings.jwt_secret, algorithm=JWT_ALGORITHM))
 
@@ -114,8 +119,10 @@ def decode_access_token(token: str, settings: AisocSettings) -> dict[str, Any]:
     return payload
 
 
-def build_token_payload(user: UserResponse, settings: AisocSettings) -> tuple[str, int]:
-    token = create_access_token(user, settings)
+def build_token_payload(
+    user: UserResponse, settings: AisocSettings, user_service: UserService
+) -> tuple[str, int]:
+    token = create_access_token(user, settings, token_version=user_service.token_version(user.uid))
     return token, settings.jwt_expire_seconds
 
 
@@ -131,8 +138,7 @@ def get_current_user_from_token(
     user_service: UserService,
 ) -> tuple[UserResponse, dict[str, Any]]:
     payload = decode_access_token(token, settings)
-    user = user_service.get_enabled_user_by_uid(str(payload["sub"]))
-    return user, payload
+    return user_service.get_user_for_token(payload), payload
 
 
 def get_optional_user_from_request(

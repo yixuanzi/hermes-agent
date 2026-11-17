@@ -52,6 +52,8 @@ def build_skill_hub_router() -> APIRouter:
             return await asyncio.to_thread(skill_hub_service.sync_skill, name)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except skill_hub_service.SkillHubSkillNotInstalledError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         except skill_hub_service.SkillHubError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -61,6 +63,8 @@ def build_skill_hub_router() -> APIRouter:
             return await asyncio.to_thread(skill_hub_service.uninstall_skill, name)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except skill_hub_service.SkillHubSkillNotInstalledError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         except skill_hub_service.SkillHubError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
