@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from stat import S_ISDIR
 from typing import Any
 
 from fastapi import HTTPException
@@ -57,16 +58,26 @@ def list_tree(cwd: str = "") -> dict[str, Any]:
         raise HTTPException(status_code=403, detail=f"Permission denied: {exc}") from exc
 
     for entry in entries:
-        rel = str(entry.relative_to(root))
-        stat = entry.stat()
+        # A dangling symlink must not fail the whole listing, and one pointing
+        # outside the root must not expose its target's metadata; neither is
+        # readable through the KB, so neither is listed. (RuntimeError: a
+        # symlink loop before Python 3.13.)
+        try:
+            resolved = entry.resolve(strict=True)
+            st = resolved.stat()
+        except (OSError, RuntimeError):
+            continue
+        if not resolved.is_relative_to(root):
+            continue
+        is_dir = S_ISDIR(st.st_mode)
         node = {
             "name": entry.name,
-            "path": rel,
-            "type": "dir" if entry.is_dir() else "file",
-            "size": stat.st_size if entry.is_file() else 0,
-            "modified": int(stat.st_mtime),
+            "path": str(entry.relative_to(root)),
+            "type": "dir" if is_dir else "file",
+            "size": 0 if is_dir else st.st_size,
+            "modified": int(st.st_mtime),
         }
-        (dirs if entry.is_dir() else files).append(node)
+        (dirs if is_dir else files).append(node)
 
     return {"root": str(root), "cwd": cwd or "/", "items": dirs + files}
 

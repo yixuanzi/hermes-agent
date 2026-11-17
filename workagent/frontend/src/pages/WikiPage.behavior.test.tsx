@@ -116,6 +116,37 @@ afterEach(async () => {
 });
 
 describe("WikiPage behavior", () => {
+  it("renders untrusted document HTML without scripts or event handlers", async () => {
+    fetchDocumentMock.mockImplementation(async (path) =>
+      documentResponse(
+        path,
+        [
+          "# Ingested page",
+          '<iframe srcdoc="<script>parent.document.title=1</script>"></iframe>',
+          "<script>window.__wikiXss = 1</script>",
+          '<img src="x" onerror="window.__wikiXss = 2">',
+          '<a href="javascript:alert(1)">bad link</a>',
+          "==<img src=x onerror=alert(3)>==",
+          "Some ==highlighted== text",
+          "> [!note] Callout body",
+        ].join("\n\n"),
+      ),
+    );
+    const container = await mountWikiPage();
+    await act(async () => {
+      fileButton(container, "guide.md").click();
+      await Promise.resolve();
+    });
+    await waitForAssert(() => expect(container.textContent).toContain("Ingested page"));
+
+    const content = container.querySelector(".wiki-detail-content");
+    if (!content) throw new Error("Wiki content not found");
+    expect(content.querySelector("iframe, script")).toBeNull();
+    expect(content.innerHTML).not.toMatch(/onerror|javascript:/i);
+    expect(Array.from(content.querySelectorAll("mark"), (mark) => mark.textContent)).toContain("highlighted");
+    expect(content.querySelector("blockquote.callout.callout-note")?.getAttribute("data-callout")).toBe("note");
+  });
+
   it("previews unsaved Markdown when switching back to browse mode", async () => {
     const container = await mountWikiPage();
     await act(async () => {

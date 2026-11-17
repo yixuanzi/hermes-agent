@@ -1,15 +1,16 @@
 # WORKAGENT Backend (FastAPI)
 
 ## 1. 模块定位
-WORKAGENT Backend 是 `hermes workagent` 的服务层。当前以 `server` 模块为主，后续扩展 `a2a` 模块后，同一入口将根据 `--module` 参数启动不同服务：
-- `server`：当前 Web Console / FastAPI API / Chat TUI PTY-WebSocket 网关
-- `a2a`：A2A (Agent-to-Agent) 协议服务
+WORKAGENT Backend 是 `hermes workagent` 的服务层。同一入口根据 `--module` 参数启动不同服务：
+- `server`（默认）：Web Console 与 FastAPI REST API；带 `--tui` 时额外提供嵌入式 Chat 的 PTY/WebSocket 链路
+- `a2a`：A2A (Agent-to-Agent) 协议服务，基于 a2a-sdk 1.x 的 JSON-RPC（见 3.6）
 - `extcli`：本地增强交互命令行，直接在终端里与 `AIAgent` 对话
 
-`server` 模块当前负责：
+`server` 模块负责：
 - 统一认证（Bearer Token）
-- 会话、Cron、Skill、Memory、Logs、Overview 数据读取/写入
-- Chat TUI 的 PTY/WebSocket 网关
+- 会话、Cron、Skill、Memory、Logs、Overview、知识库（KB）、Ontology 的读取/写入
+- 服务自重启（`POST /api/system/restart`）
+- `--tui` 时的 Chat PTY/WebSocket 网关
 - 托管前端静态资源（`web_dist`）
 
 当前统一入口：`workagent/backend/main.py`
@@ -83,7 +84,7 @@ agent:
 
 正在执行中的 turn 永远不会被驱逐，即使因此临时超过 `max_size`。
 
-同一组 `max_size` / `idle_ttl_secs` 也约束 A2A 的**任务存储**（`a2a_service/task_store.py` 的 `BoundedTaskStore`）。SDK 自带的 `InMemoryTaskStore` 只有客户端显式调用 `tasks/delete` 才会删除记录，而 A2A 委派轮询到终态后就走开了，所以未加约束时每个请求都会留下一条永久记录。`BoundedTaskStore` 在每次 `save` 时按 owner 分区做 LRU + TTL 清理，但只清理**已结束**的任务：处于 `submitted` / `working` 的任务仍被请求驱动，删掉会让并发的 `tasks/get`、`tasks/cancel` 中途报 not found；停在 `input_required` / `auth_required` 的任务则可以被 TTL 回收——客户端再也没回来正是 TTL 存在的意义。
+同一组 `max_size` / `idle_ttl_secs` 也约束 A2A 的**任务存储**（`a2a_service/task_store.py` 的 `BoundedTaskStore`）。SDK 自带的 `InMemoryTaskStore` 只在服务端显式调用 `delete()` 时才删除记录（A2A 1.x 协议没有删除任务的 RPC），而 A2A 委派轮询到终态后就走开了，所以未加约束时每个请求都会留下一条永久记录。`BoundedTaskStore` 在每次 `save` 时按 owner 分区做 LRU + TTL 清理，但只清理**已结束**的任务：处于 `submitted` / `working` 的任务仍被请求驱动，删掉会让并发的 `GetTask`、`CancelTask` 中途报 not found；停在 `input_required` / `auth_required` 的任务则可以被 TTL 回收——客户端再也没回来正是 TTL 存在的意义。
 
 注意：调用方若不显式传 `session_id`，`aegis_a2a_delegate` 会为每次调用生成一个新的 `context_id`（见 `tools/a2a_delegate_tool.py` 的 `_default_session_id()`），即"一次委派一个 context"。需要跨轮次复用上下文时，请显式传入稳定的 `session_id`。
 
@@ -210,6 +211,7 @@ python -c "from workagent.backend.server import start_server; start_server(host=
   - `/.well-known/agent-card.json`
   - `/a2a/.well-known/agent-card.json`（或 `A2A_BASE_PATH` 对应前缀）
 - 仅在 HTTP 中间件层认证，不改变 A2A executor、消息流或任务状态机
+- CORS 中间件位于认证之外：浏览器预检（带 `Access-Control-Request-Method` 的 `OPTIONS`）无需 Bearer 即被应答；其余请求（包括不带该头的 `OPTIONS`）仍需 Bearer，401 响应也带 CORS 头，跨域调用方能读到拒绝原因
 - `WORKAGENT_SESSION_TOKEN` 仍仅用于 `server` 模块；`A2A_SESSION_TOKEN` 仅用于 `a2a` 模块
 
 ### 3.4 A2A 管理与重启
@@ -226,7 +228,18 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 - `/api/chat/ws`：JSON-RPC sidecar（tui_gateway）
 - `/api/chat/pub`、`/api/chat/events`：事件分发通道
 
-非 `--tui` 模式下上述 WS 返回 `4403`。
+被拒绝的连接先完成 WebSocket 握手、再以 close frame 携带应用关闭码，前端可据此显示原因（握手前关闭会变成 HTTP 403 / 浏览器 1006，关闭码丢失）：
+- `4401`：`?token=` 缺失或错误
+- `4403`：未以 `--tui` 启动，或非 loopback 客户端（未使用 `--insecure`）
+- `4400`：`/pub`、`/events` 缺少或带有非法 `channel`
+- `1011`：`/pty` 已接受但无法启动（平台无 POSIX PTY、找不到 node/TUI 等），关闭前会先发送一行错误文本
+
+### 3.6 A2A 协议（a2a-sdk 1.x）
+- JSON-RPC 端点：`POST /a2a`（或 `A2A_BASE_PATH`）
+- 方法名为 1.x 形式：`SendMessage`、`GetTask`、`CancelTask`；`SendStreamingMessage` 需要以 `--streaming` 启动（AgentCard 声明 streaming 能力）
+- 每个请求必须带 `A2A-Version: 1.0` 头；缺少该头按 0.3 处理，返回 `-32009`（VERSION_NOT_SUPPORTED）
+- 0.x 旧方法名（`message/send`、`tasks/get` 等）返回 `-32601 Method not found`
+- Hermes 审批/澄清与中途引导走独立 HTTP 端点，见 [`docs/a2a-interaction-extension.md`](docs/a2a-interaction-extension.md)
 
 ---
 
@@ -239,8 +252,9 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 - `POST /logout`
 
 ### 4.2 System
-- `GET /health`
+- `GET /health`（返回 `status` 与当前进程 `pid`）
 - `GET /api/system/bootstrap`
+- `POST /api/system/restart`：重放当前启动命令重启 server，返回 HTTP 202 和 `accepted`、`already_requested`、`service`、`pid`；重复请求不会启动第二个 watcher
 
 ### 4.3 Chat
 前缀：`/api/chat`
@@ -252,6 +266,8 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 
 ### 4.4 Sessions
 前缀：`/api/sessions`
+
+列表、单会话和详情接口都不返回会话的 `system_prompt`。
 - `GET /`
 - `GET /search`
 - `GET /{session_id}`
@@ -262,6 +278,8 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 
 ### 4.5 Cron
 前缀：`/api/cron`
+
+非法输入（无法解析的 schedule、修改 job id、非法状态切换等）返回 400，`detail` 为具体原因。
 - `GET /jobs`
 - `GET /jobs/{job_id}`
 - `GET /jobs/{job_id}/history`
@@ -278,8 +296,11 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 - `GET /` （skill item 含 `path` 字段）
 - `GET /{skill_name}` （返回 `content` + `appendix[]`）
 - `GET /{skill_name}/appendix?path={path}` （返回附件文本内容）
+- `PUT /{skill_name}` （请求体 `{"content":"..."}`，写回 `SKILL.md`）
+- `PUT /{skill_name}/appendix` （请求体 `{"path":"...","content":"..."}`，写回已存在的附件文件）
 - `DELETE /{skill_name}` （删除当前 profile 本地 skills root 下的整个 skill 文件夹）
-- `PUT /toggle`
+- `PUT /toggle` （请求体 `{"name":"...","enabled":true}`）
+- `PUT /toggle-category` （请求体 `{"category":"...","enabled":true}`，切换整个分类）
 - `POST /reload`
 
 ### 4.7 Memory
@@ -295,7 +316,7 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 
 ### 4.9 Knowledge Base
 前缀：`/api/kb`
-- `GET /tree?cwd=` （列出指定目录下的文件和文件夹，`cwd` 为空时列出根目录）
+- `GET /tree?cwd=` （列出指定目录下的文件和文件夹，`cwd` 为空时列出根目录；悬空符号链接和指向 root 外的符号链接不列出）
 - `GET /documents?path=` （返回指定文件的文本内容）
 - `PUT /documents` （写回已存在的文件，JSON 请求体为 `{"path":"relative/path.md","content":"..."}`）
 
@@ -311,21 +332,34 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 
 ### 4.10 Overview
 前缀：`/api/overview`
-- `GET /status`
+- `GET /status` （`uptime_seconds` 为当前 server 进程的运行时长；`model` / `provider` 取当前 profile 配置的 `model.default` / `model.provider`，未配置时回退到最近一次会话）
 - `GET /stats`
-- `GET /token-trend`
+- `GET /token-trend?days=7|30`
 - `GET /security-events`
 - `GET /keywords`
 - `GET /keywords/{keyword}/sessions`
-- `GET /cron-token-dist`
+- `GET /cron-token-dist?period=today|7d|30d`
 - `GET /cronjobs`
+- `GET /model-usage?period=today|7d|30d` （按模型聚合会话数、token 与费用）
 
 说明（2026-05 更新）：
 - 原 `GET /api/overview/cronjobs/{job_id}/history` 已迁移到 `GET /api/cron/jobs/{job_id}/history`
 - 原 `GET /api/overview/sessions/{session_id}/detail` 已迁移到 `GET /api/sessions/{session_id}/detail`
 - Overview 仅保留总览/聚合接口；明细下钻接口归属到对应业务模块（Cron / Sessions）
 
-### 4.11 A2A Management
+### 4.11 Ontology
+前缀：`/api/ontology`
+- `POST /compile` （由权威 v3 标准图谱写出兼容别名文件）
+- `POST /scan` （异步启动 AI 扫描，立即返回 job；已有扫描在跑时返回同一个 job）
+- `GET /scan/active` （当前进行中的扫描 job，无则 404）
+- `GET /scan/{job_id}` （轮询 job 进度）
+- `GET /overview`
+- `GET /artifacts/{name}` （`standard` / `mapped` / `scorecard` / `gap` / `observed`）
+- `GET /roadmap`
+
+默认数据目录都在当前 profile 的 Hermes home 下：`artifacts/ontology/{standard,scans,jobs}/`，扫描脚本取 `skills/ontology/scripts/`。可用 `WORKAGENT_ONTOLOGY_STANDARD_GRAPH_V3`、`WORKAGENT_ONTOLOGY_STANDARD_GRAPH`、`WORKAGENT_ONTOLOGY_SCANS_ROOT`、`WORKAGENT_ONTOLOGY_JOBS_ROOT`、`WORKAGENT_ONTOLOGY_SKILL_SCRIPTS` 覆盖。AI 判定子进程 `hermes -z` 继承当前 `HERMES_HOME`，始终以 server 所在 profile 运行（`WORKAGENT_ONTOLOGY_PROFILE` 是扫描脚本使用的 profile 目录路径，不是 profile 名）。只读接口不会创建任何目录。
+
+### 4.12 A2A Management
 - `GET /man`
 - `POST /man/api/auth`：请求体 `{"token":"..."}`，返回 5 分钟、仅用于管理 API 的 Bearer 及到期信息
 - `POST /man/api/restart`：需要管理 Bearer，成功返回 HTTP 202 和 `accepted`、`already_requested`、`service`、`pid`

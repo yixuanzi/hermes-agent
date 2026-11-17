@@ -309,13 +309,6 @@ def create_a2a_app(
     app.state.workagent_settings = active_settings
     management_tokens = _ManagementAccessTokens()
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
         if _is_management_path(request.url.path):
@@ -337,6 +330,17 @@ def create_a2a_app(
                 detail = getattr(exc, "detail", "Unauthorized")
                 return JSONResponse(status_code=401, content={"detail": detail})
         return await call_next(request)
+
+    # Added after (so outside) the auth middleware: a browser preflight carries
+    # no Authorization header and must be answered before auth, and a 401 needs
+    # CORS headers for the caller to see it. Non-preflight requests, plain
+    # OPTIONS included, still pass through auth.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/health")
     async def health() -> dict[str, str | int]:

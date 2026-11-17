@@ -12,7 +12,7 @@ _TOOL_OUTPUT_TRUNCATE_CHARS = 500
 
 
 def _strip_sensitive_session_fields(item: dict[str, Any]) -> dict[str, Any]:
-    """Remove heavy/sensitive fields that should not be exposed in list APIs."""
+    """Remove heavy/sensitive fields that no session API exposes."""
     item.pop("system_prompt", None)
     return item
 
@@ -150,7 +150,8 @@ def get_session_detail(session_id: str) -> dict[str, Any] | None:
     db = SessionDB()
     try:
         sid = db.resolve_session_id(session_id)
-        return db.get_session(sid) if sid else None
+        session = db.get_session(sid) if sid else None
+        return _strip_sensitive_session_fields(session) if session else None
     finally:
         db.close()
 

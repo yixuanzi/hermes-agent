@@ -3,7 +3,7 @@
 ## 1. 模块定位
 WORKAGENT Frontend 是 `hermes workagent` 的 Web 控制台，负责：
 - 登录认证与 token 缓存
-- Overview / Chat / Sessions / Cron / Skills / Memory 页面
+- Overview / Chat / Sessions / Cron / Skills / LLMWiki / Memory / Ontology / Settings 页面
 - 调用后端 `/api/*` 与 WebSocket 接口
 
 构建产物输出到：`workagent/backend/web_dist`
@@ -23,7 +23,7 @@ npm install
 
 ```bash
 npm run dev      # Vite 开发模式
-npm run test     # Vitest
+npm run test     # Vitest（vitest.setup.ts 在 Node 25+ 内置 Web Storage 遮蔽 jsdom 时补上内存版 localStorage/sessionStorage，无需额外 NODE_OPTIONS）
 npm run build    # tsc + vite build（输出到 ../backend/web_dist）
 ```
 
@@ -55,15 +55,18 @@ hermes workagent --port 9120 --tui
 - `src/styles.css` + `pages/OverviewPageReplica.css`：全局与页面主题样式
 
 ### 3.2 路由设计
-受 `RequireAuth` 保护的主路由：
+`/login` 公开；以下主路由受 `RequireAuth` 保护（`/` 重定向到 `/overview`）：
 - `/overview`
 - `/chat`
 - `/sessions`
 - `/cron`
 - `/skills`
+- `/wiki`
 - `/memory`
+- `/ontology/*`（子视图 `/ontology/standard-graph`、`/ontology/diff-overview`、`/ontology/chat`，懒加载）
+- `/settings`
 
-未认证访问会跳转 `/login`。
+未认证访问会跳转 `/login`；其他路径渲染 `NotFoundPage`。
 
 ### 3.3 认证流程
 1. 登录页输入 token -> `POST /api/auth/login`
@@ -76,6 +79,7 @@ hermes workagent --port 9120 --tui
 - 使用 `xterm.js` 嵌入 TUI 终端
 - 通过 `/api/chat/pty` 建立 PTY WS 链路
 - 使用 `resume` 参数支持会话恢复
+- 后端拒绝连接时以 close code 告知原因：`4401` 提示重新登录，`4403` 提示以 `--tui` 启动（见后端 README 3.5）
 
 ---
 
@@ -87,7 +91,10 @@ hermes workagent --port 9120 --tui
 - `SessionsPage`：会话列表、消息查看、relaunch
 - `CronPage`：任务列表/操作/详情
 - `SkillsPage`：skills 开关
+- `WikiPage`：知识库（`WORKAGENT_WIKI_PATH`）目录浏览、Markdown 渲染（rehype-sanitize 过滤）与编辑
 - `MemoryPage`：SOUL、USER、memory files 编辑
+- `OntologyPage`：标准图谱、差异总览（AI 扫描）、本体对话
+- `SettingsPage`：运行状态（profile / model / provider / uptime）与服务重启
 - `NotFoundPage`：404
 
 说明：`LogsPage.tsx` 目前不在 `App.tsx` 路由中挂载（后端 logs API 仍可用）。
@@ -104,9 +111,12 @@ hermes workagent --port 9120 --tui
 - `/api/cron/*`
 - `/api/skills/*`
 - `/api/memory/*`
+- `/api/kb/*`（LLMWiki）
+- `/api/ontology/*`
+- `/api/system/restart`、`/health`（Settings 重启与恢复检测）
 
 Overview 页面接口说明（2026-05 更新）：
-- 总览聚合数据：`/api/overview/*`（如 status/stats/token-trend/security-events/keywords/cron-token-dist/cronjobs）
+- 总览聚合数据：`/api/overview/*`（如 status/stats/token-trend/security-events/keywords/cron-token-dist/cronjobs/model-usage）
 - Cron 历史下钻：`GET /api/cron/jobs/{job_id}/history`
 - Session 明细下钻：`GET /api/sessions/{session_id}/detail`
 - 不再使用旧路径：`/api/overview/cronjobs/{job_id}/history`、`/api/overview/sessions/{session_id}/detail`

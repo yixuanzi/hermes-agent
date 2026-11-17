@@ -30,6 +30,24 @@ def _valid_token(token: str, settings: WorkagentSettings) -> bool:
     return hmac.compare_digest(token.encode(), settings.session_token.encode())
 
 
+def _rejection_code(ws: WebSocket, settings: WorkagentSettings) -> int | None:
+    if not settings.embedded_chat:
+        return 4403
+    if not _valid_token(ws.query_params.get("token", ""), settings):
+        return 4401
+    if not _ws_client_is_allowed(ws, settings):
+        return 4403
+    return None
+
+
+async def _reject(ws: WebSocket, code: int) -> None:
+    # Closing before accept() fails the HTTP handshake (403, browser code 1006),
+    # so the client never learns why; accept first so the code arrives in the
+    # close frame. Nothing is read from or sent to a rejected client.
+    await ws.accept()
+    await ws.close(code=code)
+
+
 async def _broadcast_event(channel: str, payload: str) -> None:
     async with _event_lock:
         subscribers = list(_event_channels.get(channel, ()))
@@ -50,16 +68,8 @@ def build_chat_router(settings: WorkagentSettings) -> APIRouter:
 
     @router.websocket("/pty")
     async def pty_ws(ws: WebSocket) -> None:
-        if not settings.embedded_chat:
-            await ws.close(code=4403)
-            return
-
-        token = ws.query_params.get("token", "")
-        if not _valid_token(token, settings):
-            await ws.close(code=4401)
-            return
-        if not _ws_client_is_allowed(ws, settings):
-            await ws.close(code=4403)
+        if (code := _rejection_code(ws, settings)) is not None:
+            await _reject(ws, code)
             return
 
         await ws.accept()
@@ -83,12 +93,14 @@ def build_chat_router(settings: WorkagentSettings) -> APIRouter:
             if channel
             else None
         )
+        from pm.package import InstallError
+
         try:
             argv, cwd, env = tui_embed.resolve_chat_argv(
                 resume=resume,
                 sidecar_url=sidecar_url,
             )
-        except SystemExit as exc:
+        except (SystemExit, InstallError) as exc:  # node/npm missing; PM could not provide node
             await ws.send_text(f"\r\n\x1b[31mChat unavailable: {exc}\x1b[0m\r\n")
             await ws.close(code=1011)
             return
@@ -151,15 +163,8 @@ def build_chat_router(settings: WorkagentSettings) -> APIRouter:
 
     @router.websocket("/ws")
     async def gateway_ws(ws: WebSocket) -> None:
-        if not settings.embedded_chat:
-            await ws.close(code=4403)
-            return
-        token = ws.query_params.get("token", "")
-        if not _valid_token(token, settings):
-            await ws.close(code=4401)
-            return
-        if not _ws_client_is_allowed(ws, settings):
-            await ws.close(code=4403)
+        if (code := _rejection_code(ws, settings)) is not None:
+            await _reject(ws, code)
             return
         from tui_gateway.ws import handle_ws
 
@@ -167,19 +172,10 @@ def build_chat_router(settings: WorkagentSettings) -> APIRouter:
 
     @router.websocket("/pub")
     async def pub_ws(ws: WebSocket) -> None:
-        if not settings.embedded_chat:
-            await ws.close(code=4403)
-            return
-        token = ws.query_params.get("token", "")
-        if not _valid_token(token, settings):
-            await ws.close(code=4401)
-            return
-        if not _ws_client_is_allowed(ws, settings):
-            await ws.close(code=4403)
-            return
         channel = tui_embed.channel_or_none(ws.query_params.get("channel", ""))
-        if not channel:
-            await ws.close(code=4400)
+        code = _rejection_code(ws, settings) or (None if channel else 4400)
+        if code is not None:
+            await _reject(ws, code)
             return
         await ws.accept()
         try:
@@ -190,19 +186,10 @@ def build_chat_router(settings: WorkagentSettings) -> APIRouter:
 
     @router.websocket("/events")
     async def events_ws(ws: WebSocket) -> None:
-        if not settings.embedded_chat:
-            await ws.close(code=4403)
-            return
-        token = ws.query_params.get("token", "")
-        if not _valid_token(token, settings):
-            await ws.close(code=4401)
-            return
-        if not _ws_client_is_allowed(ws, settings):
-            await ws.close(code=4403)
-            return
         channel = tui_embed.channel_or_none(ws.query_params.get("channel", ""))
-        if not channel:
-            await ws.close(code=4400)
+        code = _rejection_code(ws, settings) or (None if channel else 4400)
+        if code is not None:
+            await _reject(ws, code)
             return
         await ws.accept()
         async with _event_lock:

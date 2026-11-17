@@ -15,6 +15,8 @@ from hermes_cli.profiles import get_active_profile_name
 from workagent.backend.services import cron_service, memory_service
 
 
+# Uptime is this server process's, not the age of the oldest session in the DB.
+_PROCESS_STARTED_AT = time.time()
 _STATUS_RECENT_WINDOW_SECONDS = 6 * 3600
 _ACTIVE_SESSION_WINDOW_SECONDS = 24 * 3600
 _DEFAULT_MEMORY_LIMIT = 2200
@@ -326,6 +328,15 @@ def get_cronjobs() -> list[dict[str, Any]]:
         db.close()
 
 
+def _configured_model() -> tuple[str, str]:
+    """(model, provider) the active profile is configured to run; ``model`` may be a plain string."""
+    model_cfg = (load_config() or {}).get("model")
+    if isinstance(model_cfg, dict):
+        model = model_cfg.get("default") or model_cfg.get("name") or ""
+        return str(model), str(model_cfg.get("provider") or "")
+    return (str(model_cfg) if model_cfg else ""), ""
+
+
 def get_status() -> dict[str, Any]:
     now_ts = time.time()
     db = SessionDB()
@@ -334,12 +345,10 @@ def get_status() -> dict[str, Any]:
             db,
             """
             SELECT
-              COUNT(*) AS total_sessions,
               COALESCE(MAX(COALESCE(
                 (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id),
                 s.started_at
-              )), 0) AS last_activity,
-              COALESCE(MIN(s.started_at), 0) AS first_seen
+              )), 0) AS last_activity
             FROM sessions s
             """,
         )
@@ -358,13 +367,10 @@ def get_status() -> dict[str, Any]:
     finally:
         db.close()
 
-    total_sessions = int(summary.get("total_sessions") or 0)
     last_activity = float(summary.get("last_activity") or 0)
-    first_seen = float(summary.get("first_seen") or 0)
-    if total_sessions == 0:
-        uptime_seconds = 0
-    else:
-        uptime_seconds = int(max(now_ts - first_seen, 0))
+    # The latest session's values only fill in what the config leaves unset: an
+    # A2A turn records no billing provider, and the live config is what runs next.
+    model, provider = _configured_model()
 
     status = "ONLINE" if last_activity and (now_ts - last_activity) < _STATUS_RECENT_WINDOW_SECONDS else "IDLE"
     try:
@@ -374,10 +380,10 @@ def get_status() -> dict[str, Any]:
 
     return {
         "status": status,
-        "model": str(latest.get("model") or ""),
-        "provider": str(latest.get("billing_provider") or ""),
+        "model": model or str(latest.get("model") or ""),
+        "provider": provider or str(latest.get("billing_provider") or ""),
         "profile": profile,
-        "uptime_seconds": uptime_seconds,
+        "uptime_seconds": int(now_ts - _PROCESS_STARTED_AT),
         "last_activity": last_activity,
     }
 

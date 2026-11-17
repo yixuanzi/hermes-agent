@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Code2, Eye, Save } from "lucide-react";
 import Markdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
 import { fetchDocument, fetchTree, saveDocument, type DocumentResponse, type TreeItem } from "../lib/kb";
 import { ApiError } from "../lib/api";
 import remarkObsidian from "../lib/remark-obsidian";
+import { wikiSanitizeSchema } from "../lib/wiki-sanitize";
 
 type DirChildren = Record<string, TreeItem[]>;
 type WikiMode = "browse" | "code";
@@ -314,7 +316,7 @@ export function WikiPage() {
                 <div className="wiki-detail-content">
                   <Markdown
                     remarkPlugins={[remarkGfm, remarkObsidian]}
-                    rehypePlugins={[rehypeRaw]}
+                    rehypePlugins={[rehypeRaw, [rehypeSanitize, wikiSanitizeSchema]]}
                   >
                     {draftContent}
                   </Markdown>

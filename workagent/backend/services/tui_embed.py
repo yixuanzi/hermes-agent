@@ -34,13 +34,15 @@ def resolve_chat_argv(
     sidecar_url: Optional[str] = None,
 ) -> tuple[list[str], Optional[str], Optional[dict]]:
     """Resolve argv + cwd + env for the embedded `hermes --tui` child."""
-    from hermes_cli.main import PROJECT_ROOT, _make_tui_argv
+    from hermes_cli.main import PROJECT_ROOT
+    from hermes_cli.main_tui_launch import _apply_tui_python_env, _make_tui_argv
 
     argv, cwd = _make_tui_argv(PROJECT_ROOT / "ui-tui", tui_dev=False)
     env = os.environ.copy()
     env.setdefault("NODE_ENV", "production")
     env.setdefault("HERMES_TUI_DISABLE_MOUSE", "1")
     env.setdefault("HERMES_TUI_INLINE", "1")
+    _apply_tui_python_env(env)
 
     if resume:
         latest = session_service.get_latest_descendant(resume)

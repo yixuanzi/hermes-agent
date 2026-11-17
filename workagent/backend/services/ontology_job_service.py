@@ -5,18 +5,17 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Lock
 from typing import Any, Optional
 
-
+from agent.memory_provider import spawn_context_thread
 from workagent.backend.services.ontology_ai_service import (
     OntologyAIError,
     OntologyAIService,
 )
 from workagent.backend.services.ontology_service import (
     OntologyError,
-    _PROFILE,
-    _env_path,
+    ontology_path,
 )
 
 
@@ -33,9 +32,8 @@ STALE_JOB_SECONDS = 20 * 60
 # job still marked queued/running is either (a) truly orphaned by a *previous*
 # incarnation of this backend that died mid-scan, or (b) being actively
 # advanced right now by a *different, still-alive* process that happens to
-# share this JOB_ROOT (JOB_ROOT is derived from the OS home directory, not
-# from which hermes profile a given backend was launched with, so two backend
-# processes on different ports can legitimately see the same job files). A
+# share this job root (two backend processes on different ports serving the
+# same profile, or pointed at one WORKAGENT_ONTOLOGY_JOBS_ROOT). A
 # job in category (b) will have a very recent updated_at (each collect/judge
 # batch/score step writes progress every few seconds to tens of seconds), so
 # a short grace window distinguishes the two without needing STALE_JOB_SECONDS'
@@ -48,12 +46,9 @@ class OntologyJobService:
     job_id; a daemon thread advances the job through collect -> judge -> score
     stages and writes progress to a JSON file the client polls."""
 
-    # Same rationale as OntologyService's constants: use the OS-uid → home path
-    # (via _PROFILE) rather than ~, since hermes runtime rewrites HOME.
-    JOB_ROOT = _env_path(
-        "WORKAGENT_ONTOLOGY_JOBS_ROOT",
-        f"{_PROFILE}/artifacts/ontology/jobs",
-    )
+    @staticmethod
+    def job_root() -> Path:
+        return ontology_path("WORKAGENT_ONTOLOGY_JOBS_ROOT", "artifacts", "ontology", "jobs")
 
     # In-memory pointer to the currently in-flight job, guarded by _lock. Lets
     # create_scan_job() dedupe concurrent "Run Scan" clicks (e.g. a stale
@@ -66,15 +61,15 @@ class OntologyJobService:
 
     @staticmethod
     def _job_path(job_id: str) -> Path:
-        OntologyJobService.JOB_ROOT.mkdir(parents=True, exist_ok=True)
-        return OntologyJobService.JOB_ROOT / f"{job_id}.json"
+        return OntologyJobService.job_root() / f"{job_id}.json"
 
     @staticmethod
     def _write(job_id: str, payload: dict[str, Any]) -> None:
-        OntologyJobService._job_path(job_id).write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        # Only writers create the job root: GET /scan/* must not leave an empty
+        # artifacts tree in a profile that never ran a scan.
+        path = OntologyJobService._job_path(job_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     @staticmethod
     def _age_seconds(job: dict[str, Any]) -> Optional[float]:
@@ -104,13 +99,13 @@ class OntologyJobService:
         STARTUP_REAP_GRACE_SECONDS comment for why this uses a short window
         instead of reaping everything queued/running unconditionally — that
         would risk killing a job a different, still-alive process is actively
-        driving right now (JOB_ROOT is shared across all backend processes on
-        this machine, regardless of which hermes profile launched them).
+        driving right now (every backend serving this profile shares its job root).
         """
-        if not OntologyJobService.JOB_ROOT.exists():
+        job_root = OntologyJobService.job_root()
+        if not job_root.exists():
             return 0
         reaped = 0
-        for path in OntologyJobService.JOB_ROOT.glob("job-*.json"):
+        for path in job_root.glob("job-*.json"):
             try:
                 job = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
@@ -166,8 +161,11 @@ class OntologyJobService:
             }
             OntologyJobService._write(job_id, payload)
             OntologyJobService._active_job_id = job_id
-            t = Thread(target=OntologyJobService._run_scan_job, args=(job_id,), daemon=True)
-            t.start()
+            # Under the caller's contextvars: the worker resolves every ontology
+            # path from the Hermes home of the request that started it.
+            spawn_context_thread(
+                OntologyJobService._run_scan_job, name=f"ontology-scan-{job_id}", args=(job_id,)
+            ).start()
             return payload
 
     @staticmethod
@@ -182,7 +180,7 @@ class OntologyJobService:
 
         Lets a freshly (re)mounted page ask "is a scan already running" without
         needing to already hold a job_id — the source of truth is this
-        server-side pointer (backed by JOB_ROOT on disk), not anything the
+        server-side pointer (backed by the job root on disk), not anything the
         frontend has to remember across navigations.
         """
         with OntologyJobService._lock:
@@ -197,13 +195,14 @@ class OntologyJobService:
             OntologyJobService._clear_active(active_id)
         # Fallback for the (rare) case the in-memory pointer was lost — e.g.
         # this process restarted right after spawning the thread but before
-        # this method's caller ever asked. Scan JOB_ROOT for the most recent
+        # this method's caller ever asked. Scan the job root for the most recent
         # job that still looks alive; if the thread that was advancing it also
         # died in that restart, STALE_JOB_SECONDS will age it out on its own.
-        if not OntologyJobService.JOB_ROOT.exists():
+        job_root = OntologyJobService.job_root()
+        if not job_root.exists():
             return None
         candidates = []
-        for path in OntologyJobService.JOB_ROOT.glob("job-*.json"):
+        for path in job_root.glob("job-*.json"):
             try:
                 job = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):

@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-import pwd
 import subprocess
 import threading
 from pathlib import Path
 from typing import Any
+
+from hermes_constants import get_hermes_home
 
 
 logger = logging.getLogger(__name__)
@@ -31,27 +32,18 @@ _compile_lock = threading.Lock()
 _scan_lock = threading.Lock()
 
 
-def _real_home() -> str:
-    """Return the OS-level home directory for the current uid.
+def ontology_path(env_name: str, *default_parts: str) -> Path:
+    """``env_name`` when set, else ``<active Hermes home>/<default_parts>``.
 
-    Distinct from ``Path.home()`` / ``os.environ['HOME']`` — the hermes runtime's
-    ``prepare_hermes_home()`` rewrites ``HOME`` to a per-profile sandbox before
-    this module is imported, which would otherwise poison ``~`` expansion in
-    ``_env_path()`` defaults. ``getpwuid`` reads directly from the passwd
-    database, so it survives HOME manipulation.
+    Resolved per call rather than at import: ``prepare_hermes_home()`` rewrites
+    ``HOME`` to ``<HERMES_HOME>/home`` and the module is imported before a direct
+    ``-p`` startup selects its profile, so neither ``~`` nor an import-time value
+    names the profile this server runs as. ``HERMES_HOME`` does.
     """
-    return pwd.getpwuid(os.getuid()).pw_dir
-
-
-def _env_path(name: str, default: str) -> Path:
-    return Path(os.environ.get(name, default)).expanduser()
-
-
-# Absolute path to the workagent profile, resolved via the OS uid → home mapping
-# rather than ~. On the canonical deploy host this is /home/amber/.hermes/…;
-# on a Mac dev machine it's /Users/<login>/.hermes/…; either way it's a real
-# on-disk path unaffected by any HOME env manipulation.
-_PROFILE = f"{_real_home()}/.hermes/profiles/workagent"
+    override = os.environ.get(env_name)
+    if override:
+        return Path(override).expanduser()
+    return get_hermes_home().joinpath(*default_parts)
 
 
 def _run_ontology_script(script: Path, lock: threading.Lock, label: str) -> dict[str, Any]:
@@ -91,26 +83,27 @@ def _run_ontology_script(script: Path, lock: threading.Lock, label: str) -> dict
 
 class OntologyService:
     # v3 三层图谱是唯一真实来源。compile 只把它写到 alias 路径供旧调用点兼容。
-    # 默认值使用 _PROFILE（getpwuid 拿的真 home）而不是 ~，因为 hermes runtime
-    # 会在这个模块被 import 之前重写 HOME → sandbox 目录，此时 ~ 展开会得到
-    # sandbox 路径，一切都错位。
-    STANDARD_GRAPH_V3 = _env_path(
-        "WORKAGENT_ONTOLOGY_STANDARD_GRAPH_V3",
-        f"{_PROFILE}/artifacts/ontology/standard/standard-graph_v3.json",
-    )
-    STANDARD_GRAPH_ALIAS = _env_path(
-        "WORKAGENT_ONTOLOGY_STANDARD_GRAPH",
-        f"{_PROFILE}/artifacts/ontology/standard/standard-graph.json",
-    )
-    STANDARD_GRAPH = STANDARD_GRAPH_V3
-    SCANS_ROOT = _env_path(
-        "WORKAGENT_ONTOLOGY_SCANS_ROOT",
-        f"{_PROFILE}/artifacts/ontology/scans",
-    )
-    SKILL_SCRIPTS = _env_path(
-        "WORKAGENT_ONTOLOGY_SKILL_SCRIPTS",
-        f"{_PROFILE}/skills/ontology/scripts",
-    )
+    @staticmethod
+    def standard_graph_v3() -> Path:
+        return ontology_path(
+            "WORKAGENT_ONTOLOGY_STANDARD_GRAPH_V3",
+            "artifacts", "ontology", "standard", "standard-graph_v3.json",
+        )
+
+    @staticmethod
+    def standard_graph_alias() -> Path:
+        return ontology_path(
+            "WORKAGENT_ONTOLOGY_STANDARD_GRAPH",
+            "artifacts", "ontology", "standard", "standard-graph.json",
+        )
+
+    @staticmethod
+    def scans_root() -> Path:
+        return ontology_path("WORKAGENT_ONTOLOGY_SCANS_ROOT", "artifacts", "ontology", "scans")
+
+    @staticmethod
+    def skill_scripts() -> Path:
+        return ontology_path("WORKAGENT_ONTOLOGY_SKILL_SCRIPTS", "skills", "ontology", "scripts")
 
     @staticmethod
     def _read_json(path: Path) -> Any:
@@ -120,7 +113,7 @@ class OntologyService:
 
     @staticmethod
     def _latest_scan_dir() -> Path:
-        latest_file = OntologyService.SCANS_ROOT / "latest"
+        latest_file = OntologyService.scans_root() / "latest"
         if not latest_file.exists():
             raise OntologyError("No ontology scan has been generated yet")
         latest = Path(latest_file.read_text(encoding="utf-8").strip())
@@ -132,16 +125,15 @@ class OntologyService:
     def compile_standard_graph() -> dict[str, Any]:
         # v3 图是权威源；旧的 graph_compiler.py 走 model_v2，已废弃。
         # 这里只做：读 v3 → 写 alias → 返回统计信息（兼容老的 /compile 响应）。
-        src = OntologyService.STANDARD_GRAPH_V3
+        src = OntologyService.standard_graph_v3()
         if not src.exists():
             raise OntologyError(f"Authoritative v3 graph missing: {src}")
         data = OntologyService._read_json(src)
-        OntologyService.STANDARD_GRAPH_ALIAS.parent.mkdir(parents=True, exist_ok=True)
-        OntologyService.STANDARD_GRAPH_ALIAS.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        alias = OntologyService.standard_graph_alias()
+        alias.parent.mkdir(parents=True, exist_ok=True)
+        alias.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return {
-            "output": str(OntologyService.STANDARD_GRAPH_ALIAS),
+            "output": str(alias),
             "weight_total": data.get("weight_total", 100.0),
             "layer_counts": data.get("layer_counts", {}),
             "edge_stats": data.get("edge_stats", {}),
@@ -171,18 +163,20 @@ class OntologyService:
     @staticmethod
     def get_standard_graph() -> dict[str, Any]:
         # 优先读 v3；否则回退 alias（兼容尚未升级的部署）。
-        if OntologyService.STANDARD_GRAPH_V3.exists():
-            return OntologyService._read_json(OntologyService.STANDARD_GRAPH_V3)
-        return OntologyService._read_json(OntologyService.STANDARD_GRAPH_ALIAS)
+        v3 = OntologyService.standard_graph_v3()
+        if v3.exists():
+            return OntologyService._read_json(v3)
+        return OntologyService._read_json(OntologyService.standard_graph_alias())
 
     @staticmethod
     def _recent_scans(limit: int = 5) -> list[dict[str, Any]]:
         """最近 N 次 AI 扫描的概览（scan-ai-* 目录），供 overview 上侧摘要。
         单次目录任一文件缺失就跳过，不阻断整个响应。"""
         out: list[dict[str, Any]] = []
-        if not OntologyService.SCANS_ROOT.exists():
+        scans_root = OntologyService.scans_root()
+        if not scans_root.exists():
             return out
-        for path in sorted(OntologyService.SCANS_ROOT.glob("scan-ai-*"), reverse=True)[:limit]:
+        for path in sorted(scans_root.glob("scan-ai-*"), reverse=True)[:limit]:
             try:
                 scorecard = OntologyService._read_json(path / "scorecard.json")
                 mapped = OntologyService._read_json(path / "mapped-graph.json")
@@ -221,12 +215,12 @@ class OntologyService:
         std = OntologyService.get_standard_graph()
         return {
             "latest_scan_id": latest.name,
-            "standard_graph_path": str(OntologyService.STANDARD_GRAPH),
+            "standard_graph_path": str(OntologyService.standard_graph_v3()),
             "latest_scan_path": str(latest),
             "score": scorecard.get("completeness_score"),
             "status_counts": mapped.get("status_counts", {}),
             "generated_files": [
-                str(OntologyService.STANDARD_GRAPH),
+                str(OntologyService.standard_graph_v3()),
                 str(latest / "observed-graph.json"),
                 str(latest / "mapped-graph.json"),
                 str(latest / "scorecard.json"),
