@@ -27,6 +27,7 @@ from aegis.backend.chat.models import (
     DelegateForegroundState,
 )
 from aegis.backend.chat.attachments import ChatAttachment, ChatAttachmentStore, prepare_turn_message
+from aegis.backend.chat.drawer import DrawerFileLedger
 from aegis.backend.chat.runtime import AegisChatInputAdapter, AegisChatOutputAdapter
 from hermes_constants import get_hermes_home
 from workagent.backend.agent_cache import AgentCache, release_agent_soft
@@ -336,7 +337,7 @@ def _aegis_help_text() -> str:
         # single newlines collapse into one paragraph.
         "Aegis slash commands:\n\n"
         "- `/help` - show available Aegis-native slash commands\n"
-        "- `/model <model_name>` - switch the current live session model\n"
+        "- `/model <model_name> [--provider <provider>]` - switch the current live session model\n"
         "- `/a2a` - show the current A2A context XML\n"
         "- `/stop` - cancel any active remote A2A delegate task, then stop the current turn"
     )
@@ -427,10 +428,12 @@ class ChatSessionActor:
         agent_factory: Callable[..., object],
         user_id: str | None = None,
         user_name: str | None = None,
+        drawer_files: DrawerFileLedger | None = None,
     ) -> None:
         self.session_id = session_id
         self.title = title
         self._agent_factory = agent_factory
+        self._drawer_files = drawer_files
         self._user_id = str(user_id or "").strip()
         self._user_name = str(user_name or "").strip()
         self._runtime_session_id = _runtime_session_id(session_id, self._user_id)
@@ -442,6 +445,7 @@ class ChatSessionActor:
         )
         self._loop: asyncio.AbstractEventLoop | None = None
         self._websocket: WebSocket | None = None
+        self._bind_count = 0
         self._lock = threading.RLock()
         # Browser workflow traces outlive this in-memory actor.  Keep a new
         # actor's event ids distinct when the same public session is rebound
@@ -494,6 +498,15 @@ class ChatSessionActor:
             self._websocket = websocket
             self._loop = loop
             self._disconnect_requested = False
+            self._bind_count += 1
+
+    def has_prior_state(self) -> bool:
+        """Whether binding this session resumes something: an earlier bind of this in-memory
+        actor, or turns ``SessionDB`` persisted for it before the actor was (re)built."""
+        with self._lock:
+            if self._bind_count > 1:
+                return True
+        return bool(load_conversation_history(self._agent, self._runtime_session_id))
 
     def detach_connection(self, websocket: WebSocket) -> None:
         with self._lock:
@@ -746,9 +759,23 @@ class ChatSessionActor:
         return True
 
     def _handle_model_slash(self, arg: str, turn_id: str) -> None:
-        model_input = str(arg or "").strip()
+        from hermes_cli.model_switch import parse_model_switch_args
+
+        request = parse_model_switch_args(str(arg or "").strip())
+        if request.errors:
+            self._emit_main_text_reply("\n".join(request.error_messages()), turn_id)
+            return
+        # The override is in-memory and session-scoped; persisting or one-turn scopes would
+        # promise behaviour this console does not have.
+        if request.is_global or request.is_once or request.reasoning_effort:
+            self._emit_main_text_reply(
+                "Aegis /model switches only the live session: --global, --once and --reasoning are not supported.",
+                turn_id,
+            )
+            return
+        model_input = request.target.strip()
         if not model_input:
-            self._emit_main_text_reply("Usage: /model <model_name>", turn_id)
+            self._emit_main_text_reply("Usage: /model <model_name> [--provider <provider>]", turn_id)
             return
 
         running_thread = self._running_thread
@@ -784,7 +811,7 @@ class ChatSessionActor:
                 current_base_url=current_base_url,
                 current_api_key=current_api_key,
                 is_global=False,
-                explicit_provider="",
+                explicit_provider=request.explicit_provider,
                 user_providers=user_providers,
                 custom_providers=custom_providers,
             )
@@ -1475,6 +1502,8 @@ class ChatSessionActor:
                             modified_files.extend(
                                 path for path in landed_files if path not in known_files
                             )
+                        if self._drawer_files is not None:
+                            self._drawer_files.record(self._user_id, landed_files)
                 preview = str(function_result)
                 if len(preview) > 200:
                     preview = preview[:200] + "..."
@@ -1716,6 +1745,7 @@ class ChatSessionManager:
             else AgentCache(is_protected=_session_is_protected)
         )
         self.attachments = ChatAttachmentStore()
+        self.drawer_files = DrawerFileLedger()
 
     def set_agent_factory(self, agent_factory: Callable[..., object]) -> None:
         with self._lock:
@@ -1744,6 +1774,7 @@ class ChatSessionManager:
                 agent_factory=self._agent_factory,
                 user_id=user_id,
                 user_name=user_name,
+                drawer_files=self.drawer_files,
             )
 
         with self._lock:

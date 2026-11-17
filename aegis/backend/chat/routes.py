@@ -2,109 +2,21 @@
 
 from __future__ import annotations
 
-import asyncio
-import base64
-import mimetypes
-from pathlib import Path
-
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile, WebSocket, status
-from starlette.websockets import WebSocketDisconnect
 
 from aegis.backend.auth import get_current_user_from_token, require_authenticated_user
+from aegis.backend.chat.connection import ChatConnection
+from aegis.backend.chat.drawer import drawer_file_response
 from aegis.backend.chat.service import ChatSessionManager
 from aegis.backend.config import AegisSettings
 from aegis.backend.models import ChatQuickCommandListResponse, DrawerFileResponse
 from aegis.backend.services.agent_service import AgentService
-from aegis.backend.services.chat_quick_command_service import (
-    ChatQuickCommandService,
-    MessageArgumentResolutionError,
-)
+from aegis.backend.services.chat_quick_command_service import ChatQuickCommandService
 from aegis.backend.services.prompt_template_service import PromptTemplateService
 from aegis.backend.services.prompt_template_store import PromptTemplateStore
 from aegis.backend.services.system_instruct_service import SystemInstructService
 from aegis.backend.services.system_instruct_store import SystemInstructStore
 from aegis.backend.services.user_service import UserService
-
-
-_IMAGE_SUFFIXES = frozenset({".avif", ".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".webp"})
-_DRAWER_FILE_TYPES = {
-    ".css": "css",
-    ".csv": "text",
-    ".html": "html",
-    ".htm": "html",
-    ".java": "java",
-    ".js": "javascript",
-    ".json": "json",
-    ".jsx": "javascript",
-    ".md": "markdown",
-    ".mdx": "markdown",
-    ".markdown": "markdown",
-    ".py": "python",
-    ".rs": "rust",
-    ".sh": "shell",
-    ".sql": "sql",
-    ".toml": "toml",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".txt": "text",
-    ".xml": "xml",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-}
-
-
-def _workspace_root() -> Path:
-    """Resolve the only filesystem root exposed by the drawer preview API."""
-    return Path.cwd().resolve()
-
-
-def _resolve_workspace_drawer_file(path: str) -> tuple[Path, Path]:
-    root = _workspace_root()
-    requested = Path(str(path or "").strip())
-    if not str(requested) or requested == Path("."):
-        raise HTTPException(status_code=404, detail="Drawer file not found.")
-    candidate = requested if requested.is_absolute() else root / requested
-    try:
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise HTTPException(status_code=403, detail="Drawer path is outside the workspace.") from exc
-    except OSError as exc:
-        raise HTTPException(status_code=404, detail="Drawer file not found.") from exc
-    if not resolved.is_file():
-        raise HTTPException(status_code=404, detail="Drawer file not found.")
-    return root, resolved
-
-
-def _drawer_file_type(file_path: Path) -> str:
-    suffix = file_path.suffix.lower()
-    if suffix in _IMAGE_SUFFIXES:
-        return suffix[1:]
-    return _DRAWER_FILE_TYPES.get(suffix, "text")
-
-
-def _drawer_file_content(file_path: Path) -> str | None:
-    if file_path.suffix.lower() in _IMAGE_SUFFIXES:
-        media_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-        encoded = base64.b64encode(file_path.read_bytes()).decode("ascii")
-        return f"data:{media_type};base64,{encoded}"
-    try:
-        return file_path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return None
-
-
-def _drawer_file_response(path: str) -> DrawerFileResponse:
-    root, file_path = _resolve_workspace_drawer_file(path)
-    file_type = _drawer_file_type(file_path)
-    content = _drawer_file_content(file_path)
-    if content is None:
-        file_type = "binary"
-    return DrawerFileResponse(
-        title=str(file_path.relative_to(root)),
-        type=file_type,
-        content=content or "",
-    )
 
 
 def _ws_token(websocket: WebSocket) -> str | None:
@@ -151,10 +63,10 @@ def build_chat_router(
         )
 
     @router.get("/api/chat/drawer-html", response_model=DrawerFileResponse)
-    async def get_drawer_html(path: str, request: Request) -> DrawerFileResponse:
-        """Return a typed preview payload for one file in the Hermes workspace."""
-        require_authenticated_user(request, settings, user_service)
-        return _drawer_file_response(path)
+    def get_drawer_html(path: str, request: Request) -> DrawerFileResponse:
+        """Return a typed preview payload for one file this user's agent wrote."""
+        user, _payload = require_authenticated_user(request, settings, user_service)
+        return drawer_file_response(path, user_id=user.uid, ledger=session_manager.drawer_files)
 
     @router.websocket("/api/chat/ws")
     async def chat_ws(websocket: WebSocket) -> None:
@@ -162,115 +74,18 @@ def build_chat_router(
         if not token:
             await websocket.close(code=4401)
             return
-        current_user = None
         try:
             current_user, _payload = get_current_user_from_token(token, settings, user_service)
-        except Exception:
+        except HTTPException:
             await websocket.close(code=4401)
             return
 
         await websocket.accept()
-        actor = None
-        try:
-            while True:
-                payload = await websocket.receive_json()
-                if not isinstance(payload, dict):
-                    await websocket.send_json(
-                        {
-                            "type": "error",
-                            "code": "invalid_payload",
-                            "message": "Payload must be a JSON object.",
-                        }
-                    )
-                    continue
+        await ChatConnection(
+            websocket,
+            current_user,
+            session_manager,
+            resolved_quick_command_service,
+        ).serve()
 
-                event_type = str(payload.get("type") or "").strip()
-                if event_type == "session.bind":
-                    actor = session_manager.bind(
-                        websocket,
-                        asyncio.get_running_loop(),
-                        session_id=str(payload.get("session_id") or "").strip() or None,
-                        title=str(payload.get("title") or "").strip() or None,
-                        user_id=current_user.uid if current_user is not None else None,
-                        user_name=current_user.username if current_user is not None else None,
-                    )
-                    await websocket.send_json(
-                        actor.build_bound_event(resumed=bool(payload.get("session_id")))
-                    )
-                    continue
-
-                if actor is None:
-                    await websocket.send_json(
-                        {
-                            "type": "error",
-                            "code": "session_not_bound",
-                            "message": "Bind a session before sending chat events.",
-                        }
-                    )
-                    continue
-
-                if event_type == "message.send":
-                    try:
-                        resolved_text = resolved_quick_command_service.resolve_text(
-                            current_user.uid if current_user is not None else "",
-                            str(payload.get("text") or ""),
-                            args=payload.get("args"),
-                        )
-                        attachments = session_manager.attachments.resolve(
-                            payload.get("attachments"),
-                            owner_id=current_user.uid if current_user is not None else "",
-                        )
-                        actor.handle_message(
-                            resolved_text,
-                            client_msg_id=str(payload.get("client_msg_id") or "").strip() or None,
-                            attachments=attachments,
-                        )
-                    except MessageArgumentResolutionError as exc:
-                        await websocket.send_json(
-                            {
-                                "type": "error",
-                                "code": "invalid_message_args",
-                                "message": str(exc),
-                                "client_msg_id": str(payload.get("client_msg_id") or "").strip() or None,
-                            }
-                        )
-                    except ValueError as exc:
-                        await websocket.send_json(
-                            {"type": "error", "code": "invalid_attachment", "message": str(exc)}
-                        )
-                    continue
-
-                if event_type == "approval.respond":
-                    actor.handle_approval_response(
-                        str(payload.get("choice") or ""),
-                        str(payload.get("approval_id") or "") or None,
-                    )
-                    continue
-
-                if event_type == "clarify.respond":
-                    actor.handle_clarify_response(
-                        str(payload.get("answer") or ""),
-                        str(payload.get("clarify_id") or "") or None,
-                    )
-                    continue
-
-                if event_type == "session.interrupt":
-                    actor.interrupt()
-                    continue
-
-                if event_type == "session.resume":
-                    for event in actor.resume_state_events():
-                        await websocket.send_json(event)
-                    continue
-
-                await websocket.send_json(
-                    {
-                        "type": "error",
-                        "code": "unsupported_event",
-                        "message": f"Unsupported websocket event: {event_type or '<empty>'}",
-                    }
-                )
-        except WebSocketDisconnect:
-            if actor is not None:
-                session_manager.release_connection(actor, websocket)
     return router

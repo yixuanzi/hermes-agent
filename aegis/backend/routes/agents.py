@@ -39,7 +39,8 @@ def build_agents_router(
     @router.get("", response_model=AgentListResponse)
     async def list_agents(request: Request) -> AgentListResponse:
         _ensure_admin(request)
-        return AgentListResponse(agents=_service().list_agents())
+        agents, invalid = _service().scan_agents()
+        return AgentListResponse(agents=agents, invalid=invalid)
 
     @router.get("/{agent_id}", response_model=AgentResponse)
     async def get_agent(agent_id: str, request: Request) -> AgentResponse:

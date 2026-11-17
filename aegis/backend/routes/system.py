@@ -10,6 +10,8 @@ from fastapi import APIRouter, BackgroundTasks, Request, status
 from aegis.backend.auth import require_admin_user, require_authenticated_user
 from aegis.backend.config import AegisSettings
 from aegis.backend.models import HealthResponse, SystemBootstrapResponse, SystemRestartResponse
+from aegis.backend.services.lark_service import lark_is_configured
+from aegis.backend.services.oidc_service import oidc_is_configured
 from aegis.backend.services.user_service import UserService
 from hermes_self_restart import request_self_restart
 
@@ -37,7 +39,9 @@ def build_system_router(
             embedded_chat=settings.embedded_chat,
             auth_scheme="jwt-password",
             admin_setup_required=admin_setup_required,
-            lark_sso_enabled=settings.lark_sso_enabled,
+            # Booleans only: the login page hides an SSO entry whose start route would 503.
+            oidc_sso_enabled=oidc_is_configured(settings),
+            lark_sso_enabled=settings.lark_sso_enabled and lark_is_configured(settings),
         )
 
     @router.post(

@@ -84,6 +84,46 @@ export AEGIS_BOOTSTRAP_ADMIN_PASSWORD="choose-a-strong-password"
 hermes aegis
 ```
 
+The first `admin` account is created only when this secret is present. If it
+is missing, `/api/system/bootstrap` reports that setup is required and login
+remains rejected; there is no anonymous admin registration or fixed default
+password.
+
+Login response returns an access token. Protected endpoints expect:
+
+```text
+Authorization: Bearer <jwt_access_token>
+```
+
+The exception is the public, read-only skill JavaScript route described below;
+it exposes only regular `.js` files under the repository's `aegis/skills/`
+directory for generated HTML previews.
+
+The frontend login page also uses the same JWT for `/api/chat/ws?token=...`.
+
+### Token revocation
+
+Access tokens are minted in one place (`build_token_payload`, used by password
+login and the SSO ticket exchange) and carry two revocation claims:
+
+- `ver` — the user's `token_version` (a `users` column, default 0, added to
+  existing databases at startup). It is bumped when the user changes their own
+  password, when an admin resets their password, demotes their role
+  (admin → operator → user) or disables them. A token whose `ver` differs from
+  the current version is rejected with 401 on HTTP and with close code 4401 on
+  `/api/chat/ws`. A token without `ver` counts as version 0.
+- `jti` — `POST /api/auth/logout` revokes just the presented token by storing
+  its `jti` with its `exp` in the `revoked_access_tokens` table of `aegis.db`;
+  rows past their `exp` are pruned on the next revocation. A token minted
+  without `jti` cannot be revoked alone, so logging out with it bumps the
+  user's `token_version` instead.
+
+Logout stays a public route: a missing, expired or already-revoked token simply
+returns `{"logged_out": true}`. The console calls it on sign-out, and treats a
+password change as signing out everywhere (the current session included).
+Revocation is checked when a request or websocket connection authenticates; an
+already-open chat socket is not closed.
+
 ## App Entry
 
 The authenticated `GET /api/app-entries` endpoint loads the current
@@ -101,23 +141,6 @@ PUBLIC_SUBSCRIPTION_API_KEY=<server-side-secret>
 as a compatibility fallback. Aegis sends `PUBLIC_SUBSCRIPTION_API_KEY` to the
 Portal as `X-API-Key`; the key is never sent to the browser. App Entry uses the
 Portal's `sub_app_entry_url` when available and falls back to `sub_entry_url`.
-
-The first `admin` account is created only when this secret is present. If it
-is missing, `/api/system/bootstrap` reports that setup is required and login
-remains rejected; there is no anonymous admin registration or fixed default
-password.
-
-Login response returns an access token. Protected endpoints expect:
-
-```text
-Authorization: Bearer <jwt_access_token>
-```
-
-The exception is the public, read-only skill JavaScript route described below;
-it exposes only regular `.js` files under the repository's `aegis/skills/`
-directory for generated HTML previews.
-
-The frontend login page also uses the same JWT for `/api/chat/ws?token=...`.
 
 ## Aegis Portal OIDC
 
@@ -141,7 +164,8 @@ UserInfo requests. Direct Portal service launch uses:
 http://127.0.0.1:9130/?organization_id=<id>&client_id=<client_id>
 ```
 
-The login page SSO button uses `/api/sso/start?sso=1`. Both paths use
+The login page SSO button, shown only when `OIDC_CLIENT_ID` and
+`OIDC_CLIENT_SECRET` are set, uses `/api/sso/start?sso=1`. Both paths use
 Authorization Code + S256 PKCE and the registered callback
 `/api/sso/callback`. Portal owns organization and subscription authorization;
 `subscription_id` is not sent through the browser.
@@ -157,7 +181,12 @@ a password through the existing user-management API if local login is needed.
 
 The login page supports Lark OAuth login when `LARK_SSO_ENABLE=true`. The
 default is `false`; when disabled, the login option is hidden and
-`/api/lark/start` rejects new login attempts. Configure the Lark application
+`/api/lark/start` rejects new login attempts. `GET /api/system/bootstrap`
+reports `lark_sso_enabled` only when the flag is on and `LARK_APP_ID` /
+`LARK_APP_SECRET` are set, and `oidc_sso_enabled` only when `OIDC_CLIENT_ID` /
+`OIDC_CLIENT_SECRET` are set; the login page hides each SSO button whose start
+route would answer 503. The response carries these booleans only, never the
+configured values. Configure the Lark application
 credentials in the process environment and register the exact callback URL in
 the Lark developer console:
 
@@ -177,8 +206,9 @@ login. The Lark access and refresh tokens are not stored; successful logins
 reuse the existing Aegis SSO ticket and JWT exchange flow.
 
 The existing `HERMES_HOME/aegis.db` is migrated additively at startup. The
-`users` table gains nullable `oidc_subject`; `oidc_login_transactions` and
-`sso_login_tickets` are created if absent. Existing users and local passwords
+`users` table gains nullable `oidc_subject` and `token_version` (default 0);
+`oidc_login_transactions`, `sso_login_tickets` and `revoked_access_tokens` are
+created if absent. Existing users, local passwords and already-issued tokens
 are preserved.
 
 To restart after frontend or backend changes:
@@ -210,19 +240,56 @@ routing rules as an array. Agent URLs are persisted as normalized HTTP URLs;
 legacy entries without a scheme such as `127.0.0.1:9086/a2a` are accepted and
 served back as `http://127.0.0.1:9086/a2a`.
 
+An entry that does not parse (for example a hand-added `"nopath":
+"127.0.0.1:9086"`, which has neither a scheme nor a path) is skipped, with a
+logged warning, from `/api/overview/agents`, `/api/overview/topology`, chat
+shortcut resolution and the agent list. `GET /api/agents` reports it under
+`invalid: [{"agent_id", "error"}]`; `GET /api/agents/{agent_id}` on it still
+answers 500, and `PUT` / `DELETE /api/agents/{agent_id}` fix or remove it.
+
 ## API Surface In Scope
 
-The standalone backend currently supports these API areas:
+The authoritative list is `/openapi.json` (Swagger UI at `/docs`). Every
+`/api/*` route requires a bearer token except the auth, SSO, Lark and bootstrap
+routes marked public below. "Admin" routes additionally require an admin user.
 
-- Auth and session: `/api/auth/login`, `/api/auth/register`, `/api/auth/session`, `/api/auth/logout`, `/api/auth/password`
-- Portal OIDC client: `/api/sso/start`, `/api/sso/callback`, `/api/sso/exchange`
-- User management: `/api/users`, `/api/users/{uid}/status`, `/api/users/{uid}/password`, `/api/users/{uid}`
-- System: `/health`, `/api/system/bootstrap`
-- App Entry: `/api/app-entries` (Portal-backed organization application directory)
+- Auth (public): `POST /api/auth/login`, `POST /api/auth/register`,
+  `GET /api/auth/session`, `POST /api/auth/logout`; `PUT /api/auth/password`
+  (authenticated)
+- Portal OIDC client (public): `GET /api/sso/start`, `GET /api/sso/callback`,
+  `POST /api/sso/exchange`
+- Lark SSO (public): `GET /api/lark/start`, `GET /api/lark/callback`
+- System: `GET /health`, `GET /api/system/bootstrap` (public),
+  `POST /api/system/restart` (admin)
+- Users (admin): `GET|POST /api/users`, `PUT /api/users/{uid}/status`,
+  `PUT /api/users/{uid}/role`, `PUT /api/users/{uid}/password`,
+  `DELETE /api/users/{uid}`
+- User roles (admin): `GET|POST /api/user-roles`,
+  `PUT|DELETE /api/user-roles/{role_id}`
+- RBAC rules (admin): `GET /api/rbac-rules`, `PUT /api/rbac-rules/{role}`,
+  `POST /api/rbac-rules/test`
+- Prompt templates (per user): `GET|POST /api/prompt-templates`,
+  `PUT|DELETE /api/prompt-templates/{template_id}`. A tag names at most one of
+  a user's templates (`@[prompt_<tag>]` resolves by tag): creating or renaming
+  onto a tag already in use answers 409.
+- System instructions (admin): `GET|POST /api/system-instructs`,
+  `PUT|DELETE /api/system-instructs/{instruct_id}`
+- User manuals: `GET /api/user-manuals`, `GET /api/user-manuals/{manual_id}`
+- Per-user environment: `GET|PUT /api/my/user-env`,
+  `DELETE /api/my/user-env/{env_key}`
+- App Entry: `GET /api/app-entries` (Portal-backed organization application
+  directory)
+- A2A context: `GET /api/a2a/context`, `POST /api/a2a/context/refresh`
+- Overview: `GET /api/overview/agents`, `GET /api/overview/stats`,
+  `GET /api/overview/topology`
+- Agents (admin): `GET /api/agents`, `GET|POST|PUT|DELETE /api/agents/{agent_id}`
+- Routing (admin): `GET|POST /api/routing/global`,
+  `GET|PUT|DELETE /api/routing/global/{rule_id}`, `GET|POST /api/routing/agent`,
+  `GET|PUT|DELETE /api/routing/agent/{rank_id}`
+- Audit (admin): `GET /api/audit/a2a-delegates`, `GET /api/audit/tasks`
+- Chat: `POST /api/chat/attachments`, `GET /api/chat/quick-commands`,
+  `GET /api/chat/drawer-html`, websocket `/api/chat/ws?token=<jwt>`
 - Public skill JavaScript: `/static/skills/html-deliverable/assets/agent2ui-bridge.js`
-- Overview: `/api/overview/agents`, `/api/overview/stats`
-- Agents: `/api/agents`, `/api/agents/{agent_id}`
-- Global routing: `/api/routing/global`, `/api/routing/global/{rule_id}`
 
 The public skill JavaScript route only serves regular `.js` files located under
 the repository's `aegis/skills/` directory. It does not list directories or
@@ -236,10 +303,13 @@ through the normal `message.completed` event flow:
 
 - `/help` — list the Aegis-native slash commands currently supported by the
   backend.
-- `/model <model_name>` — switch the current live session agent to a new model
-  without recreating the session. The override is in-memory only. If the target
-  provider matches the current one and the resolved switch result omits runtime
-  credentials, Aegis preserves the live agent's existing `api_key`,
+- `/model <model_name> [--provider <provider>]` — switch the current live
+  session agent to a new model without recreating the session. Flags are parsed
+  with the shared `/model` parser, so `--provider` selects the provider instead
+  of becoming part of the model name; `--global`, `--once` and `--reasoning`
+  are refused because the override is in-memory and session-scoped only. If the
+  target provider matches the current one and the resolved switch result omits
+  runtime credentials, Aegis preserves the live agent's existing `api_key`,
   `base_url`, and `api_mode` so the session does not lose authentication.
 - `/a2a` — return the current `A2A_CONTEXT` XML. If the cache is empty, the
   backend refreshes it by calling `a2a_list()` first.
@@ -260,6 +330,41 @@ left intact, including unresolved variables in Agent shortcuts. For example:
   "args": {"indicator": "example.com"}
 }
 ```
+
+### Chat websocket contract
+
+- Each frame must be a JSON object. A binary, non-JSON or non-object frame is
+  answered with `{"type": "error", "code": "invalid_message"}` and the socket
+  keeps serving. An `HTTPException` raised while resolving a `message.send`
+  becomes an `error` event (`code: "message_rejected"`) carrying its detail.
+  However the socket ends, the session actor is detached from it, so a dead
+  socket never pins the actor against cache eviction.
+- `session.bound.resumed` is true only when the session has prior state: the
+  in-memory actor was bound before, or SessionDB holds turns for its runtime
+  session. A new conversation whose id the client minted reports `false`.
+- Work that can block — building the agent (which refreshes the A2A context and
+  probes every agent card), `message.send` including `/model` and `/a2a`,
+  approval and clarify responses, `session.interrupt` — runs in a worker
+  thread, one frame at a time per socket, so a slow A2A agent never stalls the
+  event loop. The A2A context, login and password-hashing HTTP handlers are
+  plain `def` routes for the same reason. New actors are still built under the
+  session manager's lock, so concurrent binds that each create a session wait
+  for one another.
+
+### Attachments and the drawer
+
+`POST /api/chat/attachments` returns `{id, kind, media_type, display_name,
+size}`; the browser references an upload by `id` in `message.send`, and the
+host cache path stays server-side.
+
+`GET /api/chat/drawer-html?path=…` previews only files that the requesting
+user's own agent turns wrote (`write_file` / `patch` results recorded in
+`HERMES_HOME/aegis_drawer_files.json`, newest 1000 per user) and that the core
+read guard allows. Location grants nothing: the process cwd is `HERMES_HOME`,
+which also holds `.env`, `config.yaml` and other users' data, and the agent's
+file tools may write outside it (relative paths follow the terminal cwd). An
+unowned file answers 404 exactly like a missing one; a protected file the user's
+agent wrote answers 403. Relative paths resolve against `HERMES_HOME`.
 
 Interactive docs are available at:
 

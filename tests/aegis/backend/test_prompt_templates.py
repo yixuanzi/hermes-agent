@@ -90,3 +90,37 @@ def test_prompt_templates_are_user_isolated_and_validate_input(
         json={"tag": "   ", "desc": "", "prompt": "   "},
     )
     assert invalid.status_code == 422
+
+
+def test_a_tag_belongs_to_one_template_per_user(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    """``@[prompt_<tag>]`` resolves by tag: a second template with the same tag was accepted (201)
+    and silently shadowed the first, so create and rename onto a used tag are conflicts."""
+    triage = _create_template(client, auth_headers, tag="triage")
+    hunt = _create_template(client, auth_headers, tag="hunt")
+
+    duplicate = client.post(
+        "/api/prompt-templates",
+        headers=auth_headers,
+        json={"tag": "triage", "desc": "", "prompt": "A second triage prompt"},
+    )
+    renamed_onto = client.put(
+        f"/api/prompt-templates/{hunt['id']}",
+        headers=auth_headers,
+        json={"tag": "triage", "desc": "", "prompt": "Hunt prompt"},
+    )
+    kept_own_tag = client.put(
+        f"/api/prompt-templates/{triage['id']}",
+        headers=auth_headers,
+        json={"tag": "triage", "desc": "", "prompt": "Edited triage prompt"},
+    )
+    analyst_headers = {"Authorization": f"Bearer {_create_enabled_user(client, auth_headers, 'analyst')}"}
+
+    assert duplicate.status_code == 409
+    assert renamed_onto.status_code == 409
+    assert kept_own_tag.status_code == 200
+    assert _create_template(client, analyst_headers, tag="triage")["tag"] == "triage"
+    tags = [t["tag"] for t in client.get("/api/prompt-templates", headers=auth_headers).json()["templates"]]
+    assert sorted(tags) == ["hunt", "triage"]

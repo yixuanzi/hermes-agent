@@ -25,6 +25,10 @@ CREATE INDEX IF NOT EXISTS idx_prompt_templates_user_tag_updated
 """
 
 
+class PromptTemplateTagTakenError(Exception):
+    """Another of the user's templates already uses this tag."""
+
+
 class PromptTemplateStore:
     def __init__(self, path: Path | None = None) -> None:
         self._path = path or (get_hermes_home() / "aegis.db")
@@ -61,8 +65,20 @@ class PromptTemplateStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    @staticmethod
+    def _ensure_tag_free(conn: sqlite3.Connection, user_id: str, tag: str, template_id: str) -> None:
+        # ``@[prompt_<tag>]`` resolves by tag, so a second template with the same tag would be
+        # silently shadowed. Checked in the writing transaction, under the store lock.
+        taken = conn.execute(
+            "SELECT 1 FROM prompt_templates WHERE user_id = ? AND tag = ? AND id != ?",
+            (user_id, tag, template_id),
+        ).fetchone()
+        if taken is not None:
+            raise PromptTemplateTagTakenError(tag)
+
     def create(self, record: dict[str, Any]) -> None:
         with self._lock, self._connect() as conn:
+            self._ensure_tag_free(conn, record["user_id"], record["tag"], record["id"])
             conn.execute(
                 "INSERT INTO prompt_templates "
                 "(id, user_id, tag, desc, prompt, create_time, update_time) "
@@ -76,6 +92,7 @@ class PromptTemplateStore:
 
     def update_for_user(self, template_id: str, user_id: str, record: dict[str, Any]) -> bool:
         with self._lock, self._connect() as conn:
+            self._ensure_tag_free(conn, user_id, record["tag"], template_id)
             result = conn.execute(
                 "UPDATE prompt_templates SET tag = ?, desc = ?, prompt = ?, update_time = ? "
                 "WHERE id = ? AND user_id = ?",

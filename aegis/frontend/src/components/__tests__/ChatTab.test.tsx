@@ -1682,7 +1682,7 @@ describe('ChatTab', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       attachment: {
         id: 'att-image-1', kind: 'image', media_type: 'image/png',
-        cache_path: '/tmp/cache/images/img_1.png', display_name: 'clipboard.png', size: 12,
+        display_name: 'clipboard.png', size: 12,
       },
     }), { status: 201, headers: { 'Content-Type': 'application/json' } })));
     vi.stubGlobal('URL', {
@@ -1712,7 +1712,7 @@ describe('ChatTab', () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       attachment: {
         id: 'att-paste-1', kind: 'image', media_type: 'image/png',
-        cache_path: '/tmp/cache/images/img_paste.png', display_name: 'pasted.png', size: 12,
+        display_name: 'pasted.png', size: 12,
       },
     }), { status: 201, headers: { 'Content-Type': 'application/json' } }));
     vi.stubGlobal('fetch', fetchMock);

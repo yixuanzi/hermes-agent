@@ -8,6 +8,7 @@ import hmac
 import os
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import jwt
 from fastapi import HTTPException, Request
@@ -74,7 +75,7 @@ def extract_bearer_token(request: Request) -> str | None:
     return token or None
 
 
-def create_access_token(user: UserResponse, settings: AegisSettings) -> str:
+def create_access_token(user: UserResponse, settings: AegisSettings, *, token_version: int) -> str:
     now = _utc_now()
     payload = {
         "sub": user.uid,
@@ -82,6 +83,10 @@ def create_access_token(user: UserResponse, settings: AegisSettings) -> str:
         "email": user.email,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=settings.jwt_expire_seconds)).timestamp()),
+        # ``ver`` dies with every bump of the user's token_version; ``jti`` lets logout revoke
+        # just this token. See ``UserService.get_user_for_token``.
+        "ver": token_version,
+        "jti": uuid4().hex,
     }
     return str(jwt.encode(payload, settings.jwt_secret, algorithm=JWT_ALGORITHM))
 
@@ -101,8 +106,13 @@ def decode_access_token(token: str, settings: AegisSettings) -> dict[str, Any]:
     return payload
 
 
-def build_token_payload(user: UserResponse, settings: AegisSettings) -> tuple[str, int]:
-    token = create_access_token(user, settings)
+def build_token_payload(
+    user: UserResponse,
+    settings: AegisSettings,
+    user_service: UserService,
+) -> tuple[str, int]:
+    """The one place Aegis mints access tokens: password login and the SSO ticket exchange."""
+    token = create_access_token(user, settings, token_version=user_service.token_version(user.uid))
     return token, settings.jwt_expire_seconds
 
 
@@ -118,8 +128,7 @@ def get_current_user_from_token(
     user_service: UserService,
 ) -> tuple[UserResponse, dict[str, Any]]:
     payload = decode_access_token(token, settings)
-    user = user_service.get_enabled_user_by_uid(str(payload["sub"]))
-    return user, payload
+    return user_service.get_user_for_token(payload), payload
 
 
 def get_optional_user_from_request(

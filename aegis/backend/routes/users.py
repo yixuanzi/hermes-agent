@@ -31,8 +31,9 @@ def build_users_router(settings: AegisSettings, user_service: UserService) -> AP
         _ensure_admin(request)
         return UserListResponse(users=user_service.list_users())
 
+    # Password-hashing handlers are plain ``def`` so PBKDF2 runs in the threadpool.
     @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-    async def create_user(body: UserCreateRequest, request: Request) -> UserResponse:
+    def create_user(body: UserCreateRequest, request: Request) -> UserResponse:
         _ensure_admin(request)
         return user_service.create_user(body)
 
@@ -55,7 +56,7 @@ def build_users_router(settings: AegisSettings, user_service: UserService) -> AP
         return user_service.update_role(uid, body.role)
 
     @router.put("/{uid}/password", response_model=UserPasswordUpdateResponse)
-    async def update_password(
+    def update_password(
         uid: str,
         body: UserPasswordUpdateRequest,
         request: Request,

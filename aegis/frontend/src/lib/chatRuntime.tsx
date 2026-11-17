@@ -6,7 +6,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { ChainStep, ChatAttachment, ChatAttachmentSummary, Conversation, DelegateToolCall, Message } from '../types';
+import { ChainStep, ChatAttachment, Conversation, DelegateToolCall, Message } from '../types';
 import { getStoredToken } from './auth';
 import { getFrontendSettings } from './frontendSettings';
 import { applyWorkflowSocketEvent } from './sessionWorkflow';
@@ -982,7 +982,7 @@ export function AegisChatProvider({
       text: sentText,
       timestamp: formatClock(),
       clientMsgId,
-      attachments: attachments.map(({ cache_path: _cachePath, ...summary }): ChatAttachmentSummary => summary),
+      attachments,
     };
     const targetConversation = {
       ...conversation,

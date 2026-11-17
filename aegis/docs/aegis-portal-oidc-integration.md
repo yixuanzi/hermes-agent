@@ -8,9 +8,10 @@ Aegis web 支持两种入口：
    `http://127.0.0.1:9130/?organization_id=<id>&client_id=<client_id>`。
    Aegis 服务端随后向 Portal 发起带组织上下文的 Authorization Code + S256
    PKCE 请求。
-2. Aegis 登录页 SSO：用户点击“SSO 认证登录”，Aegis 使用配置中的
+2. Aegis 登录页 SSO：用户点击“Aegis SSO”，Aegis 使用配置中的
    `client_id` 并携带 `sso=1` 发起授权，不携带组织 ID。Portal 登录后自动解析
-   组织；匹配多个组织时展示组织选择页。
+   组织；匹配多个组织时展示组织选择页。该按钮仅在配置了 `OIDC_CLIENT_ID` 与
+   `OIDC_CLIENT_SECRET` 时显示（`/api/system/bootstrap` 的 `oidc_sso_enabled`）。
 
 两种流程最终都回到：
 

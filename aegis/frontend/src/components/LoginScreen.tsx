@@ -5,6 +5,7 @@ interface LoginScreenProps {
   onSubmit: (username: string, password: string) => Promise<void>;
   onAegisSsoLogin: () => void;
   onLarkSsoLogin: () => void;
+  oidcSsoEnabled: boolean;
   larkSsoEnabled: boolean;
   onSwitchToRegister: () => void;
   pending: boolean;
@@ -15,6 +16,7 @@ export default function LoginScreen({
   onSubmit,
   onAegisSsoLogin,
   onLarkSsoLogin,
+  oidcSsoEnabled,
   larkSsoEnabled,
   onSwitchToRegister,
   pending,
@@ -81,13 +83,15 @@ export default function LoginScreen({
           >
             {pending ? 'Signing In...' : 'Sign In'}
           </button>
-          <button
-            type="button"
-            onClick={onAegisSsoLogin}
-            className="w-full rounded-xl border border-cyan-700 bg-cyan-950/40 px-4 py-3 text-sm font-semibold text-cyan-100 transition hover:border-cyan-400 hover:bg-cyan-900/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400"
-          >
-            Aegis SSO
-          </button>
+          {oidcSsoEnabled ? (
+            <button
+              type="button"
+              onClick={onAegisSsoLogin}
+              className="w-full rounded-xl border border-cyan-700 bg-cyan-950/40 px-4 py-3 text-sm font-semibold text-cyan-100 transition hover:border-cyan-400 hover:bg-cyan-900/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400"
+            >
+              Aegis SSO
+            </button>
+          ) : null}
           {larkSsoEnabled ? (
             <button
               type="button"

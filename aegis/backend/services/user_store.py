@@ -18,8 +18,17 @@ CREATE TABLE IF NOT EXISTS users (
     status TEXT NOT NULL CHECK(status IN ('enabled', 'disabled')),
     role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user', 'operator', 'admin')),
     create_time TEXT NOT NULL,
-    last_login TEXT
+    last_login TEXT,
+    token_version INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS revoked_access_tokens (
+    jti TEXT PRIMARY KEY,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_revoked_access_tokens_expires
+    ON revoked_access_tokens (expires_at);
 
 CREATE TABLE IF NOT EXISTS oidc_login_transactions (
     state TEXT PRIMARY KEY,
@@ -60,6 +69,10 @@ CREATE INDEX IF NOT EXISTS idx_sso_login_tickets_expires
     ON sso_login_tickets (expires_at);
 """
 
+_USER_COLUMNS = (
+    "uid, username, passwd, email, oidc_subject, status, role, create_time, last_login, token_version"
+)
+
 
 class AegisUserStore:
     def __init__(self, path: Path | None = None) -> None:
@@ -86,6 +99,8 @@ class AegisUserStore:
                     "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' "
                     "CHECK(role IN ('user', 'operator', 'admin'))"
                 )
+            if "token_version" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
             # Keep the protected bootstrap account as an administrator when
             # an existing pre-role database is upgraded in place.
             conn.execute("UPDATE users SET role = 'admin' WHERE username = 'admin'")
@@ -98,7 +113,7 @@ class AegisUserStore:
     def list_users(self) -> list[dict[str, Any]]:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT uid, username, passwd, email, oidc_subject, status, role, create_time, last_login "
+                f"SELECT {_USER_COLUMNS} "
                 "FROM users ORDER BY username ASC"
             ).fetchall()
         return [dict(row) for row in rows]
@@ -106,7 +121,7 @@ class AegisUserStore:
     def get_user_by_uid(self, uid: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT uid, username, passwd, email, oidc_subject, status, role, create_time, last_login "
+                f"SELECT {_USER_COLUMNS} "
                 "FROM users WHERE uid = ?",
                 (uid,),
             ).fetchone()
@@ -115,7 +130,7 @@ class AegisUserStore:
     def get_user_by_username(self, username: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT uid, username, passwd, email, oidc_subject, status, role, create_time, last_login "
+                f"SELECT {_USER_COLUMNS} "
                 "FROM users WHERE username = ?",
                 (username,),
             ).fetchone()
@@ -124,7 +139,7 @@ class AegisUserStore:
     def get_user_by_oidc_subject(self, subject: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT uid, username, passwd, email, oidc_subject, status, role, create_time, last_login "
+                f"SELECT {_USER_COLUMNS} "
                 "FROM users WHERE oidc_subject = ?",
                 (subject,),
             ).fetchone()
@@ -133,7 +148,7 @@ class AegisUserStore:
     def get_user_by_email(self, email: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT uid, username, passwd, email, oidc_subject, status, role, create_time, last_login "
+                f"SELECT {_USER_COLUMNS} "
                 "FROM users WHERE lower(email) = lower(?)",
                 (email,),
             ).fetchone()
@@ -296,19 +311,49 @@ class AegisUserStore:
         return dict(row) if row is not None else None
 
     def update_password(self, uid: str, passwd: str) -> None:
+        """Set a new password hash; every token issued under the old one stops working."""
         with self._lock, self._connect() as conn:
-            conn.execute("UPDATE users SET passwd = ? WHERE uid = ?", (passwd, uid))
+            conn.execute(
+                "UPDATE users SET passwd = ?, token_version = token_version + 1 WHERE uid = ?",
+                (passwd, uid),
+            )
             conn.commit()
 
-    def update_status(self, uid: str, status: str) -> None:
+    def update_status(self, uid: str, status: str, *, revoke_tokens: bool) -> None:
         with self._lock, self._connect() as conn:
-            conn.execute("UPDATE users SET status = ? WHERE uid = ?", (status, uid))
+            conn.execute(
+                "UPDATE users SET status = ?, token_version = token_version + ? WHERE uid = ?",
+                (status, int(revoke_tokens), uid),
+            )
             conn.commit()
 
-    def update_role(self, uid: str, role: str) -> None:
+    def update_role(self, uid: str, role: str, *, revoke_tokens: bool) -> None:
         with self._lock, self._connect() as conn:
-            conn.execute("UPDATE users SET role = ? WHERE uid = ?", (role, uid))
+            conn.execute(
+                "UPDATE users SET role = ?, token_version = token_version + ? WHERE uid = ?",
+                (role, int(revoke_tokens), uid),
+            )
             conn.commit()
+
+    def bump_token_version(self, uid: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("UPDATE users SET token_version = token_version + 1 WHERE uid = ?", (uid,))
+            conn.commit()
+
+    def revoke_access_token(self, jti: str, expires_at: int, now: int) -> None:
+        """Deny one token until it would have expired anyway; rows past that point are pruned."""
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM revoked_access_tokens WHERE expires_at <= ?", (now,))
+            conn.execute(
+                "INSERT OR IGNORE INTO revoked_access_tokens (jti, expires_at) VALUES (?, ?)",
+                (jti, expires_at),
+            )
+            conn.commit()
+
+    def is_access_token_revoked(self, jti: str) -> bool:
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT 1 FROM revoked_access_tokens WHERE jti = ?", (jti,)).fetchone()
+        return row is not None
 
     def update_last_login(self, uid: str, last_login: str) -> None:
         with self._lock, self._connect() as conn:

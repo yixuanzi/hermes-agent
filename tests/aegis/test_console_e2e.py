@@ -107,7 +107,7 @@ async def test_hermes_aegis_e2e_hosted_console_and_api_roundtrip(tmp_path) -> No
 
             agents_before = await probe.get(f"http://127.0.0.1:{port}/api/agents", headers=headers)
             assert agents_before.status_code == 200
-            assert agents_before.json() == {"agents": []}
+            assert agents_before.json() == {"agents": [], "invalid": []}
 
             create_agent = await probe.post(
                 f"http://127.0.0.1:{port}/api/agents/e2e-agent",

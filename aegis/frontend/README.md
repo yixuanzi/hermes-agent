@@ -1,11 +1,11 @@
 # Aegis Frontend
 
-`aegis/frontend/` 是 Aegis 安全协同中枢的前端控制台。它基于 `React 19 + Vite 6 + Tailwind CSS 4 + Motion`，其中 `Agent Orchestration` 与 `Routing Policy` 已接入 `aegis/backend` 的真实 API，并由后台直接托管生产静态资源。
+`aegis/frontend/` 是 Aegis 安全协同中枢的前端控制台。它基于 `React 19 + Vite 6 + Tailwind CSS 4 + Motion`，各页面均接入 `aegis/backend` 的真实 API，并由后台直接托管生产静态资源。
 
 ## 当前能力
 
 - `Overview`：展示安全中枢总览、拓扑星图、Agent 索引，以及基于近 7 天 A2A 委派审计的运行指标。三层星图的设计基线见 [`../aegis_starmapping.json`](../aegis_starmapping.json)。
-- `Aegis Chat`：提供本地模拟的安全分析会话流，按预设场景回放 Agent/VIP Tool 协同链路。
+- `Aegis Chat`：通过 `/api/chat/ws` 与后端会话 Agent 实时对话，流式展示回复、工具调用、A2A 委派、审批与澄清请求；支持附件上传（`/api/chat/attachments`）、`@[...]` 快捷指令（`/api/chat/quick-commands`）、Aegis 原生 slash 命令（`/help`、`/model`、`/a2a`、`/stop`），以及在抽屉中预览本人 Agent 写出的文件（`/api/chat/drawer-html`）。
 - `Agent Orchestration`：支持登录后对 `/api/agents` 执行新增、编辑、删除。
 - `Routing Policy`：支持登录后对 `/api/routing/global` 执行新增、编辑、删除。
 
@@ -39,13 +39,15 @@
 说明：
 
 - 登录方式为用户名/密码，成功后前端会保存后端签发的 JWT access token。
-- 登录页提供“Aegis SSO”和“Lark SSO”两个入口。Aegis SSO 通过 `/api/sso/start?sso=1` 进入 Aegis Portal；Lark SSO 通过 `/api/lark/start` 进入 Lark 授权。
+- 登录页按 `/api/system/bootstrap` 的 `oidc_sso_enabled` / `lark_sso_enabled` 显示“Aegis SSO”和“Lark SSO”入口，未配置的入口不显示。Aegis SSO 通过 `/api/sso/start?sso=1` 进入 Aegis Portal；Lark SSO 通过 `/api/lark/start` 进入 Lark 授权。
+- 退出登录会调用 `POST /api/auth/logout` 吊销当前 token；修改本人密码会吊销该账号的全部 token（包括当前会话），随后回到登录页。
+- 接口错误提示取自 FastAPI 的 `detail`（字符串或校验错误列表），而不是原始 JSON 响应体。
 - 从 Portal“我的服务”进入时，Aegis 根路径接收 `organization_id + client_id` 并自动启动 OIDC；不读取或转发 `subscription_id`。
 - OIDC 回调页面为 `/sso/callback`，只兑换 HttpOnly 一次性票据，不在 URL 中保存 access token 或 refresh token。
 - 首次启动前设置 `AEGIS_BOOTSTRAP_ADMIN_PASSWORD`，系统仅在该 secret 存在时创建 `admin`；未设置时显示初始化提示且拒绝登录，不提供匿名管理员注册或固定默认密码。
 - Agent 与 Global Rule 数据持久化在 `HERMES_HOME/a2a.json`。
 - 用户数据持久化在 `HERMES_HOME/aegis.db`。
-- Chat 页面的会话回放仍然保存在浏览器 `localStorage`，键名为 `aegis_convs`。
+- Chat 页面的会话列表缓存在浏览器 `localStorage`（键名 `aegis_convs`），会话历史由后端 SessionDB 持久化。
 
 如果只想跑前端开发服务器：
 
@@ -62,6 +64,7 @@ Vite 已经代理 `/api` 和 `/health` 到 `http://127.0.0.1:9130`。
 ## 常用命令
 
 - `npm run dev`：启动开发环境，默认监听 `0.0.0.0:3000`
+- `npm test`：执行 vitest（`src/test/storage.ts` 在 Node 25+ 内置 Web Storage 遮蔽 jsdom 时提供内存版 `localStorage`/`sessionStorage`，无需 `NODE_OPTIONS`）
 - `npm run lint`：执行 `tsc --noEmit`
 - `npm run build`：生成生产构建产物到 `aegis/backend/web_dist`
 - `npm run preview`：本地预览构建结果
@@ -135,7 +138,7 @@ aegis/frontend
 - `Agent Orchestration` 读取和写入 `/api/agents`。
 - `Routing Policy` 读取和写入 `/api/routing/global`。
 - `Overview` 读取 `/api/overview/agents` 和 `/api/overview/stats`；后者统计近 7 天委派的 Agent、平台、用户、任务量、成功率及相邻周期变化。
-- Chat 页面的回复与执行链路仍为前端模拟逻辑，不会真正调用 A2A、RPC 或外部安全系统。
+- Chat 页面经 `/api/chat/ws` 驱动后端 Agent，A2A 委派与工具调用均为真实执行。
 - 当前侧边栏品牌图标接入的是 `logo/aegis-icon-brand-tile-color.svg`。
 
 ## 本次 Review 摘要
@@ -146,5 +149,4 @@ aegis/frontend
 
 ## 已知边界
 
-- 当前只对接了 `Agent Orchestration` 和 `Routing Policy` 两个后端模块。
-- 拓扑星图与 Aegis Chat 仍然偏演示态，尚未接真实安全执行链路；Overview 的近 7 天委派指标已接入审计日志。旧拓扑渲染仍在组件中写死，后续将按 [`../aegis_starmapping.json`](../aegis_starmapping.json) 的 Aegis 中心、7 个业务域 Agent 外环和 84 个群星节点重构。
+- 拓扑星图读取 `/api/overview/topology`（基线为 [`../aegis_starmapping.json`](../aegis_starmapping.json)，叠加 A2A 注册表中的 Agent 状态）；Overview 的近 7 天委派指标已接入审计日志。

@@ -206,24 +206,50 @@ def test_public_health_and_bootstrap_routes_are_accessible(client: TestClient) -
         "embedded_chat": False,
         "auth_scheme": "jwt-password",
         "admin_setup_required": False,
+        "oidc_sso_enabled": False,
         "lark_sso_enabled": False,
     }
 
 
-def test_bootstrap_reports_enabled_lark_sso(
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({}, {"oidc_sso_enabled": False, "lark_sso_enabled": False}),
+        (
+            {"OIDC_CLIENT_ID": "aegis-client", "OIDC_CLIENT_SECRET": "oidc-secret"},
+            {"oidc_sso_enabled": True, "lark_sso_enabled": False},
+        ),
+        ({"LARK_SSO_ENABLE": "true"}, {"oidc_sso_enabled": False, "lark_sso_enabled": False}),
+        (
+            {"LARK_SSO_ENABLE": "true", "LARK_APP_ID": "cli_app", "LARK_APP_SECRET": "lark-secret"},
+            {"oidc_sso_enabled": False, "lark_sso_enabled": True},
+        ),
+    ],
+)
+def test_bootstrap_offers_only_sso_entries_whose_start_route_works(
     load_backend,
     hermes_home,
     monkeypatch,
+    env: dict[str, str],
+    expected: dict[str, bool],
 ) -> None:
-    monkeypatch.setenv("LARK_SSO_ENABLE", "true")
+    """The login page showed "Aegis SSO" with OIDC unconfigured (a raw 503 page on click); Lark
+    counted as enabled from the flag alone although its start route 503s without credentials."""
+    for key in ("OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "LARK_SSO_ENABLE", "LARK_APP_ID", "LARK_APP_SECRET"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
     server = load_backend("aegis.backend.server")
-    app = server.create_app()
 
-    with TestClient(app) as test_client:
-        response = test_client.get("/api/system/bootstrap")
+    with TestClient(server.create_app()) as test_client:
+        bootstrap = test_client.get("/api/system/bootstrap").json()
+        oidc_start = test_client.get("/api/sso/start?sso=1", follow_redirects=False)
+        lark_start = test_client.get("/api/lark/start", follow_redirects=False)
 
-    assert response.status_code == 200
-    assert response.json()["lark_sso_enabled"] is True
+    assert {key: bootstrap[key] for key in expected} == expected
+    assert (oidc_start.status_code != 503) is expected["oidc_sso_enabled"]
+    assert (lark_start.status_code != 503) is expected["lark_sso_enabled"]
+    assert not any(value in str(bootstrap) for value in env.values() if value != "true")
 
 
 def test_missing_bootstrap_secret_requires_manual_setup(

@@ -100,7 +100,8 @@ def test_agents_crud_persists_through_shared_store(
                 "status": "active",
                 "extcapabilities": ["query-ip", "query-domain"],
             }
-        ]
+        ],
+        "invalid": [],
     }
 
     get_response = agent_client.get("/api/agents/agent-1", headers=AUTH_HEADERS)
@@ -395,7 +396,8 @@ def test_list_agents_supports_legacy_string_persisted_entries(
                 "status": "offline",
                 "extcapabilities": [],
             }
-        ]
+        ],
+        "invalid": [],
     }
 
 
@@ -432,7 +434,8 @@ def test_list_agents_normalizes_legacy_string_entry_without_scheme(
                 "status": "offline",
                 "extcapabilities": [],
             }
-        ]
+        ],
+        "invalid": [],
     }
 
 

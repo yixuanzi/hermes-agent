@@ -1498,7 +1498,7 @@ def test_chat_ws_help_slash_lists_supported_aegis_commands(
             assert completed["content"] == (
                 "Aegis slash commands:\n\n"
                 "- `/help` - show available Aegis-native slash commands\n"
-                "- `/model <model_name>` - switch the current live session model\n"
+                "- `/model <model_name> [--provider <provider>]` - switch the current live session model\n"
                 "- `/a2a` - show the current A2A context XML\n"
                 "- `/stop` - cancel any active remote A2A delegate task, then stop the current turn"
             )
@@ -1530,7 +1530,7 @@ def test_chat_ws_model_slash_without_args_returns_usage(
             )
             _recv_until(ws, "message.accepted")
             completed = _recv_until(ws, "message.completed")
-            assert completed["content"] == "Usage: /model <model_name>"
+            assert completed["content"] == "Usage: /model <model_name> [--provider <provider>]"
             assert agent.switch_calls == []
 
 

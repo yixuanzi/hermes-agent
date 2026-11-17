@@ -101,7 +101,7 @@ describe('Aegis App integration', () => {
     vi.restoreAllMocks();
   });
 
-  it('leaves login inputs empty by default and surfaces raw API errors via alert', async () => {
+  it('leaves login inputs empty by default and surfaces the API error detail via alert', async () => {
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
 
     global.fetch = vi.fn(async (input, init) => {
@@ -138,7 +138,7 @@ describe('Aegis App integration', () => {
     fireEvent.click(screen.getByRole('button', { name: /^sign in$/i }));
 
     await waitFor(() => {
-      expect(alertSpy).toHaveBeenCalledWith('{"detail":"用户名或密码错误"}');
+      expect(alertSpy).toHaveBeenCalledWith('用户名或密码错误');
     });
   });
 
@@ -170,6 +170,7 @@ describe('Aegis App integration', () => {
           embedded_chat: false,
           auth_scheme: 'jwt-password',
           admin_setup_required: false,
+          oidc_sso_enabled: true,
           lark_sso_enabled: true,
         });
       }
@@ -190,7 +191,7 @@ describe('Aegis App integration', () => {
     expect(assignSpy).toHaveBeenLastCalledWith('/api/lark/start');
   });
 
-  it('fails closed and hides Lark SSO when bootstrap configuration is unavailable', async () => {
+  it('fails closed and hides both SSO entries when bootstrap configuration is unavailable', async () => {
     global.fetch = vi.fn(async (input) => {
       const url = typeof input === 'string' ? input : input.toString();
       if (url === '/api/auth/session') {
@@ -203,7 +204,7 @@ describe('Aegis App integration', () => {
 
     expect(await screen.findByRole('heading', { name: /sign in/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Lark SSO' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Aegis SSO' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Aegis SSO' })).not.toBeInTheDocument();
   });
 
   it('supports register, login, agent/rule CRUD, and admin user management', async () => {
@@ -494,7 +495,7 @@ describe('Aegis App integration', () => {
 
     await screen.findByRole('button', { name: /user menu/i });
     fireEvent.click(screen.getByRole('button', { name: /user menu/i }));
-    expect(screen.getByText('admin-uid')).toBeInTheDocument();
+    expect(await screen.findByText('admin-uid')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /change password/i }));
     fireEvent.change(screen.getByLabelText(/current password/i), {
       target: { value: 'admin123456' },
@@ -504,9 +505,45 @@ describe('Aegis App integration', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: /update password/i }));
 
-    await waitFor(() => {
-      expect(screen.queryByText(/change password/i)).not.toBeInTheDocument();
-    });
+    // The change revokes every token of the account, so the session ends with a sign-in prompt.
+    expect(await screen.findByText('Password updated. Sign in with your new password.')).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/login');
+    expect(window.localStorage.getItem('aegis_session_token')).toBeNull();
+  });
+
+  it('revokes the session token on the server when signing out', async () => {
+    seedStoredAuth();
+    const logoutAuth: Array<string | null> = [];
+
+    global.fetch = vi.fn(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const method = init?.method || 'GET';
+      if (url === '/api/auth/session') {
+        return jsonResponse({ authenticated: true, user: adminUser, expires_in: 28800 });
+      }
+      if (url === '/api/overview/agents' || url === '/api/agents') {
+        return jsonResponse({ agents: [] });
+      }
+      if (url === '/api/routing/global') {
+        return jsonResponse({ rules: [] });
+      }
+      if (url === '/api/users') {
+        return jsonResponse({ users: [adminUser] });
+      }
+      if (url === '/api/auth/logout' && method === 'POST') {
+        logoutAuth.push(new Headers(init?.headers).get('Authorization'));
+        return jsonResponse({ logged_out: true });
+      }
+      throw new Error(`Unhandled request: ${method} ${url}`);
+    }) as typeof global.fetch;
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /user menu/i }));
+    fireEvent.click(screen.getByRole('button', { name: /sign out/i }));
+
+    await waitFor(() => expect(logoutAuth).toEqual(['Bearer frontend-test-token']));
+    expect(window.localStorage.getItem('aegis_session_token')).toBeNull();
   });
 
   it('hides admin-only control pages from regular users and redirects direct access attempts', async () => {

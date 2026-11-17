@@ -52,11 +52,12 @@ class ChatAttachment:
     created_at: float
 
     def public_dict(self) -> dict[str, Any]:
+        # The browser refers to an upload by ``id`` only; cache paths are host layout and stay
+        # server-side (the agent sees them in the turn text).
         return {
             "id": self.id,
             "kind": self.kind,
             "media_type": self.media_type,
-            "cache_path": self.cache_path,
             "display_name": self.display_name,
             "size": self.size,
         }

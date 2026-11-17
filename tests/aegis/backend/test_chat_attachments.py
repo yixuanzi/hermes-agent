@@ -34,14 +34,28 @@ def test_attachment_upload_caches_images_and_documents(
 
     image = _upload(client, auth_headers, "evidence.png", _PNG, "image/png")
     document = _upload(client, auth_headers, "ioc.json", b'{"sha256":"abc"}', "application/json")
+    image_record, document_record = client.app.state.chat_manager.attachments.resolve(
+        [{"id": image["id"]}, {"id": document["id"]}], owner_id="0000000000000001"
+    )
 
     assert image["kind"] == "image"
     assert image["media_type"] == "image/png"
-    assert Path(image["cache_path"]).is_file()
-    assert Path(image["cache_path"]).is_relative_to(hermes_home / "cache" / "images")
+    assert Path(image_record.host_path).is_relative_to(hermes_home / "cache" / "images")
     assert document["kind"] == "document"
-    assert Path(document["cache_path"]).is_file()
-    assert Path(document["cache_path"]).is_relative_to(hermes_home / "cache" / "documents")
+    assert Path(document_record.host_path).is_relative_to(hermes_home / "cache" / "documents")
+
+
+def test_upload_payload_carries_no_host_path(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    hermes_home: Path,
+) -> None:
+    """The upload response returned the absolute host ``cache_path`` to the browser; it only ever
+    needs the opaque ``id`` to reference the upload in ``message.send``."""
+    attachment = _upload(client, auth_headers, "evidence.png", _PNG, "image/png")
+
+    assert set(attachment) == {"id", "kind", "media_type", "display_name", "size"}
+    assert str(hermes_home) not in str(attachment)
 
 
 def test_attachment_store_rejects_foreign_or_forged_references(
@@ -94,5 +108,5 @@ def test_image_turn_uses_native_content_parts_when_the_model_supports_vision(
     message = prepare_turn_message("Inspect this image", records, agent=VisionAgent())
     assert isinstance(message, list)
     assert message[0]["type"] == "text"
-    assert attachment["cache_path"] in message[0]["text"]
+    assert records[0].cache_path in message[0]["text"]
     assert message[1]["type"] == "image_url"

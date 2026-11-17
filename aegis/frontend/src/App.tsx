@@ -56,6 +56,7 @@ type SystemBootstrapResponse = {
   embedded_chat: boolean;
   auth_scheme: string;
   admin_setup_required: boolean;
+  oidc_sso_enabled?: boolean;
   lark_sso_enabled?: boolean;
 };
 
@@ -450,6 +451,7 @@ export default function App() {
   const [users, setUsers] = useState<AuthenticatedUser[]>([]);
   const [currentUser, setCurrentUser] = useState<AuthenticatedUser | null>(() => getStoredUser());
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [oidcSsoEnabled, setOidcSsoEnabled] = useState(false);
   const [larkSsoEnabled, setLarkSsoEnabled] = useState(false);
   const [isBootstrapping, setIsBootstrapping] = useState(true);
   const [authPending, setAuthPending] = useState(false);
@@ -517,9 +519,11 @@ export default function App() {
 
       const systemBootstrapPromise = fetchJSON<SystemBootstrapResponse>('/api/system/bootstrap', {}, false)
         .then((systemBootstrap) => {
+          setOidcSsoEnabled(systemBootstrap.oidc_sso_enabled === true);
           setLarkSsoEnabled(systemBootstrap.lark_sso_enabled === true);
         })
         .catch(() => {
+          setOidcSsoEnabled(false);
           setLarkSsoEnabled(false);
         });
 
@@ -845,6 +849,9 @@ export default function App() {
   }
 
   function handleLogout() {
+    // Revokes this token server-side; fetchJSON reads the token before clearStoredAuth runs,
+    // and a failed request must not keep the user signed in locally.
+    void fetchJSON<{ logged_out: boolean }>('/api/auth/logout', { method: 'POST' }).catch(() => undefined);
     clearStoredAuth();
     resetAppEntries();
     setCurrentUser(null);
@@ -872,7 +879,9 @@ export default function App() {
         },
       );
       setShowPasswordDialog(false);
-      setAuthNotice('Password updated successfully.');
+      // The change revoked every token of this account, this session's included.
+      handleAuthExpired();
+      setAuthNotice('Password updated. Sign in with your new password.');
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         handleAuthExpired();
@@ -1139,6 +1148,7 @@ export default function App() {
         onSubmit={handleLogin}
         onAegisSsoLogin={() => window.location.assign('/api/sso/start?sso=1')}
         onLarkSsoLogin={() => window.location.assign('/api/lark/start')}
+        oidcSsoEnabled={oidcSsoEnabled}
         larkSsoEnabled={larkSsoEnabled}
         onSwitchToRegister={() => navigateAuth('/register')}
         pending={authPending}

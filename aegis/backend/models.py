@@ -434,6 +434,7 @@ class SystemBootstrapResponse(BaseModel):
     embedded_chat: bool
     auth_scheme: str
     admin_setup_required: bool
+    oidc_sso_enabled: bool
     lark_sso_enabled: bool
 
 
@@ -497,8 +498,16 @@ class AgentResponse(BaseModel):
         return normalize_agent_url(value)
 
 
+class InvalidAgentResponse(BaseModel):
+    """A stored ``a2a.json`` entry left out of the agent list because it does not parse."""
+
+    agent_id: str
+    error: str
+
+
 class AgentListResponse(BaseModel):
     agents: list[AgentResponse]
+    invalid: list[InvalidAgentResponse] = Field(default_factory=list)
 
 
 class OverviewAgentResponse(BaseModel):

@@ -1,3 +1,4 @@
+import './storage';
 import '@testing-library/jest-dom/vitest';
 
 const canvasGradient = { addColorStop: () => undefined };

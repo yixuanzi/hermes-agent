@@ -9,11 +9,18 @@ from datetime import UTC, datetime
 from fastapi import HTTPException
 
 from aegis.backend.models import PromptTemplateRequest, PromptTemplateResponse
-from aegis.backend.services.prompt_template_store import PromptTemplateStore
+from aegis.backend.services.prompt_template_store import (
+    PromptTemplateStore,
+    PromptTemplateTagTakenError,
+)
 
 
 def _utc_timestamp() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _tag_taken(tag: str) -> HTTPException:
+    return HTTPException(status_code=409, detail=f"Prompt template tag '{tag}' is already in use.")
 
 
 class PromptTemplateService:
@@ -36,6 +43,8 @@ class PromptTemplateService:
         }
         try:
             self._store.create(record)
+        except PromptTemplateTagTakenError as exc:
+            raise _tag_taken(body.tag) from exc
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="Prompt template already exists.") from exc
         return self._to_response(record)
@@ -49,7 +58,11 @@ class PromptTemplateService:
             "prompt": body.prompt,
             "update_time": _utc_timestamp(),
         }
-        if not self._store.update_for_user(template_id, user_id, record):
+        try:
+            updated_row = self._store.update_for_user(template_id, user_id, record)
+        except PromptTemplateTagTakenError as exc:
+            raise _tag_taken(body.tag) from exc
+        if not updated_row:
             raise HTTPException(status_code=404, detail="Prompt template not found.")
         updated = self._store.get_for_user(template_id, user_id)
         if updated is None:  # pragma: no cover - protects against concurrent deletion.

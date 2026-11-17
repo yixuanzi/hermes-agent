@@ -5,7 +5,7 @@ import LoginScreen from '../LoginScreen';
 describe('LoginScreen', () => {
   afterEach(cleanup);
 
-  it('keeps credentials empty and exposes both SSO entries when Lark SSO is enabled', () => {
+  it('keeps credentials empty and exposes both SSO entries when both are configured', () => {
     const onAegisSsoLogin = vi.fn();
     const onLarkSsoLogin = vi.fn();
     render(
@@ -13,6 +13,7 @@ describe('LoginScreen', () => {
         onSubmit={vi.fn()}
         onAegisSsoLogin={onAegisSsoLogin}
         onLarkSsoLogin={onLarkSsoLogin}
+        oidcSsoEnabled
         larkSsoEnabled
         onSwitchToRegister={vi.fn()}
         pending={false}
@@ -35,6 +36,7 @@ describe('LoginScreen', () => {
         onSubmit={vi.fn()}
         onAegisSsoLogin={vi.fn()}
         onLarkSsoLogin={vi.fn()}
+        oidcSsoEnabled
         larkSsoEnabled={false}
         onSwitchToRegister={vi.fn()}
         pending={false}
@@ -42,5 +44,22 @@ describe('LoginScreen', () => {
     );
 
     expect(screen.queryByRole('button', { name: 'Lark SSO' })).not.toBeInTheDocument();
+  });
+
+  it('hides the Aegis SSO entry when Portal OIDC is not configured', () => {
+    render(
+      <LoginScreen
+        onSubmit={vi.fn()}
+        onAegisSsoLogin={vi.fn()}
+        onLarkSsoLogin={vi.fn()}
+        oidcSsoEnabled={false}
+        larkSsoEnabled={false}
+        onSwitchToRegister={vi.fn()}
+        pending={false}
+      />,
+    );
+
+    expect(screen.queryByRole('button', { name: 'Aegis SSO' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sign In' })).toBeInTheDocument();
   });
 });

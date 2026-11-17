@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -27,6 +28,8 @@ DEFAULT_ADMIN_EMAIL = "admin@aegis.local"
 DEFAULT_ADMIN_UID = "0000000000000001"
 BOOTSTRAP_ADMIN_PASSWORD_ENV = "AEGIS_BOOTSTRAP_ADMIN_PASSWORD"
 _USERNAME_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
+_ROLE_RANK = {"user": 0, "operator": 1, "admin": 2}
+_TOKEN_REVOKED = "Token has been revoked."
 
 
 def _utc_timestamp() -> str:
@@ -86,11 +89,35 @@ class UserService:
             raise HTTPException(status_code=404, detail=f"User '{uid}' not found.")
         return self._build_user_response(user)
 
-    def get_enabled_user_by_uid(self, uid: str) -> UserResponse:
-        user = self.get_user_by_uid(uid)
-        if user.status != "enabled":
+    def token_version(self, uid: str) -> int:
+        return int(self._require_user_row(uid)["token_version"])
+
+    def get_user_for_token(self, payload: dict[str, Any]) -> UserResponse:
+        """The enabled user a verified access token names, unless that token was revoked.
+
+        ``ver`` must equal the user's current ``token_version`` (bumped on password change,
+        admin reset, demotion and disable); a token minted before the claim existed counts as
+        version 0. ``jti`` is checked against tokens revoked one by one at logout.
+        """
+        stored = self._store.get_user_by_uid(str(payload["sub"]))
+        if stored is None or stored["status"] != "enabled":
             raise HTTPException(status_code=401, detail="Unauthorized")
-        return user
+        if payload.get("ver", 0) != stored["token_version"]:
+            raise HTTPException(status_code=401, detail=_TOKEN_REVOKED)
+        jti = payload.get("jti")
+        if jti and self._store.is_access_token_revoked(str(jti)):
+            raise HTTPException(status_code=401, detail=_TOKEN_REVOKED)
+        return self._build_user_response(stored)
+
+    def revoke_access_token(self, payload: dict[str, Any]) -> None:
+        """Revoke the one token a logout presented."""
+        jti, exp = payload.get("jti"), payload.get("exp")
+        if jti and exp:
+            self._store.revoke_access_token(str(jti), int(exp), now=int(time.time()))
+            return
+        # A token minted without ``jti``/``exp`` has no handle of its own: revoking it means
+        # revoking every token its user holds.
+        self._store.bump_token_version(str(payload["sub"]))
 
     def register_user(self, body: AuthRegisterRequest) -> None:
         self._create_user(
@@ -236,7 +263,7 @@ class UserService:
         user = self._require_user_row(uid)
         if user["username"] == DEFAULT_ADMIN_USERNAME and status != "enabled":
             raise HTTPException(status_code=400, detail="The admin user cannot be disabled.")
-        self._store.update_status(uid, status)
+        self._store.update_status(uid, status, revoke_tokens=status == "disabled")
         refreshed = self._store.get_user_by_uid(uid)
         assert refreshed is not None
         return self._build_user_response(refreshed)
@@ -245,7 +272,11 @@ class UserService:
         user = self._require_user_row(uid)
         if user["username"] == DEFAULT_ADMIN_USERNAME and role != "admin":
             raise HTTPException(status_code=400, detail="The bootstrap admin role cannot be changed.")
-        self._store.update_role(uid, role)
+        self._store.update_role(
+            uid,
+            role,
+            revoke_tokens=_ROLE_RANK[role] < _ROLE_RANK[str(user["role"])],
+        )
         refreshed = self._store.get_user_by_uid(uid)
         assert refreshed is not None
         return self._build_user_response(refreshed)

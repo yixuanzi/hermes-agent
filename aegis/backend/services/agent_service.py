@@ -2,13 +2,26 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
+import logging
 from typing import Any
 
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from aegis.backend.models import AgentResponse, AgentUpsertRequest, OverviewAgentResponse
+from aegis.backend.models import (
+    AgentResponse,
+    AgentUpsertRequest,
+    InvalidAgentResponse,
+    OverviewAgentResponse,
+)
 from aegis.backend.services.store import AegisStore, get_aegis_store
+
+
+logger = logging.getLogger(__name__)
+
+
+class InvalidStoredAgentError(ValueError):
+    """An ``a2a.json`` entry that does not form a valid agent."""
 
 
 class AgentService:
@@ -31,12 +44,24 @@ class AgentService:
         return self._store
 
     def list_agents(self) -> list[AgentResponse]:
-        payload = self._get_store().read_locked()
-        agents = payload["a2a"]
-        return [
-            self._build_agent_response(agent_id, value)
-            for agent_id, value in sorted(agents.items())
-        ]
+        return self.scan_agents()[0]
+
+    def scan_agents(self) -> tuple[list[AgentResponse], list[InvalidAgentResponse]]:
+        """Every stored agent that parses, and the entries that do not.
+
+        One hand-edited bad entry must not 500 the agent list, the overview and every chat
+        message (shortcut resolution lists agents); it is skipped with a warning and stays
+        editable and deletable by id.
+        """
+        valid: list[AgentResponse] = []
+        invalid: list[InvalidAgentResponse] = []
+        for agent_id, value in sorted(self._get_store().read_locked()["a2a"].items()):
+            try:
+                valid.append(self._parse_stored_agent(agent_id, value))
+            except InvalidStoredAgentError as exc:
+                logger.warning("Skipping invalid a2a.json agent %r: %s", agent_id, exc)
+                invalid.append(InvalidAgentResponse(agent_id=agent_id, error=str(exc)))
+        return valid, invalid
 
     def list_overview_agents(self) -> list[OverviewAgentResponse]:
         return [
@@ -83,30 +108,31 @@ class AgentService:
 
         self._get_store().mutate_locked(_mutate)
 
-    @staticmethod
-    def _build_agent_response(agent_id: str, payload: Mapping[str, Any] | str) -> AgentResponse:
-        normalized_payload = AgentService._normalize_stored_agent_payload(agent_id, payload)
-
+    @classmethod
+    def _build_agent_response(cls, agent_id: str, payload: Mapping[str, Any] | str) -> AgentResponse:
         try:
-            return AgentResponse.model_validate({"agent_id": agent_id, **dict(normalized_payload)})
-        except ValidationError as exc:
+            return cls._parse_stored_agent(agent_id, payload)
+        except InvalidStoredAgentError as exc:
             raise HTTPException(
                 status_code=500,
                 detail=f"Stored agent '{agent_id}' has an invalid shape.",
             ) from exc
 
     @classmethod
-    def _normalize_stored_agent_payload(
-        cls, agent_id: str, payload: Mapping[str, Any] | str
-    ) -> Mapping[str, Any]:
+    def _parse_stored_agent(cls, agent_id: str, payload: Mapping[str, Any] | str) -> AgentResponse:
         if isinstance(payload, str):
-            return {"url": payload, **deepcopy(cls._LEGACY_AGENT_DEFAULTS)}
-        if isinstance(payload, Mapping):
-            return payload
-        raise HTTPException(
-            status_code=500,
-            detail=f"Stored agent '{agent_id}' has an invalid shape.",
-        )
+            payload = {"url": payload, **deepcopy(cls._LEGACY_AGENT_DEFAULTS)}
+        if not isinstance(payload, Mapping):
+            raise InvalidStoredAgentError("entry must be a URL string or an object")
+        try:
+            return AgentResponse.model_validate({"agent_id": agent_id, **dict(payload)})
+        except ValidationError as exc:
+            raise InvalidStoredAgentError(
+                "; ".join(
+                    f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+                    for error in exc.errors()
+                )
+            ) from exc
 
     @staticmethod
     def _build_overview_agent_response(agent: AgentResponse) -> OverviewAgentResponse:

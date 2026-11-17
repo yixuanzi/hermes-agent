@@ -129,16 +129,6 @@ function cloneRules(rules: Record<RbacRuleRole, RbacRule>): Record<RbacRuleRole,
   ) as Record<RbacRuleRole, RbacRule>;
 }
 
-function formatApiError(error: unknown, fallback: string): string {
-  const message = getApiErrorMessage(error, fallback);
-  try {
-    const payload = JSON.parse(message) as { detail?: unknown };
-    return typeof payload.detail === 'string' ? payload.detail : message;
-  } catch {
-    return message;
-  }
-}
-
 export default function RbacRulesManager({ onAuthExpired }: RbacRulesManagerProps) {
   const [activeRole, setActiveRole] = useState<RbacRuleRole>('admin');
   const [drafts, setDrafts] = useState<Partial<Record<RbacRuleRole, RoleDraft>>>({});
@@ -180,7 +170,7 @@ export default function RbacRulesManager({ onAuthExpired }: RbacRulesManagerProp
         onAuthExpired?.();
         return;
       }
-      setError(formatApiError(loadError, 'Unable to load RBAC rules.'));
+      setError(getApiErrorMessage(loadError, 'Unable to load RBAC rules.'));
     } finally {
       setLoading(false);
     }
@@ -393,7 +383,7 @@ export default function RbacRulesManager({ onAuthExpired }: RbacRulesManagerProp
         onAuthExpired?.();
         return;
       }
-      setError(formatApiError(saveError, 'Unable to save RBAC rules.'));
+      setError(getApiErrorMessage(saveError, 'Unable to save RBAC rules.'));
     } finally {
       setSaving(false);
     }
@@ -430,7 +420,7 @@ export default function RbacRulesManager({ onAuthExpired }: RbacRulesManagerProp
         onAuthExpired?.();
         return;
       }
-      updateParameterTestResult(toolId, ruleId, parameterId, 'error', formatApiError(testError, 'Invalid regular expression.'));
+      updateParameterTestResult(toolId, ruleId, parameterId, 'error', getApiErrorMessage(testError, 'Invalid regular expression.'));
     }
   }
 

@@ -20,13 +20,15 @@ def build_a2a_context_router(
     def _require_user(request: Request) -> None:
         require_authenticated_user(request, settings, user_service)
 
+    # Plain ``def`` on purpose: a refresh probes every agent card with blocking HTTP, so these
+    # run in the threadpool instead of stalling the event loop behind one slow agent.
     @router.get("", response_model=A2AContextResponse)
-    async def get_context(request: Request) -> A2AContextResponse:
+    def get_context(request: Request) -> A2AContextResponse:
         _require_user(request)
         return a2a_context_service.get_context()
 
     @router.post("/refresh", response_model=A2AContextResponse)
-    async def refresh_context(request: Request) -> A2AContextResponse:
+    def refresh_context(request: Request) -> A2AContextResponse:
         _require_user(request)
         return a2a_context_service.refresh_context()
 

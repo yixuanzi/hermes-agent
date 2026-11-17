@@ -27,10 +27,12 @@ from aegis.backend.services.user_service import UserService
 def build_auth_router(settings: AegisSettings, user_service: UserService) -> APIRouter:
     router = APIRouter(prefix="/api/auth", tags=["auth"])
 
+    # Handlers that hash or verify a password are plain ``def``: PBKDF2 at 310k iterations is
+    # CPU-bound and would otherwise stall the event loop for every other request.
     @router.post("/login", response_model=AuthLoginResponse)
-    async def login(body: AuthLoginRequest) -> AuthLoginResponse:
+    def login(body: AuthLoginRequest) -> AuthLoginResponse:
         user = user_service.authenticate_user(body.username, body.password)
-        access_token, expires_in = build_token_payload(user, settings)
+        access_token, expires_in = build_token_payload(user, settings, user_service)
         return AuthLoginResponse(
             authenticated=True,
             access_token=access_token,
@@ -43,7 +45,7 @@ def build_auth_router(settings: AegisSettings, user_service: UserService) -> API
         response_model=AuthRegisterResponse,
         status_code=status.HTTP_201_CREATED,
     )
-    async def register(body: AuthRegisterRequest) -> AuthRegisterResponse:
+    def register(body: AuthRegisterRequest) -> AuthRegisterResponse:
         user_service.register_user(body)
         return AuthRegisterResponse(registered=True, status="disabled")
 
@@ -59,11 +61,16 @@ def build_auth_router(settings: AegisSettings, user_service: UserService) -> API
         )
 
     @router.post("/logout", response_model=AuthLogoutResponse)
-    async def logout() -> AuthLogoutResponse:
+    async def logout(request: Request) -> AuthLogoutResponse:
+        # Public so a client holding an expired or already-revoked token can still log out;
+        # only a token that is still valid has anything left to revoke.
+        _user, payload = get_optional_user_from_request(request, settings, user_service)
+        if payload is not None:
+            user_service.revoke_access_token(payload)
         return AuthLogoutResponse(logged_out=True)
 
     @router.put("/password", response_model=AuthPasswordChangeResponse)
-    async def change_password(
+    def change_password(
         body: AuthPasswordChangeRequest,
         request: Request,
     ) -> AuthPasswordChangeResponse:
