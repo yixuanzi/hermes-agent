@@ -4,9 +4,10 @@ Admin-only: every API call needs a short-lived access token issued in
 exchange for ``WORKAGENT_A2A_ADMIN_TOKEN`` (never the A2A session token).  It
 offers two things:
 
-* personal MCP keys — create, list, edit (name, identity, enabled), regenerate
-  and delete the keys ``/mcp`` accepts besides the A2A token, each bound to the
-  ``<source>`` identity prepended to its tasks (``a2a_service.mcp_keys``);
+* personal keys — create, list, edit (name, identity, enabled), regenerate and
+  delete the keys the A2A route and ``/mcp`` accept besides the A2A token, each
+  bound to the ``<source>`` identity prepended to its tasks
+  (``a2a_service.mcp_keys``, enforced by ``a2a_service.key_scope``);
 * process control — the guarded self-restart.
 
 The A2A bearer middleware skips these paths; they authenticate themselves here.
@@ -114,6 +115,9 @@ def register_management_routes(
     app: FastAPI,
     settings: WorkagentSettings,
     key_store: McpKeyStore,
+    *,
+    a2a_path: str,
+    mcp_path: str,
 ) -> None:
     """Mount ``/man`` and its admin API on ``app``."""
     access_tokens = ManagementAccessTokens()
@@ -134,7 +138,12 @@ def register_management_routes(
     async def management_page() -> HTMLResponse:
         nonce = secrets.token_urlsafe(24)
         return HTMLResponse(
-            render_management_page(enabled=bool(settings.a2a_admin_token), nonce=nonce),
+            render_management_page(
+                enabled=bool(settings.a2a_admin_token),
+                nonce=nonce,
+                a2a_path=a2a_path,
+                mcp_path=mcp_path,
+            ),
             headers=_page_headers(nonce),
         )
 
@@ -170,7 +179,7 @@ def register_management_routes(
         )
         return JSONResponse(result.as_dict(), status_code=status.HTTP_202_ACCEPTED, headers=_NO_STORE)
 
-    # ── personal MCP keys ───────────────────────────────────────────────
+    # ── personal keys ───────────────────────────────────────────────────
     keys_path = f"{MANAGEMENT_PREFIX}/api/keys"
 
     @app.get(keys_path, include_in_schema=False)

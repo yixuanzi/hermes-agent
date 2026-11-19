@@ -42,6 +42,7 @@ from tools import clarify_gateway
 
 from .converter import a2a_to_text, history_to_a2a, text_to_message
 from .interactions import InteractionError, InteractionRecord, InteractionRegistry
+from .key_scope import text_as_caller
 
 
 AgentFactory = Callable[[str], object]
@@ -182,7 +183,8 @@ class HermesA2AExecutor(AgentExecutor):
             self._cancel_events[task.id] = cancel_event
             self._task_event_queues[task.id] = event_queue
 
-        user_input = a2a_to_text(context.message)
+        # A personal key speaks only as the identity bound to it.
+        user_input = text_as_caller(a2a_to_text(context.message), context.call_context)
 
         # ── 解析 <source> 前缀（字段灵活，不假设字段数量）─────────────────────
         _source_meta: dict = {}

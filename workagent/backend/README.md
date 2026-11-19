@@ -213,7 +213,8 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 - 仅在 HTTP 中间件层认证，不改变 A2A executor、消息流或任务状态机
 - CORS 中间件位于认证之外：浏览器预检（带 `Access-Control-Request-Method` 的 `OPTIONS`）无需 Bearer 即被应答；其余请求（包括不带该头的 `OPTIONS`）仍需 Bearer，401 响应也带 CORS 头，跨域调用方能读到拒绝原因
 - `WORKAGENT_SESSION_TOKEN` 仍仅用于 `server` 模块；`A2A_SESSION_TOKEN` 仅用于 `a2a` 模块
-- `/mcp`（streamable HTTP MCP）除 `A2A_SESSION_TOKEN` 外还接受**个人 MCP key**（`wak_` 前缀，见 3.4）；个人 key 只能用于 `/mcp`，用在 `/a2a` 等其它路由返回 401；已删除、已停用或已重新生成的 key 即使在 A2A 认证关闭时也返回 401
+- A2A 路由（`/a2a` JSON-RPC 及其 `/hermes/interaction/respond`、`/hermes/steer`）和 `/mcp`（streamable HTTP MCP）除 `A2A_SESSION_TOKEN` 外还接受**个人 key**（`wak_` 前缀，见 3.4.1）；个人 key 用在其它路由返回 401；已删除、已停用或已重新生成的 key 即使在 A2A 认证关闭时也返回 401
+- 信任模型：`A2A_SESSION_TOKEN` 是对内的可信凭证，可在消息开头写入任意 `<source>` 身份；个人 key 是对外凭证，只能以管理员为其绑定的身份发言
 
 ### 3.4 A2A 管理与重启
 - 设置非空 `WORKAGENT_A2A_ADMIN_TOKEN` 后启用 `GET /man`；未设置时页面会明确显示管理未启用，管理 API 返回 503，重启不可用
@@ -223,10 +224,11 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 - 重启成功返回 HTTP 202，统一字段为 `accepted`、`already_requested`、`service`、`pid`；重复请求不会启动第二个 watcher
 - 重启会重放当前启动命令；若认证 token 原本由进程启动时随机生成，新进程可能生成不同值
 
-### 3.4.1 个人 MCP key
-- 管理员在 `/man` 为每个人创建一个独立的 `/mcp` key，并绑定一个身份对象（自由 JSON，如 `{"platform":"feishu","channel":"oc_…","uid":"…","uname":"…"}`；也可直接粘贴带 `<source>` 标签的原文）
-- 用该 key 调用 `start_task` 时，消息前自动加上 `<source>{身份 JSON}</source>\n`，executor 据此解析来源平台和用户；调用方自己写在消息开头的 `<source>` 会被替换，无法冒充他人
-- 隔离：每个 key 是独立的 A2A task owner，只能查看、停止、应答自己的任务；新会话 ID 形如 `mk-<key_id>-<hex>`，key 只能续接自己的会话（使用 `A2A_SESSION_TOKEN` 的调用不受此限，也不加身份前缀）
+### 3.4.1 个人 key
+- 管理员在 `/man` 为每个人创建一个独立的 key（A2A 与 MCP 通用），并绑定一个身份对象（自由 JSON，如 `{"platform":"feishu","channel":"oc_…","uid":"…","uname":"…"}`；也可直接粘贴带 `<source>` 标签的原文）
+- 用该 key 发起任务时（A2A `message/send`、`message/stream` 或 MCP `start_task`），executor 在拼接后的消息文本上先清除开头的所有 `<source>…</source>`，再加上 `<source>{身份 JSON}</source>\n`，据此解析来源平台和用户；调用方无法冒充他人（实现集中在 `a2a_service/key_scope.py`，两个入口共用）
+- 隔离：每个 key 是独立的 A2A task owner，`tasks/get`、`tasks/cancel`、`tasks/list`、订阅及 MCP 工具只能看到自己的任务；`/hermes/interaction/respond` 与 `/hermes/steer` 只接受自己任务的请求（否则 404）；新会话 ID 形如 `mk-<key_id>-<hex>`，传入其它 `contextId` / `session_id` 会被拒绝（“session … not found”）。同一个 key 在 A2A 与 MCP 上看到的是同一批任务和会话
+- 使用 `A2A_SESSION_TOKEN` 的调用不受上述限制，`<source>` 原样信任，也看不到个人 key 的任务
 - 存储：`<HERMES_HOME>/workagent/mcp_keys.json`（0600），只保存 key 的 SHA-256 摘要；明文仅在创建/重新生成时返回一次
 - 支持：创建、查看、修改名称/身份、启用/停用、重新生成（旧 key 立即失效，会话保留）、删除
 
@@ -371,7 +373,7 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 - `GET /man`
 - `POST /man/api/auth`：请求体 `{"token":"..."}`，返回 5 分钟、仅用于管理 API 的 Bearer 及到期信息
 - `POST /man/api/restart`：需要管理 Bearer，成功返回 HTTP 202 和 `accepted`、`already_requested`、`service`、`pid`
-- 个人 MCP key（均需管理 Bearer）：
+- 个人 key（均需管理 Bearer）：
   - `GET /man/api/keys`：列表（不含摘要与明文）
   - `POST /man/api/keys`：`{"name","source"}`，返回 201 和 `key`、`secret`（明文仅此一次）
   - `GET /man/api/keys/{id}`

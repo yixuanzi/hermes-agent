@@ -81,9 +81,10 @@ class BoundedTaskStore(TaskStore):
     the caller doing the saving.  That keeps the implementation honest about
     the SDK's ownership model — deleting another owner's task would need a
     ``ServerCallContext`` that resolves to them, and stashing contexts just to
-    manufacture one would pin the very auth objects they carry.  With the
-    single-owner setup the WORKAGENT server runs (bearer-token middleware, no
-    per-user A2A identity) that is simply the whole store.
+    manufacture one would pin the very auth objects they carry.  The owners are
+    the A2A session token's shared scope plus one per personal key
+    (``key_scope``), so the cap holds per caller and the whole store is at most
+    ``max_size`` times the number of active callers.
     """
 
     def __init__(

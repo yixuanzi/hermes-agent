@@ -8,10 +8,19 @@ attributes, and user-supplied values only ever reach the DOM via
 
 from __future__ import annotations
 
+import json
 
-def render_management_page(*, enabled: bool, nonce: str) -> str:
+
+def _js_string(value: str) -> str:
+    # A JSON string literal that cannot close the surrounding <script>.
+    return json.dumps(value).replace("<", "\\u003c")
+
+
+def render_management_page(*, enabled: bool, nonce: str, a2a_path: str, mcp_path: str) -> str:
     return (
         _PAGE.replace("__NONCE__", nonce)
+        .replace("__A2A_PATH__", _js_string(a2a_path))
+        .replace("__MCP_PATH__", _js_string(mcp_path))
         .replace("__ENABLED__", "true" if enabled else "false")
         .replace("__DISABLED_ATTR__", "" if enabled else " disabled")
         .replace(
@@ -147,12 +156,12 @@ pre.snippet { margin: 0; padding: 10px; overflow-x: auto; border: 1px solid var(
     <section class="panel" aria-labelledby="keys-title">
       <div class="panel-head">
         <div class="lede">
-          <h2 id="keys-title">Personal MCP keys</h2>
-          <p>Each key signs in to <code>/mcp</code> as one person. Its identity is put in front of every task that person starts, as <code>&lt;source&gt;…&lt;/source&gt;</code>, and the key sees only its own tasks and sessions.</p>
+          <h2 id="keys-title">Personal keys</h2>
+          <p>Each key signs in to the A2A endpoint and to <code>/mcp</code> as one person. Its identity replaces any <code>&lt;source&gt;…&lt;/source&gt;</code> the caller writes and is put in front of every task that person starts, and the key sees only its own tasks and sessions.</p>
         </div>
         <button class="primary" id="new-key-button" type="button">New key</button>
       </div>
-      <div id="keys-empty" class="empty" hidden><strong>No personal keys yet</strong>Create one to give someone their own MCP access.</div>
+      <div id="keys-empty" class="empty" hidden><strong>No personal keys yet</strong>Create one to give someone their own A2A and MCP access.</div>
       <table id="keys-table" hidden>
         <thead><tr><th>Name</th><th>Identity</th><th>Key</th><th>Status</th><th>Last used</th><th><span class="sr">Actions</span></th></tr></thead>
         <tbody id="keys-body"></tbody>
@@ -195,13 +204,17 @@ pre.snippet { margin: 0; padding: 10px; overflow-x: auto; border: 1px solid var(
     <h2 id="secret-title">Key created</h2>
     <div class="callout">Copy this key now. It is stored only as a hash and will not be shown again.</div>
     <div>
-      <label for="secret-value">Personal MCP key for <span id="secret-owner"></span></label>
+      <label for="secret-value">Personal key for <span id="secret-owner"></span></label>
       <div class="secret-box"><input id="secret-value" type="text" readonly spellcheck="false"><button id="copy-secret" type="button">Copy</button></div>
     </div>
     <div>
       <label>Add to Claude Code</label>
       <pre class="snippet" id="secret-command"></pre>
       <div class="row hint"><button class="small ghost" id="copy-command" type="button">Copy command</button></div>
+    </div>
+    <div>
+      <label>Use with an A2A client</label>
+      <pre class="snippet" id="secret-a2a"></pre>
     </div>
     <div class="dialog-actions"><button class="primary" id="secret-done" type="button">Done</button></div>
   </div>
@@ -213,6 +226,8 @@ pre.snippet { margin: 0; padding: 10px; overflow-x: auto; border: 1px solid var(
 (() => {
   "use strict";
   const MANAGEMENT_ENABLED = __ENABLED__;
+  const A2A_PATH = __A2A_PATH__;
+  const MCP_PATH = __MCP_PATH__;
   const RESTART_PHRASE = "RESTART A2A";
   const $ = (id) => document.getElementById(id);
   const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
@@ -451,8 +466,9 @@ pre.snippet { margin: 0; padding: 10px; overflow-x: auto; border: 1px solid var(
     $("secret-title").textContent = title;
     $("secret-owner").textContent = result.key.name;
     $("secret-value").value = result.secret;
-    const server = `${location.origin}/mcp`;
+    const server = `${location.origin}${MCP_PATH}`;
     $("secret-command").textContent = `claude mcp add --transport http hermes-workagent ${server} --header "Authorization: Bearer ${result.secret}"`;
+    $("secret-a2a").textContent = `JSON-RPC endpoint: ${location.origin}${A2A_PATH}\nAuthorization: Bearer ${result.secret}`;
     $("secret-dialog").showModal();
     $("secret-value").select();
   }

@@ -9,20 +9,19 @@ session the executor keys its agent and conversation history on.  The
 approval / clarify tools answer through the executor's interaction registry,
 exactly as the A2A interaction-response HTTP route does.
 
-Auth is not handled here: ``/mcp`` is not a public path, so the A2A bearer
-middleware already guards it with the A2A session token.
+Auth is not handled here: the A2A auth middleware admits the A2A session
+token or a personal key, and a key's identity, task ownership and session
+namespace are applied by the shared ``key_scope`` seams the A2A route uses too.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 import uuid
 
-from a2a.auth.user import User
 from a2a.server.context import ServerCallContext
 from a2a.server.request_handlers import RequestHandler
 from a2a.types import (
@@ -45,6 +44,7 @@ from pydantic import Field
 from starlette.routing import BaseRoute
 
 from .interactions import InteractionError
+from .key_scope import call_context_for, request_key
 from .mcp_keys import McpKeyRecord
 
 if TYPE_CHECKING:
@@ -67,14 +67,6 @@ _TERMINAL_STATES = frozenset(
 _INTERRUPTED_STATES = frozenset(
     {TaskState.TASK_STATE_INPUT_REQUIRED, TaskState.TASK_STATE_AUTH_REQUIRED}
 )
-
-# Request-state attribute the A2A auth middleware sets when /mcp was called with
-# a personal MCP key (see ``a2a_server.create_a2a_app``).
-MCP_KEY_STATE_ATTR = "mcp_key"
-
-# A caller-written envelope at the head of the message; a personal key's own
-# envelope replaces it so the identity the agent sees is the key's.
-_LEADING_SOURCE_RE = re.compile(r"^\s*<source>.*?</source>\s*", re.DOTALL)
 
 _POLL_SECONDS = 0.5
 _WAIT_FOREVER = -1
@@ -100,26 +92,9 @@ def _message_text(message: Message) -> str:
     return "\n".join(part.text for part in message.parts if part.HasField("text")).strip()
 
 
-class _KeyUser(User):
-    """A2A owner identity for one personal MCP key: its tasks are its own."""
-
-    def __init__(self, owner: str):
-        self._owner = owner
-
-    @property
-    def is_authenticated(self) -> bool:
-        return True
-
-    @property
-    def user_name(self) -> str:
-        return self._owner
-
-
 def _caller(ctx: Context) -> McpKeyRecord | None:
     """The personal key this tool call authenticated with, or ``None`` for the A2A token."""
-    request = ctx.request_context.request
-    state = getattr(request, "state", None)
-    return getattr(state, MCP_KEY_STATE_ATTR, None) if state is not None else None
+    return request_key(ctx.request_context.request)
 
 
 def create_task_mcp_server(
@@ -133,11 +108,9 @@ def create_task_mcp_server(
     interactions = executor.interactions
 
     def _call_context(caller: McpKeyRecord | None) -> ServerCallContext:
-        # The A2A token shares the A2A JSON-RPC owner scope, so its tasks are
-        # visible to both surfaces; a personal key sees only its own tasks.
-        if caller is None:
-            return ServerCallContext()
-        return ServerCallContext(user=_KeyUser(caller.owner))
+        # Same scope the A2A route builds for the same credential, so a task
+        # is visible to its owner on both surfaces and to no one else.
+        return call_context_for(caller)
 
     def _pending(task: Task) -> list[dict[str, Any]]:
         # An interaction only blocks a turn that is still running; the registry
@@ -257,21 +230,13 @@ def create_task_mcp_server(
         text = message.strip()
         if not text:
             raise ToolError("message must not be empty")
-        requested_session = (session_id or "").strip()
-        if caller is None:
-            context_id = requested_session or uuid.uuid4().hex
-        else:
-            # A key may only continue its own sessions; say "not found" rather
-            # than confirm another key's session exists.
-            if requested_session and not requested_session.startswith(caller.session_prefix):
-                raise ToolError(f"session {requested_session} not found")
-            context_id = requested_session or f"{caller.session_prefix}{uuid.uuid4().hex}"
-            text = f"{caller.source_envelope()}\n{_LEADING_SOURCE_RE.sub('', text, count=1)}"
+        # An empty session_id lets the handler open a new session (inside the
+        # key's namespace for a key caller); the executor applies its identity.
         request = SendMessageRequest(
             message=Message(
                 role=Role.ROLE_USER,
                 message_id=uuid.uuid4().hex,
-                context_id=context_id,
+                context_id=(session_id or "").strip(),
                 parts=[Part(text=text)],
             ),
             configuration=SendMessageConfiguration(return_immediately=True),
@@ -377,8 +342,6 @@ def create_task_mcp_server(
     ) -> dict[str, Any]:
         caller = _caller(ctx)
         task_id = task_id.strip()
-        # Ownership check before cancelling: another key's task is "not found".
-        await _get(task_id, caller)
         try:
             task = await request_handler.on_cancel_task(
                 CancelTaskRequest(id=task_id), _call_context(caller)

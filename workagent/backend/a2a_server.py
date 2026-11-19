@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 
-from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.request_handlers.response_helpers import agent_card_to_dict
 from a2a.server.routes import (
     add_a2a_routes_to_fastapi,
@@ -21,9 +20,16 @@ import uvicorn
 
 from workagent.backend.a2a_management import is_management_path, register_management_routes
 from workagent.backend.a2a_service import BoundedTaskStore, HermesA2AExecutor
-from workagent.backend.a2a_service.mcp_keys import KEY_PREFIX as MCP_KEY_PREFIX, McpKeyStore
+from workagent.backend.a2a_service.key_scope import (
+    PERSONAL_KEY_STATE_ATTR,
+    KeyScopedRequestContextBuilder,
+    OwnerScopedRequestHandler,
+    PersonalKeyCallContextBuilder,
+    call_context_for,
+    request_key,
+)
+from workagent.backend.a2a_service.mcp_keys import KEY_PREFIX as PERSONAL_KEY_PREFIX, McpKeyStore
 from workagent.backend.a2a_service.mcp_tasks import (
-    MCP_KEY_STATE_ATTR,
     MCP_PATH,
     create_task_mcp_server,
     mount_task_mcp,
@@ -49,6 +55,10 @@ A2A_PUBLIC_PATHS = frozenset(
         "/.well-known/agent-card.json",
         A2A_AGENT_CARD_PATH,
     }
+)
+# Paths a personal key may call; everything else needs the A2A session token.
+PERSONAL_KEY_PATHS = frozenset(
+    {A2A_RPC_PATH, A2A_INTERACTION_RESPONSE_PATH, A2A_STEER_PATH, MCP_PATH}
 )
 print(f"A2A RPC path: {A2A_RPC_PATH}")
 print(f"MCP (streamable HTTP) path: {MCP_PATH}")
@@ -121,18 +131,22 @@ def create_a2a_app(
                     status_code=status.HTTP_403_FORBIDDEN,
                     content={"detail": "Cross-origin management requests are forbidden"},
                 )
-        if path == MCP_PATH:
-            # A personal MCP key is accepted here and only here; the MCP tools
-            # read it back from request.state to apply its identity.
-            presented = extract_bearer_token(request)
-            key = key_store.authenticate(presented)
-            if key is not None:
-                setattr(request.state, MCP_KEY_STATE_ATTR, key)
-                return await call_next(request)
-            if presented and presented.startswith(MCP_KEY_PREFIX):
-                # A deleted or disabled personal key is refused even when A2A
-                # auth is off, rather than quietly running as an anonymous caller.
+        presented = extract_bearer_token(request)
+        if (
+            presented
+            and presented.startswith(PERSONAL_KEY_PREFIX)
+            and path not in A2A_PUBLIC_PATHS
+            and not is_management_path(path)
+        ):
+            # A personal key opens only PERSONAL_KEY_PATHS.  A deleted or
+            # disabled one is refused even when A2A auth is off, rather than
+            # quietly running as an anonymous (trusted) caller.
+            key = key_store.authenticate(presented) if path in PERSONAL_KEY_PATHS else None
+            if key is None:
                 return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+            # key_scope reads it back to apply the key's identity and scope.
+            setattr(request.state, PERSONAL_KEY_STATE_ATTR, key)
+            return await call_next(request)
         if (
             active_settings.a2a_auth_enabled
             and path not in A2A_PUBLIC_PATHS
@@ -159,7 +173,9 @@ def create_a2a_app(
     async def health() -> dict[str, str | int]:
         return {"status": "ok", "module": "a2a", "pid": os.getpid()}
 
-    register_management_routes(app, active_settings, key_store)
+    register_management_routes(
+        app, active_settings, key_store, a2a_path=A2A_RPC_PATH, mcp_path=MCP_PATH
+    )
 
     agent_card = build_agent_card(
         active_settings,
@@ -177,11 +193,22 @@ def create_a2a_app(
         enable_streaming=streaming,
     )
     app.state.a2a_executor = a2a_executor
-    request_handler = DefaultRequestHandler(
+    request_handler = OwnerScopedRequestHandler(
         agent_executor=a2a_executor,
         task_store=task_store,
         agent_card=agent_card,
+        request_context_builder=KeyScopedRequestContextBuilder(task_store=task_store),
     )
+
+    async def _require_key_owns_task(request: Request, payload: dict) -> None:
+        """A personal key may only answer or steer its own tasks."""
+        key = request_key(request)
+        if key is None:
+            return
+        task_id = str(payload.get("task_id") or "").strip()
+        task = await task_store.get(task_id, call_context_for(key)) if task_id else None
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
 
     def _agent_card_payload() -> dict:
         payload = agent_card_to_dict(agent_card)
@@ -212,6 +239,7 @@ def create_a2a_app(
             raise HTTPException(status_code=422, detail="request body must be JSON") from exc
         if not isinstance(payload, dict):
             raise HTTPException(status_code=422, detail="request body must be an object")
+        await _require_key_owns_task(request, payload)
         try:
             record = a2a_executor.interactions.resolve(payload)
         except InteractionError as exc:
@@ -246,6 +274,7 @@ def create_a2a_app(
             raise HTTPException(status_code=422, detail="request body must be JSON") from exc
         if not isinstance(payload, dict):
             raise HTTPException(status_code=422, detail="request body must be an object")
+        await _require_key_owns_task(request, payload)
         try:
             result = await a2a_executor.steer(payload)
         except InteractionError as exc:
@@ -255,11 +284,15 @@ def create_a2a_app(
     add_a2a_routes_to_fastapi(
         app,
         agent_card_routes=[],
-        jsonrpc_routes=create_jsonrpc_routes(request_handler, rpc_url=A2A_RPC_PATH),
+        jsonrpc_routes=create_jsonrpc_routes(
+            request_handler,
+            rpc_url=A2A_RPC_PATH,
+            context_builder=PersonalKeyCallContextBuilder(),
+        ),
     )
 
     # /mcp is not in A2A_PUBLIC_PATHS, so auth_middleware guards it with the
-    # same A2A session token.
+    # A2A session token or a personal key, exactly as it guards /a2a.
     task_mcp = create_task_mcp_server(
         request_handler, a2a_executor, name=agent_card.name or "Hermes Agent"
     )
