@@ -72,7 +72,7 @@ _POLL_SECONDS = 0.5
 _WAIT_FOREVER = -1
 
 _INSTRUCTIONS = (
-    "Run Hermes agent tasks. start_task sends a message to the agent and returns "
+    "Run tasks in remote agent. start_task sends a message to the agent and returns "
     "task_id and session_id (mode='async', default) or waits until the task "
     "finishes or needs an interaction (mode='sync'); pass session_id back to "
     "continue the same conversation. After an interaction is answered, the "
