@@ -226,7 +226,7 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 
 ### 3.4.1 个人 key
 - 管理员在 `/man` 为每个人创建一个独立的 key（A2A 与 MCP 通用），并绑定一个身份对象（自由 JSON，如 `{"platform":"feishu","channel":"oc_…","uid":"…","uname":"…"}`；也可直接粘贴带 `<source>` 标签的原文）
-- 用该 key 发起任务时（A2A `message/send`、`message/stream` 或 MCP `start_task`），executor 在拼接后的消息文本上先清除开头的所有 `<source>…</source>`，再加上 `<source>{身份 JSON}</source>\n`，据此解析来源平台和用户；调用方无法冒充他人（实现集中在 `a2a_service/key_scope.py`，两个入口共用）
+- 用该 key 发起任务时（A2A `message/send`、`message/stream` 或 MCP `start_task`），executor 在拼接后的消息文本上先清除开头的所有 `<source>…</source>`，再加上 `<source>{身份 JSON}</source>` 和一个空行（`<source>…</source>\n\n<用户消息>`），据此解析来源平台和用户；调用方无法冒充他人（实现集中在 `a2a_service/key_scope.py`，两个入口共用）
 - 隔离：每个 key 是独立的 A2A task owner，`tasks/get`、`tasks/cancel`、`tasks/list`、订阅及 MCP 工具只能看到自己的任务；`/hermes/interaction/respond` 与 `/hermes/steer` 只接受自己任务的请求（否则 404）；新会话 ID 形如 `mk-<key_id>-<hex>`，传入其它 `contextId` / `session_id` 会被拒绝（“session … not found”）。同一个 key 在 A2A 与 MCP 上看到的是同一批任务和会话
 - 使用 `A2A_SESSION_TOKEN` 的调用不受上述限制，`<source>` 原样信任，也看不到个人 key 的任务
 - 存储：`<HERMES_HOME>/workagent/mcp_keys.json`（0600），只保存 key 的 SHA-256 摘要；明文仅在创建/重新生成时返回一次

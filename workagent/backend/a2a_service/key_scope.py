@@ -101,9 +101,9 @@ def strip_leading_sources(text: str) -> str:
 
 
 def apply_key_identity(text: str, key: McpKeyRecord) -> str:
-    """``text`` as the agent must see it from ``key``: the key's identity, then the message."""
+    """``text`` as the agent must see it from ``key``: the key's identity, a blank line, the message."""
     body = strip_leading_sources(text)
-    return f"{key.source_envelope()}\n{body}" if body else key.source_envelope()
+    return f"{key.source_envelope()}\n\n{body}" if body else key.source_envelope()
 
 
 def text_as_caller(text: str, context: ServerCallContext | None) -> str:

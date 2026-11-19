@@ -155,7 +155,7 @@ def test_task_carries_the_key_identity_and_ignores_a_caller_written_one(tmp_path
 
     envelope = "<source>" + json.dumps(_IDENTITY, ensure_ascii=False, separators=(",", ":")) + "</source>"
     assert result["state"] == "completed"
-    assert result["result"] == f"{envelope}\nhello"
+    assert result["result"] == f"{envelope}\n\nhello"
     assert result["session_id"].startswith(f"mk-{key['id']}-")
 
 
