@@ -213,6 +213,7 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 - 仅在 HTTP 中间件层认证，不改变 A2A executor、消息流或任务状态机
 - CORS 中间件位于认证之外：浏览器预检（带 `Access-Control-Request-Method` 的 `OPTIONS`）无需 Bearer 即被应答；其余请求（包括不带该头的 `OPTIONS`）仍需 Bearer，401 响应也带 CORS 头，跨域调用方能读到拒绝原因
 - `WORKAGENT_SESSION_TOKEN` 仍仅用于 `server` 模块；`A2A_SESSION_TOKEN` 仅用于 `a2a` 模块
+- `/mcp`（streamable HTTP MCP）除 `A2A_SESSION_TOKEN` 外还接受**个人 MCP key**（`wak_` 前缀，见 3.4）；个人 key 只能用于 `/mcp`，用在 `/a2a` 等其它路由返回 401；已删除、已停用或已重新生成的 key 即使在 A2A 认证关闭时也返回 401
 
 ### 3.4 A2A 管理与重启
 - 设置非空 `WORKAGENT_A2A_ADMIN_TOKEN` 后启用 `GET /man`；未设置时页面会明确显示管理未启用，管理 API 返回 503，重启不可用
@@ -221,6 +222,13 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 - 管理路由仅允许浏览器同源调用；无 `Origin` 的非浏览器客户端仍可使用相同的管理认证流程
 - 重启成功返回 HTTP 202，统一字段为 `accepted`、`already_requested`、`service`、`pid`；重复请求不会启动第二个 watcher
 - 重启会重放当前启动命令；若认证 token 原本由进程启动时随机生成，新进程可能生成不同值
+
+### 3.4.1 个人 MCP key
+- 管理员在 `/man` 为每个人创建一个独立的 `/mcp` key，并绑定一个身份对象（自由 JSON，如 `{"platform":"feishu","channel":"oc_…","uid":"…","uname":"…"}`；也可直接粘贴带 `<source>` 标签的原文）
+- 用该 key 调用 `start_task` 时，消息前自动加上 `<source>{身份 JSON}</source>\n`，executor 据此解析来源平台和用户；调用方自己写在消息开头的 `<source>` 会被替换，无法冒充他人
+- 隔离：每个 key 是独立的 A2A task owner，只能查看、停止、应答自己的任务；新会话 ID 形如 `mk-<key_id>-<hex>`，key 只能续接自己的会话（使用 `A2A_SESSION_TOKEN` 的调用不受此限，也不加身份前缀）
+- 存储：`<HERMES_HOME>/workagent/mcp_keys.json`（0600），只保存 key 的 SHA-256 摘要；明文仅在创建/重新生成时返回一次
+- 支持：创建、查看、修改名称/身份、启用/停用、重新生成（旧 key 立即失效，会话保留）、删除
 
 ### 3.5 Chat（`--tui`）链路设计
 当 `embedded_chat=True`（CLI `--tui`）时启用：
@@ -363,6 +371,13 @@ python -c "from workagent.backend.server import start_server; start_server(host=
 - `GET /man`
 - `POST /man/api/auth`：请求体 `{"token":"..."}`，返回 5 分钟、仅用于管理 API 的 Bearer 及到期信息
 - `POST /man/api/restart`：需要管理 Bearer，成功返回 HTTP 202 和 `accepted`、`already_requested`、`service`、`pid`
+- 个人 MCP key（均需管理 Bearer）：
+  - `GET /man/api/keys`：列表（不含摘要与明文）
+  - `POST /man/api/keys`：`{"name","source"}`，返回 201 和 `key`、`secret`（明文仅此一次）
+  - `GET /man/api/keys/{id}`
+  - `PATCH /man/api/keys/{id}`：可改 `name`、`source`、`enabled`
+  - `POST /man/api/keys/{id}/regenerate`：返回新的 `secret`
+  - `DELETE /man/api/keys/{id}`：204
 
 ---
 

@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 import uuid
 
+from a2a.auth.user import User
 from a2a.server.context import ServerCallContext
 from a2a.server.request_handlers import RequestHandler
 from a2a.types import (
@@ -36,12 +38,14 @@ from a2a.types import (
 )
 from a2a.utils.errors import A2AError, TaskNotCancelableError, TaskNotFoundError
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 from starlette.routing import BaseRoute
 
 from .interactions import InteractionError
+from .mcp_keys import McpKeyRecord
 
 if TYPE_CHECKING:
     from .executor import HermesA2AExecutor
@@ -63,6 +67,14 @@ _TERMINAL_STATES = frozenset(
 _INTERRUPTED_STATES = frozenset(
     {TaskState.TASK_STATE_INPUT_REQUIRED, TaskState.TASK_STATE_AUTH_REQUIRED}
 )
+
+# Request-state attribute the A2A auth middleware sets when /mcp was called with
+# a personal MCP key (see ``a2a_server.create_a2a_app``).
+MCP_KEY_STATE_ATTR = "mcp_key"
+
+# A caller-written envelope at the head of the message; a personal key's own
+# envelope replaces it so the identity the agent sees is the key's.
+_LEADING_SOURCE_RE = re.compile(r"^\s*<source>.*?</source>\s*", re.DOTALL)
 
 _POLL_SECONDS = 0.5
 _WAIT_FOREVER = -1
@@ -88,6 +100,28 @@ def _message_text(message: Message) -> str:
     return "\n".join(part.text for part in message.parts if part.HasField("text")).strip()
 
 
+class _KeyUser(User):
+    """A2A owner identity for one personal MCP key: its tasks are its own."""
+
+    def __init__(self, owner: str):
+        self._owner = owner
+
+    @property
+    def is_authenticated(self) -> bool:
+        return True
+
+    @property
+    def user_name(self) -> str:
+        return self._owner
+
+
+def _caller(ctx: Context) -> McpKeyRecord | None:
+    """The personal key this tool call authenticated with, or ``None`` for the A2A token."""
+    request = ctx.request_context.request
+    state = getattr(request, "state", None)
+    return getattr(state, MCP_KEY_STATE_ATTR, None) if state is not None else None
+
+
 def create_task_mcp_server(
     request_handler: RequestHandler,
     executor: HermesA2AExecutor,
@@ -98,10 +132,12 @@ def create_task_mcp_server(
     mcp = MCPServer(name=name, instructions=_INSTRUCTIONS)
     interactions = executor.interactions
 
-    def _call_context() -> ServerCallContext:
-        # Same owner scope as an A2A JSON-RPC call (no per-user A2A identity),
-        # so tasks are visible to both surfaces.
-        return ServerCallContext()
+    def _call_context(caller: McpKeyRecord | None) -> ServerCallContext:
+        # The A2A token shares the A2A JSON-RPC owner scope, so its tasks are
+        # visible to both surfaces; a personal key sees only its own tasks.
+        if caller is None:
+            return ServerCallContext()
+        return ServerCallContext(user=_KeyUser(caller.owner))
 
     def _pending(task: Task) -> list[dict[str, Any]]:
         # An interaction only blocks a turn that is still running; the registry
@@ -135,26 +171,31 @@ def create_task_mcp_server(
             "pending_interactions": pending,
         }
 
-    async def _get(task_id: str) -> Task:
+    async def _get(task_id: str, caller: McpKeyRecord | None) -> Task:
         try:
-            task = await request_handler.on_get_task(GetTaskRequest(id=task_id), _call_context())
+            task = await request_handler.on_get_task(
+                GetTaskRequest(id=task_id), _call_context(caller)
+            )
         except TaskNotFoundError as exc:
             raise ToolError(f"task {task_id} not found") from exc
         if task is None:
             raise ToolError(f"task {task_id} not found")
         return task
 
-    async def _wait(task: Task, timeout_seconds: float) -> Task:
+    async def _wait(task: Task, timeout_seconds: float, caller: McpKeyRecord | None) -> Task:
         """Poll until ``task`` settles or ``timeout_seconds`` passes (-1: no limit)."""
         deadline = None if timeout_seconds == _WAIT_FOREVER else time.monotonic() + timeout_seconds
         while not _settled(task) and (deadline is None or time.monotonic() < deadline):
             await asyncio.sleep(_POLL_SECONDS)
-            task = await _get(task.id)
+            task = await _get(task.id, caller)
         return task
 
-    async def _resolve(task_id: str, interaction_id: str, kind: str, **answer: Any) -> dict[str, Any]:
+    async def _resolve(
+        caller: McpKeyRecord | None, task_id: str, interaction_id: str, kind: str, **answer: Any
+    ) -> dict[str, Any]:
         task_id, interaction_id = task_id.strip(), interaction_id.strip()
-        task = await _get(task_id)
+        # Fetching under the caller's scope first is the ownership check.
+        task = await _get(task_id, caller)
         try:
             record = interactions.resolve(
                 {
@@ -179,7 +220,7 @@ def create_task_mcp_server(
             "interaction_id": record.interaction_id,
             "kind": record.kind,
             "state": record.state,
-            "task": _view(await _get(task_id)),
+            "task": _view(await _get(task_id, caller)),
         }
 
     @mcp.tool(
@@ -210,11 +251,22 @@ def create_task_mcp_server(
                 )
             ),
         ] = "async",
+        ctx: Context = None,  # type: ignore[assignment]  # injected by MCPServer
     ) -> dict[str, Any]:
+        caller = _caller(ctx)
         text = message.strip()
         if not text:
             raise ToolError("message must not be empty")
-        context_id = (session_id or "").strip() or uuid.uuid4().hex
+        requested_session = (session_id or "").strip()
+        if caller is None:
+            context_id = requested_session or uuid.uuid4().hex
+        else:
+            # A key may only continue its own sessions; say "not found" rather
+            # than confirm another key's session exists.
+            if requested_session and not requested_session.startswith(caller.session_prefix):
+                raise ToolError(f"session {requested_session} not found")
+            context_id = requested_session or f"{caller.session_prefix}{uuid.uuid4().hex}"
+            text = f"{caller.source_envelope()}\n{_LEADING_SOURCE_RE.sub('', text, count=1)}"
         request = SendMessageRequest(
             message=Message(
                 role=Role.ROLE_USER,
@@ -225,7 +277,7 @@ def create_task_mcp_server(
             configuration=SendMessageConfiguration(return_immediately=True),
         )
         try:
-            started = await request_handler.on_message_send(request, _call_context())
+            started = await request_handler.on_message_send(request, _call_context(caller))
         except A2AError as exc:
             raise ToolError(f"could not start task: {exc}") from exc
         if not isinstance(started, Task):
@@ -234,7 +286,7 @@ def create_task_mcp_server(
             return _view(started)
         # Started with return_immediately and then waited on the task store, so
         # a client that disconnects mid-wait leaves the task running for get_task.
-        return _view(await _wait(started, _WAIT_FOREVER))
+        return _view(await _wait(started, _WAIT_FOREVER, caller))
 
     @mcp.tool(
         name="get_task",
@@ -261,10 +313,12 @@ def create_task_mcp_server(
                 ),
             ),
         ] = 0,
+        ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
         if timeout_seconds < 0 and timeout_seconds != _WAIT_FOREVER:
             raise ToolError("timeout_seconds must be -1, 0 or a positive number")
-        task = await _wait(await _get(task_id.strip()), timeout_seconds)
+        caller = _caller(ctx)
+        task = await _wait(await _get(task_id.strip(), caller), timeout_seconds, caller)
         view = _view(task)
         view["timed_out"] = timeout_seconds != 0 and not _settled(task)
         return view
@@ -287,8 +341,9 @@ def create_task_mcp_server(
             Literal["once", "session", "always", "deny"],
             Field(description="The approval decision."),
         ],
+        ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        return await _resolve(task_id, interaction_id, "approval", choice=choice)
+        return await _resolve(_caller(ctx), task_id, interaction_id, "approval", choice=choice)
 
     @mcp.tool(
         name="respond_clarify",
@@ -307,8 +362,9 @@ def create_task_mcp_server(
             str | list[str],
             Field(description="The answer: one of the offered choices or free text."),
         ],
+        ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
-        return await _resolve(task_id, interaction_id, "clarify", answer=answer)
+        return await _resolve(_caller(ctx), task_id, interaction_id, "clarify", answer=answer)
 
     @mcp.tool(
         name="stop_task",
@@ -317,14 +373,20 @@ def create_task_mcp_server(
     )
     async def stop_task(
         task_id: Annotated[str, Field(description="task_id returned by start_task.")],
+        ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any]:
+        caller = _caller(ctx)
         task_id = task_id.strip()
+        # Ownership check before cancelling: another key's task is "not found".
+        await _get(task_id, caller)
         try:
-            task = await request_handler.on_cancel_task(CancelTaskRequest(id=task_id), _call_context())
+            task = await request_handler.on_cancel_task(
+                CancelTaskRequest(id=task_id), _call_context(caller)
+            )
         except TaskNotFoundError as exc:
             raise ToolError(f"task {task_id} not found") from exc
         except TaskNotCancelableError as exc:
-            current = await _get(task_id)
+            current = await _get(task_id, caller)
             raise ToolError(
                 f"task {task_id} cannot be stopped: it is {_state_name(current.status.state)}"
             ) from exc
