@@ -28,6 +28,18 @@ _VALID_ROLES = tuple(roles.PERSISTED_ROLES)
 # session_key 例：agent:main:feishu:group:oc_xxx / agent:main:whatsapp:dm:1555...
 _PLATFORM_RE = re.compile(r"agent:[^:]+:([A-Za-z0-9_\-]+):(group|channel|dm|thread):(.+)")
 
+# 转发执行面把本轮 platform 标成 "<来源平台>_a2a"（workagent A2A executor），
+# 用户身份与 user_roles 角色记录仍属于来源平台。
+_RELAY_PLATFORM_SUFFIX = "_a2a"
+
+
+def identity_platform(platform: str) -> str:
+    """角色查找用的平台：转发执行面的 ``feishu_a2a`` 归属到 ``feishu``。"""
+    value = str(platform or "").strip()
+    if value.lower().endswith(_RELAY_PLATFORM_SUFFIX) and len(value) > len(_RELAY_PLATFORM_SUFFIX):
+        return value[: -len(_RELAY_PLATFORM_SUFFIX)]
+    return value
+
 
 # ---------------------------------------------------------------- 身份解析 ----
 # session_id:turn_id -> (platform, uid)，由每轮 pre_llm_call 写入。
@@ -118,6 +130,9 @@ def on_pre_llm_call(session_id="", platform="", sender_id="", turn_id="", task_i
     这也是“任务开始时获取用户身份”的挂载点。
     """
     _TURN_IDENTITY.set(None)  # An incomplete replacement turn must clear stale identity.
+    # Normalized once, so the prompt block, the turn cache and the tool gate's
+    # snapshot all carry the same identity.
+    platform = identity_platform(platform)
     plat, uid = (platform or "cli"), (sender_id or "local")
     _remember_identity(session_id, turn_id, plat, uid)
     snapshot = tuple(str(v or "").strip() for v in

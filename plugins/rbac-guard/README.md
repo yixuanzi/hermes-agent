@@ -36,6 +36,9 @@ Hermes core: resolve_pre_tool_block()
   保证两层看到同一个用户。不能只按 session_id 缓存，否则同一群组 session
   的不同用户会互相覆盖身份；缺少 turn_id 时不会读取 session 级缓存。
 - 身份永远来自 hook 注入的 platform/sender_id，**不接受 LLM 在 args 里自报角色**。
+- 转发执行面（workagent A2A executor）把本轮 platform 标成 `<来源平台>_a2a`；
+  查角色时去掉 `_a2a` 后缀，按来源平台的 `user_roles` 记录判定（`feishu_a2a:uid` → `feishu:uid`）。
+  只有 `a2a` 而没有来源平台时原样查找。
 
 ## 文件
 
