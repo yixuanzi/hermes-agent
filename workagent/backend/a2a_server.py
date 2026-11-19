@@ -24,6 +24,11 @@ from pydantic import BaseModel
 import uvicorn
 
 from workagent.backend.a2a_service import BoundedTaskStore, HermesA2AExecutor
+from workagent.backend.a2a_service.mcp_tasks import (
+    MCP_PATH,
+    create_task_mcp_server,
+    mount_task_mcp,
+)
 from workagent.backend.agent_runtime import prepare_hermes_home, start_workagent_mcp_bootstrap
 from workagent.backend.auth import (
     extract_bearer_token,
@@ -59,6 +64,7 @@ A2A_MANAGEMENT_PATHS = frozenset(
     }
 )
 print(f"A2A RPC path: {A2A_RPC_PATH}")
+print(f"MCP (streamable HTTP) path: {MCP_PATH}")
 
 MANAGEMENT_TOKEN_TTL_SECONDS = 300
 MANAGEMENT_UNAVAILABLE_DETAIL = "A2A management is not enabled"
@@ -518,6 +524,15 @@ def create_a2a_app(
         agent_card_routes=[],
         jsonrpc_routes=create_jsonrpc_routes(request_handler, rpc_url=A2A_RPC_PATH),
     )
+
+    # /mcp is not in A2A_PUBLIC_PATHS, so auth_middleware guards it with the
+    # same A2A session token.
+    task_mcp = create_task_mcp_server(
+        request_handler, a2a_executor, name=agent_card.name or "Hermes Agent"
+    )
+    app.router.routes.extend(mount_task_mcp(task_mcp, host=active_settings.host))
+    app.router.lifespan_context = lambda _app: task_mcp.session_manager.run()
+    app.state.task_mcp = task_mcp
     return app
 
 

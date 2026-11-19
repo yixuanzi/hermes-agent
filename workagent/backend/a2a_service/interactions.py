@@ -110,6 +110,20 @@ class InteractionRegistry:
             )
             return data
 
+    def pending_for_task(self, task_id: str) -> list[dict[str, Any]]:
+        """Metadata of the interactions ``task_id`` is still waiting on, oldest first."""
+        with self._lock:
+            pending = sorted(
+                (
+                    record
+                    for record in self._records.values()
+                    if record.task_id == task_id and record.state == "pending"
+                ),
+                key=lambda record: record.created_at,
+            )
+            ids = [record.interaction_id for record in pending]
+        return [data for data in map(self.metadata, ids) if data is not None]
+
     def resolve(self, payload: dict[str, Any]) -> InteractionRecord:
         interaction_id = str(payload.get("interaction_id") or "").strip()
         task_id = str(payload.get("task_id") or "").strip()
