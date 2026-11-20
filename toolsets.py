@@ -216,6 +216,12 @@ TOOLSETS = {
     "hermes-matrix": _bundle("Matrix bot toolset - decentralized encrypted messaging (full access)"),
     "hermes-dingtalk": _bundle("DingTalk bot toolset - enterprise messaging platform (full access)"),
     "hermes-feishu": _bundle("Feishu/Lark bot toolset - enterprise messaging via Feishu/Lark (full access)", _FEISHU_TOOLS),
+    # Anyone who can DM the user reaches this agent, which runs beside the user's own lark-cli token:
+    # no shell by default (``platform_toolsets.lark_user`` can opt back in).
+    "hermes-lark_user": _ts(
+        "Lark personal auto-reply toolset - answers as the user, no terminal access",
+        _core_without("terminal", "process_manage"),
+    ),
     "hermes-weixin": _bundle("Weixin bot toolset - personal WeChat messaging via iLink (full access)"),
     "hermes-qqbot": _bundle("QQBot toolset - QQ messaging via Official Bot API v2 (full access)"),
     "hermes-wecom": _bundle("WeCom bot toolset - enterprise WeChat messaging (full access)"),

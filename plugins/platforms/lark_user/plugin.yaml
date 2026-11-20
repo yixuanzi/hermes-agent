@@ -1,0 +1,15 @@
+name: lark_user-platform
+label: Lark (personal)
+kind: platform
+version: 1.0.0
+description: >
+  Auto-reply to your own Lark/Feishu direct messages and group @mentions, under your own
+  account. Polls through the local lark-cli as the user identity, starts a Hermes session per
+  conversation, and replies (after your review by default) with a fixed AI-disclosure prefix.
+  Configured under platforms.lark_user in config.yaml.
+author: NousResearch
+optional_env:
+  - name: LARK_USER_ALLOW_ALL_USERS
+    description: "Opt in to dm_policy/group_policy 'open' (anyone may trigger a reply under your name)"
+    prompt: "Allow all senders? (true/false)"
+    password: false

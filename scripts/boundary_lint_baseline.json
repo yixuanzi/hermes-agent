@@ -457,6 +457,7 @@
     "plugins/platforms/irc/adapter.py hermes_cli.setup.print_warning": 1,
     "plugins/platforms/irc/adapter.py hermes_cli.setup.save_env_value": 1,
     "plugins/platforms/irc/adapter.py hermes_cli.setup_platforms.declines_reconfigure": 1,
+    "plugins/platforms/lark_user/lark_user_cli.py hermes_platform.resolver.locate_command": 1,
     "plugins/platforms/line/adapter.py agent.i18n.t": 1,
     "plugins/platforms/line/adapter.py gateway.platforms.shared_ingress.bind_listener": 1,
     "plugins/platforms/line/adapter.py hermes_cli.setup_platforms.declines_reconfigure": 1,
