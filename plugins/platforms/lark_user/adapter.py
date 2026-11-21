@@ -24,8 +24,10 @@ from typing import Any, Optional
 from gateway.config import Platform
 from gateway.platforms.access_policy_mixin import OwnAccessPolicyMixin
 from gateway.platforms.base import BasePlatformAdapter, SendResult
+from gateway.platforms._shared import get_scoped_secret as _get_secret
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.helpers import cancel_task, hash_for_log
+from hermes_constants import display_hermes_home
 
 from . import gateway_env
 from .adapter_hint import PLATFORM_HINT
@@ -37,7 +39,8 @@ from .lark_user_intake import ChatRateLimit, Identity, drop_reason
 from .lark_user_normalize import Inbound, to_inbound
 from .lark_user_poll import PollSchedule
 from .lark_user_render import render
-from .lark_user_review import ReviewDesk, parse_command
+from .lark_user_review import CardPresenter, ReviewDesk, TextPresenter, parse_command
+from .lark_user_review_bot import APP_ID_ENV, APP_SECRET_ENV, ReviewBot
 from .lark_user_session import shape_source
 
 logger = logging.getLogger(__name__)
@@ -48,6 +51,16 @@ _DROPPED = "lark_user:dropped"  # message id handed back for a suppressed non-fi
 # Set while the gateway delivers a turn's final answer (task-local, so a concurrent progress send
 # from another task is not mistaken for it).
 _FINAL_SEND: contextvars.ContextVar[bool] = contextvars.ContextVar("lark_user_final_send", default=False)
+_REVISION_PROMPT = (
+    "[审核修订意见]\n这不是对方发来的新消息。{user_name} 审阅了你刚才拟好的回复草稿，要求修改：\n{notes}\n\n"
+    "上一版草稿：\n<<<\n{content}\n>>>\n\n请按修改意见重写给对方的回复，只输出修改后的完整回复正文。"
+)
+
+
+def _login_hint() -> str:
+    # lark-cli keeps a separate "hermes" workspace (~/.lark-cli/hermes/) that it selects whenever
+    # HERMES_HOME is set: a login from a plain terminal lands in the other workspace.
+    return f"run `HERMES_HOME={display_hermes_home()} lark-cli auth login`"
 
 
 def _iso(epoch: float) -> str:
@@ -73,6 +86,9 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         self._me: Optional[Identity] = None
         self._store: Optional[CursorStore] = None
         self._desk: Optional[ReviewDesk] = None
+        self._review_bot: Optional[ReviewBot] = None
+        # anchor message id -> revision being produced for it (count, notes, origin)
+        self._revisions: dict[str, dict[str, Any]] = {}
         self._tasks: list[asyncio.Task] = []
         self._rate = ChatRateLimit(s.rate_limit_per_chat)
         self._origins: collections.OrderedDict[str, Inbound] = collections.OrderedDict()
@@ -95,6 +111,8 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             return False
         self._mark_connected()
         self._tasks = [asyncio.create_task(self._source_loop(name)) for name in self._sources()]
+        if self._review_bot is not None:
+            self._tasks.append(asyncio.create_task(self._review_bot.consume(self._on_review_click)))
         logger.info("lark_user: polling %s for %s", ",".join(self._sources()), hash_for_log(self._me.open_id))
         return True
 
@@ -108,21 +126,57 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             info = await self._cli.user_info()
         except LarkCliError as exc:
             if exc.kind in {"auth", "config", "missing"}:
-                return self._fail("auth_required", f"lark-cli user identity unavailable ({exc}); run "
-                                  "`lark-cli auth login`", retryable=False)
+                return self._fail("auth_required", f"lark-cli user identity unavailable ({exc}); {_login_hint()}",
+                                  retryable=False)
             return self._fail("cli_error", f"lark-cli user_info failed: {exc}", retryable=True)
         me = Identity(str(info.get("open_id") or ""), str(info.get("name") or ""), str(info.get("tenant_key") or ""))
         if not me.open_id:
-            return self._fail("auth_required", "lark-cli returned no user open_id; run `lark-cli auth login`",
+            return self._fail("auth_required", f"lark-cli returned no user open_id; {_login_hint()}",
                               retryable=False)
         if not self._acquire_platform_lock("lark_user", me.open_id, f"Lark account {hash_for_log(me.open_id)}"):
             return False
         self._me = me
+        # Which lark-cli config this process actually uses: HERMES_HOME makes lark-cli pick its
+        # "hermes" workspace, so a gateway and a plain terminal can be logged into different apps.
+        try:
+            cli_config = await self._cli.call(["config", "show"])
+        except LarkCliError as exc:
+            cli_config = {}
+            logger.warning("lark_user: lark-cli config unreadable (%s)", exc.kind)
+        logger.info("lark_user: lark-cli workspace=%s profile=%s app=%s user=%s", cli_config.get("workspace") or "?",
+                    cli_config.get("profile") or "?", cli_config.get("appId") or "?", hash_for_log(me.open_id))
         s = self.settings
         self._store = CursorStore(state_path(me.open_id), seen_ttl=max(86400.0, 4 * (s.poll.lookback + s.max_message_age)))
         self._store.load()
-        self._desk = ReviewDesk(cli=self._cli, store=self._store, my_open_id=me.open_id, review_chat=s.review_chat,
-                                ttl=s.review_ttl, deliver=self._deliver_for_review)
+        return await self._open_review(str(info.get("union_id") or ""), cli_config)
+
+    async def _open_review(self, union_id: str, cli_config: dict[str, Any]) -> bool:
+        """Pick the review presentation: cards from the review app when it is configured (or
+        ``review.interactive: card`` demands it), else text commands in the user's own chat."""
+        s = self.settings
+        app_id, secret = _get_secret(APP_ID_ENV, ""), _get_secret(APP_SECRET_ENV, "")
+        mode = s.review_interactive or ("card" if app_id and secret and s.uses_review else "text")
+        presenter: Any = TextPresenter(self._cli, self._store, my_open_id=self._me.open_id, review_chat=s.review_chat)
+        if mode == "card":
+            if not (app_id and secret):
+                return self._fail("config_invalid", f"review.interactive: card needs {APP_ID_ENV} and {APP_SECRET_ENV} "
+                                  "in .env (a Lark app used only for review cards)", retryable=False)
+            try:
+                if app_id in {_get_secret("FEISHU_APP_ID", ""), str(cli_config.get("appId") or "")}:
+                    return self._fail("config_invalid", f"{APP_ID_ENV} is an app another connection already uses "
+                                      "(the Feishu platform or lark-cli's user login); card clicks would be split "
+                                      "between them. Use an app reserved for review cards.", retryable=False)
+                bot = ReviewBot(cli=LarkCli(s.cli_bin, timeout=s.cli_timeout), app_id=app_id, app_secret=secret,
+                                brand=str(cli_config.get("brand") or "feishu"))
+                await bot.check()
+            except LarkCliError as exc:
+                return self._fail("review_app_error", f"review app unavailable: {exc}", retryable=exc.kind != "auth")
+            if not union_id:
+                return self._fail("review_app_error", "lark-cli user_info returned no union_id to reach the user "
+                                  "from the review app", retryable=False)
+            self._review_bot, presenter = bot, CardPresenter(bot, union_id)
+        self._desk = ReviewDesk(store=self._store, presenter=presenter, ttl=s.review_ttl,
+                                deliver=self._deliver_for_review, revise=self._start_revision)
         return True
 
     async def disconnect(self) -> None:
@@ -130,14 +184,16 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         for task in self._tasks:
             await cancel_task(task)
         self._tasks = []
+        if self._review_bot is not None:
+            await self._review_bot.close()
         if self._store is not None:
             self._store.save()
         self._release_platform_lock()
 
     def _sources(self) -> list[str]:
         poll = self.settings.poll
-        # The dm search also carries the user's own review commands, so review keeps it running.
-        sources = ["dm"] if poll.dm.enabled or self.settings.uses_review else []
+        # The dm search also carries the user's own text review commands, so text review keeps it running.
+        sources = ["dm"] if poll.dm.enabled or (self.settings.uses_review and self._text_review) else []
         return sources + (["mention"] if poll.mention.enabled else [])
 
     # ── polling ─────────────────────────────────────────────────────────────
@@ -167,7 +223,7 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
 
     async def _park_for_auth(self, exc: LarkCliError) -> None:
         # The expired token cannot send a notice either: surface it through runtime status only.
-        self._set_fatal_error("auth_required", f"lark-cli user token rejected ({exc}); run `lark-cli auth login`",
+        self._set_fatal_error("auth_required", f"lark-cli user token rejected ({exc}); {_login_hint()}",
                               retryable=False)
         await self._notify_fatal_error()
 
@@ -191,7 +247,7 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             if self._is_review_command(source, inb):
                 self._commit(source, inb)  # at most once: a command has side effects
                 store.save()
-                await self._desk.handle(inb.text)
+                await self._desk.handle_text(inb.text)
                 continue
             reason = drop_reason(inb, source, me=me, settings=self.settings, now=now,
                                  dm_allowed=self._is_dm_allowed, group_allowed=self._is_group_allowed)
@@ -213,9 +269,13 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         self._store.mark_seen(inb.message_id)
         self._store.advance(source, inb.created_at)
 
+    @property
+    def _text_review(self) -> bool:
+        return self._desk is not None and isinstance(self._desk.presenter, TextPresenter)
+
     def _is_review_command(self, source: str, inb: Inbound) -> bool:
         desk = self._desk
-        return (source == "dm" and desk is not None and bool(desk.chat_id) and inb.chat_id == desk.chat_id
+        return (source == "dm" and self._text_review and bool(desk.chat_id) and inb.chat_id == desk.chat_id
                 and inb.sender_id == self._me.open_id and parse_command(inb.text) is not None)
 
     async def _dispatch(self, inb: Inbound) -> None:
@@ -284,13 +344,44 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
     def _draft_for(self, chat_id: str, reply_to: Optional[str]) -> dict[str, Any]:
         anchor = reply_to or self._last_by_chat.get(chat_id, "")
         origin = self._origins.get(anchor)
+        revision = self._revisions.pop(anchor, {})
         return {
             "chat_id": chat_id, "reply_to": anchor,
+            # Everything a later revision needs to rebuild the conversation's source, even after a restart.
             "origin": {
-                "sender_id": origin.sender_id, "sender_name": origin.sender_name, "chat_type": origin.chat_type,
-                "chat_name": origin.chat_name if origin.chat_type == "group" else "", "text": origin.text,
-            } if origin else {},
+                "message_id": origin.message_id, "sender_id": origin.sender_id, "sender_name": origin.sender_name,
+                "chat_type": origin.chat_type, "chat_name": origin.chat_name if origin.chat_type == "group" else "",
+                "thread_id": origin.thread_id, "tenant_key": origin.tenant_key, "text": origin.text,
+            } if origin else revision.get("origin", {}),
+            **({"revision": revision["revision"], "revision_note": revision["notes"]} if revision else {}),
         }
+
+    async def _start_revision(self, draft: dict[str, Any], notes: str) -> None:
+        """Send the user's revision notes back into the conversation's own session; the rewritten reply
+        returns through ``send`` as a new draft that remembers which revision it is."""
+        origin, anchor = draft.get("origin") or {}, draft.get("reply_to") or ""
+        inb = self._origins.get(anchor) or Inbound(
+            message_id=anchor, chat_id=draft["chat_id"], chat_type=origin.get("chat_type") or "p2p",
+            chat_name=origin.get("chat_name") or "", sender_id=origin.get("sender_id") or "", sender_type="user",
+            sender_name=origin.get("sender_name") or "", tenant_key=origin.get("tenant_key") or "",
+            text=origin.get("text") or "", created_at=time.time(), thread_id=origin.get("thread_id") or "",
+            mentions_me=True, at_all=False, msg_type="text", deleted=False)
+        revision = int(draft.get("revision") or 0) + 1
+        self._revisions[anchor] = {"revision": revision, "notes": notes, "origin": origin}
+        self._last_by_chat[inb.chat_id] = anchor
+        event = MessageEvent(
+            text=_REVISION_PROMPT.format(user_name=self._me.name, notes=notes, content=draft.get("content", "")),
+            message_type=MessageType.TEXT, source=shape_source(self.build_source, inb, self.settings.for_chat(inb.chat_id)),
+            message_id=f"{anchor}#rev{revision}", reply_anchor_override=anchor or None,
+            user_id=inb.sender_id, user_name=inb.sender_name or None, allow_gateway_control=False)
+        logger.info("lark_user: revision %d for %s chat=%s", revision, anchor, hash_for_log(inb.chat_id))
+        await self.handle_message(event)
+
+    async def _on_review_click(self, event: dict[str, Any]) -> None:
+        try:
+            await self._desk.handle_card(event)
+        except LarkCliError as exc:
+            logger.warning("lark_user: review click could not be completed (%s: %s)", exc.kind, exc)
 
     async def _deliver(self, draft: dict[str, Any], content: str) -> str:
         """Render and send ``content`` for ``draft``; returns the last message id."""
@@ -364,7 +455,7 @@ def register(ctx):
         check_fn=check_requirements,
         is_connected=_enabled,
         config_connected_fn=_enabled,
-        install_hint="Install lark-cli and run `lark-cli auth login` (user identity)",
+        install_hint="Install lark-cli, then log in as yourself for Hermes: `HERMES_HOME=<home> lark-cli auth login`",
         max_message_length=0,  # the adapter chunks itself so the prefix/suffix land once
         emoji="🪶",
         allow_update_command=False,

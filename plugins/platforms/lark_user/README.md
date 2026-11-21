@@ -5,7 +5,7 @@
 - 别人发给你的**私聊**；
 - 群里 **@你** 的消息。
 
-每个会话会启动一个 Hermes Session，agent 写好答案后，以**你本人的名义**回复。为表明这是 AI 代答，每条回复都带固定的前缀。默认先把草稿发到你和自己的会话里，你确认后才真正发出（审核模式）。
+每个会话会启动一个 Hermes Session，agent 写好答案后，以**你本人的名义**回复。为表明这是 AI 代答，每条回复都带固定的前缀。默认先审核：每条回复先以**审核卡片**发给你，你可以**通过**（正式发出）、**修订**（在输入框写修改意见，agent 改好后再次提交审核）或**拒绝**（不回复）。
 
 > 想让大家和一个**机器人**对话，请用 `feishu` 平台；想让助理替**你本人**起草或回复别人发给你的消息，用 `lark_user`。
 
@@ -38,7 +38,10 @@ lark-cli 搜索 ──► 过滤（自己/bot/@所有人/白名单/过期/限流
                                           │
                      ┌────────────────────┴────────────────────┐
                delivery: review                           delivery: auto
-         草稿发到你的自聊，等你 /send                   直接以你的名义回复对方
+       审核 bot 给你发审核卡片                         直接以你的名义回复对方
+   ✅ 通过 → 以你的名义回复对方
+   ✏️ 修订 → 意见交回 agent 重写 → 新的审核卡片
+   🚫 拒绝 → 不回复
 ```
 
 - **只发最终答案**：agent 执行过程中的工具进度、中间说明、心跳、出错提示都不会发给对方，只有这一轮的最终答案会发出（审核模式下也只生成一条草稿）。
@@ -54,12 +57,23 @@ lark-cli 搜索 ──► 过滤（自己/bot/@所有人/白名单/过期/限流
 ## 2. 前置条件
 
 1. 安装 `lark-cli` 并确保它在 `PATH` 中（也可以用 `cli_bin` 指定绝对路径）。
-2. 以你本人身份登录：
+2. **为 Hermes 登录 lark-cli**（务必带上 `HERMES_HOME`，原因见下方说明）：
 
    ```bash
-   lark-cli auth login
-   lark-cli auth status      # identities.user.available 应为 true
+   HERMES_HOME=~/.hermes lark-cli auth login
+   HERMES_HOME=~/.hermes lark-cli whoami --as user    # 确认应用（appId）和 onBehalfOf 是你本人
+   HERMES_HOME=~/.hermes lark-cli config show          # 确认 "workspace": "hermes"
    ```
+
+   > **为什么要带 `HERMES_HOME`：lark-cli 的工作区机制**
+   >
+   > lark-cli 会识别自己是否运行在 AI agent 里：环境变量中只要有**非空的** `HERMES_HOME`，它就使用一套独立的 **`hermes` 工作区**（`~/.lark-cli/hermes/config.json`），否则使用默认的 **`local` 工作区**（`~/.lark-cli/config.json`）。两个工作区各自有各自的应用、profile 和登录状态，值是什么无所谓，有就切换。
+   >
+   > Hermes gateway 进程里一定有 `HERMES_HOME`，所以插件调用的 lark-cli **永远使用 `hermes` 工作区**；而你在普通终端里直接运行 `lark-cli`，用的是 `local` 工作区。后果是：
+   > - 在普通终端执行 `lark-cli auth login`，登录的是 `local` 工作区，**插件用不上**；
+   > - 两个工作区可能绑定不同的应用，你会在终端和 Hermes 里看到不同的 appId 和 open_id（同一个人在不同应用下的 open_id 不同）。
+   >
+   > 所以本文所有 lark-cli 命令都写成 `HERMES_HOME=~/.hermes lark-cli …`，这样看到的就是插件实际使用的身份。插件启动时也会在日志里记录所用的工作区和应用：`lark_user: lark-cli workspace=hermes profile=… app=cli_…`。
 
 3. 用户 token 需要以下 scope：
 
@@ -70,9 +84,25 @@ lark-cli 搜索 ──► 过滤（自己/bot/@所有人/白名单/过期/限流
    | `im:message.group_msg:get_as_user` | 读取群消息（包括群上下文） |
    | `im:message.send_as_user`、`im:message` | 以你的身份发送和回复 |
 
-   可以用 `lark-cli auth check --scope "search:message im:message.send_as_user"` 检查。
+   可以用 `HERMES_HOME=~/.hermes lark-cli auth check --scope "search:message im:message.send_as_user"` 检查。
 
-4. 用户 token 约一周内不刷新就会过期。过期后插件会停止轮询，在 `hermes gateway status` 中显示 `auth_required`。此时 token 失效，也没法给你发提醒，需要你重新执行 `lark-cli auth login`，然后重启 gateway。
+4. **审核卡片需要一个专用的 Lark 应用（审核应用）**。卡片按钮的点击回调只会推送给应用，用户身份收不到；而且同一个应用有多个长连接时，每次点击只会随机推给其中一个。所以这个应用必须**专门用于审核卡片**，不能和 Hermes 的 `feishu` 平台或 lark-cli（`hermes` 工作区）登录用的应用是同一个。没有配置审核应用时，自动退回文本命令审核（见第 4 节）。
+
+   在飞书 / Lark 开发者后台：
+   1. 创建一个企业自建应用，开启**机器人**能力。
+   2. 开通权限 `im:message:send_as_bot`（发卡片）和 `im:message`（更新卡片）。
+   3. 在“事件与回调 → 回调配置”中选择**使用长连接接收回调**，并添加回调 `card.action.trigger`（卡片回传交互）。
+   4. 把应用的**可用范围**设为包含你本人，然后发布版本。
+   5. 把凭证写进 `~/.hermes/.env`：
+
+      ```bash
+      LARK_USER_INTERACTION_APP_ID=cli_xxxxxxxx
+      LARK_USER_INTERACTION_APP_SECRET=xxxxxxxx
+      ```
+
+   插件只把凭证放进 lark-cli 子进程的环境变量，不会写入你的 lark-cli 配置，也不会出现在命令行参数里。审核 bot 通过 union_id 找到你，卡片发在审核 bot 和你的私聊里。
+
+5. 用户 token 约一周内不刷新就会过期。过期后插件会停止轮询，在 `hermes gateway status` 中显示 `auth_required`。此时 token 失效，也没法给你发提醒，需要你重新执行 `HERMES_HOME=~/.hermes lark-cli auth login`（不带 `HERMES_HOME` 会登录到另一个工作区，无效），然后重启 gateway。
 
 ---
 
@@ -102,40 +132,62 @@ hermes gateway status         # 确认 lark_user 已连接
 - 不响应 @所有人。
 - agent 不能使用 terminal。
 
-> **怎么找 open_id / chat_id**
-> - 某人的 open_id：`lark-cli contact +search-user --query "姓名" --as user`；也可以在日志里找（DEBUG 级别）。
-> - 群的 chat_id：`lark-cli im +chat-search --query "群名" --as user`。
+> **怎么找 open_id / chat_id**（open_id 按应用区分，必须在 `hermes` 工作区下查，否则白名单对不上）
+> - 某人的 open_id：`HERMES_HOME=~/.hermes lark-cli contact +search-user --query "姓名" --as user`；也可以在日志里找（DEBUG 级别）。
+> - 群的 chat_id：`HERMES_HOME=~/.hermes lark-cli im +chat-search --query "群名" --as user`。
 
 ---
 
 ## 4. 审核模式怎么用
 
-`reply.delivery: review`（默认）时，每个待发出的回复都会以下面的形式出现在**你和自己的会话**中：
+`reply.delivery: review`（默认）时，每个待发出的回复都先交给你审核。审核有两种呈现方式，由 `review.interactive` 决定；不配置时，有审核应用就用卡片，否则用文本命令。
+
+### 4.1 审核卡片（推荐）
+
+审核 bot 会在它和你的私聊里发来一张卡片：
 
 ```
-📝 待审核回复 #3
-来自：Alice（群：项目组）
-原消息：周五能发版吗？
----
-（agent 起草的回复）
----
-/send 3 发送 · /drop 3 丢弃 · /edit 3 新的回复内容 修改后发送
+┌ 📝 待审核回复 #3 ───────────────────────────┐
+│ 来自：Alice（群：项目组）                    │
+│ 原消息：周五能发版吗？                       │
+│ （第 1 次修订，意见：……  ← 仅修订稿显示）    │
+│ ─────────────────────────────────────────── │
+│ （agent 起草的回复）                          │
+│ ─────────────────────────────────────────── │
+│ [ 修改意见（点“修订”时必填）              ]   │
+│ [✅ 通过]  [✏️ 修订]  [🚫 拒绝]                │
+└─────────────────────────────────────────────┘
 ```
 
-在**同一个会话**里发送以下命令：
+| 操作 | 效果 | 卡片变为 |
+|---|---|---|
+| ✅ 通过 | 以你的名义把这条回复发给对方（自动加前缀和后缀） | 绿色“✅ 已发送 #n”，按钮消失 |
+| ✏️ 修订 | 把输入框里的修改意见连同上一版草稿交回**原会话**，agent 按意见重写；改好后发来**新的审核卡片**（标注“第 k 次修订”），可以反复修订 | 蓝色“✏️ 修订中 #n”，按钮消失 |
+| 🚫 拒绝 | 这条消息不回复 | 灰色“🚫 已拒绝，不回复 #n”，按钮消失 |
+
+- 修订时输入框不能为空，否则卡片会提示“请先填写修改意见”，草稿保持待审核。
+- 发送失败时，卡片变为红色“❌ 发送失败，可重试”并保留按钮，可以再点“通过”。
+- 修改意见只在对方的会话里作为“来自你本人的审核意见”交给 agent，不会发给对方。
+- 只有发在审核 bot 与你私聊里的、对应草稿自己的那张卡片上的点击才有效；已经处理过的卡片再点不会重复执行。
+- 超过 `review.ttl`（默认 24 小时）未处理的草稿会自动作废，卡片变为“⌛ 已过期，未回复”。
+
+### 4.2 文本命令（无审核应用时的后备）
+
+`review.interactive: text`（或没有配置审核应用）时，草稿以消息形式发到**你和自己的会话**，你在同一个会话里回复命令：
 
 | 命令 | 效果 |
 |---|---|
-| `/send [n]` | 发出草稿 n（不写 n 时发最新一条） |
-| `/drop [n]` | 丢弃草稿 n（不写 n 时丢最新一条） |
-| `/edit n 新内容` | 用"新内容"代替草稿 n 发出（同样会自动加前缀和后缀） |
+| `/send [n]` | 通过：发出草稿 n（不写 n 时为最新一条） |
+| `/drop [n]` | 拒绝：不回复 |
+| `/revise n 修改意见` | 修订：agent 按意见重写后发来新的待审核草稿 |
+| `/edit n 新内容` | 不经 agent，直接用“新内容”代替草稿 n 发出（同样会加前缀和后缀） |
 | `/list` | 列出所有待审核草稿 |
 
-规则：
-- 命令**只认你本人**在**你和自己的会话**里发的。你在别的会话里输入 `/send`，或别人发 `/send`，都不会触发。
-- 每条命令只执行一次。发送失败时草稿会保留，并提示失败原因，你可以再试。
-- 超过 `review.ttl`（默认 24 小时）没处理的草稿会自动丢弃，并通知你。
-- 设为 `reply.delivery: auto` 后直接发送，不经审核。可以全局设置，也可以只对某个会话设置。
+命令只认你本人在你和自己的会话里发的；每条命令只执行一次。
+
+### 4.3 不审核
+
+设为 `reply.delivery: auto` 后直接发送，不经审核。可以全局设置，也可以只对某个会话设置（见 5.9）。
 
 ---
 
@@ -149,7 +201,7 @@ hermes gateway status         # 确认 lark_user 已连接
 |---|---|---|
 | `enabled` | bool / `false` | 是否启用本平台。 |
 | `cli_bin` | str / `lark-cli` | lark-cli 可执行文件，可以写 PATH 中的名字或绝对路径。 |
-| `lark_cli_profile` | str / `""` | 传给 `lark-cli --profile`。不同 Hermes profile 可以绑定不同的 Lark 账号；同一个 Lark 账号同一时间只允许一个 Hermes profile 轮询，重复启动会被拒绝。 |
+| `lark_cli_profile` | str / `""` | 传给 `lark-cli --profile`，选的是 **`hermes` 工作区里**的 profile（空表示该工作区当前生效的 profile）。不同 Hermes profile 可以绑定不同的 Lark 账号；同一个 Lark 账号同一时间只允许一个 Hermes profile 轮询，重复启动会被拒绝。 |
 | `cli_timeout` | 时长 / `60s` | 单次 lark-cli 调用的超时时间。 |
 
 ### 5.2 谁能触发回复（访问控制）
@@ -235,8 +287,9 @@ hermes gateway status         # 确认 lark_user 已连接
 
 | 配置项 | 类型 / 默认值 | 效果 |
 |---|---|---|
-| `review.chat` | chat_id / `""` | 草稿发到哪个会话。空表示你和自己的会话（第一次发草稿时自动识别）。 |
-| `review.ttl` | 时长 / `24h` | 草稿超过这个时间未处理就自动丢弃。 |
+| `review.interactive` | `card` \| `text` / 自动 | `card`：审核 bot 发审核卡片（需要审核应用，见第 2 节第 4 步）；`text`：草稿发到你的自聊，用文本命令处理。不填时，配置了审核应用就用 `card`，否则用 `text`。显式设为 `card` 却没有配置审核应用时，gateway 拒绝启动本平台。 |
+| `review.chat` | chat_id / `""` | 仅 `text` 模式：草稿发到哪个会话。空表示你和自己的会话（第一次发草稿时自动识别）。 |
+| `review.ttl` | 时长 / `24h` | 草稿超过这个时间未处理就自动作废（卡片标为已过期）。 |
 
 ### 5.8 群上下文（`context`）
 
@@ -305,10 +358,12 @@ platform_toolsets:
 
 ### 5.11 环境变量
 
-非敏感配置都放在 `config.yaml`。环境变量只有一个：
+非敏感配置都放在 `config.yaml`，`~/.hermes/.env` 里只放以下几项：
 
 | 变量 | 效果 |
 |---|---|
+| `LARK_USER_INTERACTION_APP_ID` | 审核应用的 App ID。配置后默认启用审核卡片。 |
+| `LARK_USER_INTERACTION_APP_SECRET` | 审核应用的 App Secret。 |
 | `LARK_USER_ALLOW_ALL_USERS=true` | 允许 `dm_policy` / `group_policy` 设为 `open`。不设置时，配置为 `open` 会导致 gateway 拒绝启动。 |
 
 ---
@@ -387,6 +442,8 @@ platforms:
 | 陌生人诱导执行命令 | 默认工具集没有 terminal。 |
 | 冒充本人 | 前缀不能为空，每条回复都表明是 AI 代答；`platform_hint` 也要求 agent 不替你做承诺、不泄露隐私。 |
 | 消息体泄露 | 回复正文通过 stdin 传给 lark-cli，不出现在进程参数里；INFO 级别日志不记录消息正文。 |
+| 伪造审核点击 | 只有审核 bot 与你私聊里、对应草稿自己那张卡片上的点击才生效；已处理的草稿不会被再次执行；审核应用的凭证只进子进程环境变量，不写入 lark-cli 配置、不进命令行参数。 |
+| 审核点击被别的连接抢走 | 审核应用和 `feishu` 平台或 lark-cli 登录用的是同一个应用时，拒绝启动卡片审核；检测到该应用还有其他长连接时，在日志里告警。 |
 
 ---
 
@@ -394,12 +451,17 @@ platforms:
 
 | 现象 | 排查 |
 |---|---|
-| `hermes gateway status` 显示 `auth_required` | 用户 token 过期，执行 `lark-cli auth login` 后重启 gateway。 |
+| `hermes gateway status` 显示 `auth_required` | 用户 token 过期或未登录，执行 `HERMES_HOME=~/.hermes lark-cli auth login` 后重启 gateway。只执行 `lark-cli auth login` 无效：它登录的是 `local` 工作区。 |
+| 终端里 `lark-cli whoami` 和 Hermes 里看到的应用 / 用户不一样 | 正常现象：Hermes 里有 `HERMES_HOME`，lark-cli 使用 `hermes` 工作区；终端里没有，使用 `local` 工作区。用 `HERMES_HOME=~/.hermes lark-cli whoami --as user` 查看插件实际使用的身份，或看 gateway 日志中的 `lark-cli workspace=…` 那一行。 |
+| 白名单里填了 open_id 却不触发 | 那个 open_id 可能是在 `local` 工作区（另一个应用）下查到的；在 `hermes` 工作区下重新查。 |
 | 显示 `config_invalid` | 配置有误，例如 `reply.prefix` 为空、枚举值拼错；具体原因见 gateway 日志。 |
 | 显示 `cli_missing` | 找不到 lark-cli，检查 `PATH` 或配置 `cli_bin`。 |
 | 启动报 "open policy without allow-all opt-in" | 设置了 `open` 策略但没有设置 `LARK_USER_ALLOW_ALL_USERS=true`。 |
 | 有人发消息但没有回复 | 打开 DEBUG 日志后，每条被跳过的消息都会记录原因：`self` / `bot` / `not_mentioned` / `at_all` / `dm_policy` / `group_policy` / `external` / `stale` / `echo` / `chat_disabled` / `rate_limited`。 |
 | 回复慢 | 正常延迟是 15–30 秒（索引延迟 + 轮询周期）；群上下文还会再加约 4 秒。 |
+| 显示 `review_app_error` | 审核应用凭证错误或机器人未发布 / 不可用；或者没有拿到你的 union_id。检查第 2 节第 4 步。 |
+| 收到审核卡片，点击后没有反应 | 检查审核应用是否已在“回调配置”中选择长连接并添加 `card.action.trigger`；gateway 日志中会出现 `review card listener` 相关报错；若日志提示 “already has N other event connection(s)”，说明还有别的进程连着这个应用。 |
+| 点“修订”后一直没有新卡片 | agent 改写失败（例如模型调用出错）时不会产生新卡片，原草稿已作废、对方不会收到回复。查看 gateway 日志；对方再发消息时会重新起草。 |
 | 想重新开始（忽略积压消息） | 停止 gateway，删除 `<HERMES_HOME>/lark_user/<open_id>.json`，再启动。注意：待审核草稿会一并丢失。 |
 
 ---
@@ -409,4 +471,5 @@ platforms:
 - 消息靠轮询获取，不是实时推送。
 - 只读取消息的文本；图片、文件不会下载给 agent。
 - 不展示执行过程，只在一轮处理结束后发出最终答案。不要为本平台打开 `display.platforms.lark_user.streaming`：流式输出时最终答案会被当作中间消息丢掉。
-- 用户身份无法编辑已发出的文本消息，所以回复发出后无法修改，只能在审核阶段用 `/edit` 改。
+- 用户身份无法编辑已发出的文本消息，所以回复发出后无法修改，只能在审核阶段修订（卡片的“修订”或文本命令 `/revise`、`/edit`）。
+- 审核卡片的回调监听每 90 分钟换新 token 重连一次，重连的几秒内点击可能失败，稍后再点即可。

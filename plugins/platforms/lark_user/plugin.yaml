@@ -13,3 +13,11 @@ optional_env:
     description: "Opt in to dm_policy/group_policy 'open' (anyone may trigger a reply under your name)"
     prompt: "Allow all senders? (true/false)"
     password: false
+  - name: LARK_USER_INTERACTION_APP_ID
+    description: "App ID of a Lark app used only for review cards (approve / revise / reject buttons); its card callback must use the long connection"
+    prompt: "Review app ID"
+    password: false
+  - name: LARK_USER_INTERACTION_APP_SECRET
+    description: "App secret of the review-card app"
+    prompt: "Review app secret"
+    password: true

@@ -17,6 +17,7 @@ DELIVERIES = ("review", "auto")
 FORMATS = ("text", "post", "card")
 TARGETS = ("reply", "thread", "send")
 CONTEXT_SCOPES = ("recent", "thread")
+INTERACTIVE = ("card", "text")
 CONTEXT_WHEN = ("new_session", "always")
 POLICIES = ("allowlist", "open", "disabled")
 
@@ -146,6 +147,7 @@ class LarkUserSettings:
     rate_limit_per_chat: int = 5
     review_chat: str = ""
     review_ttl: float = 86400.0
+    review_interactive: str = ""  # card | text; "" = card when the review app is configured, else text
     dm_policy: str = "allowlist"
     group_policy: str = "allowlist"
     allow_from: tuple[str, ...] = ()
@@ -272,6 +274,7 @@ def load_settings(extra: Mapping[str, Any]) -> LarkUserSettings:
         rate_limit_per_chat=max(0, int(rate.get("per_chat", 5))),
         review_chat=str(review.get("chat") or ""),
         review_ttl=parse_duration(review.get("ttl"), 86400.0),
+        review_interactive=_choice(review.get("interactive"), INTERACTIVE + ("",), "", "review.interactive"),
         dm_policy=_choice(raw.get("dm_policy"), POLICIES, "allowlist", "dm_policy"),
         group_policy=_choice(raw.get("group_policy"), POLICIES, "allowlist", "group_policy"),
         allow_from=_ids(raw.get("allow_from")),

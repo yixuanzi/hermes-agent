@@ -27,7 +27,9 @@ args = sys.argv[1:]
 if args[:1] == ["--profile"]:
     args = args[2:]
 stdin = sys.stdin.read() if "-" in args else None
-state.setdefault("calls", []).append({{"args": args, "stdin": stdin}})
+state.setdefault("calls", []).append({{"args": args, "stdin": stdin,
+                                       "env_app": os.environ.get("LARKSUITE_CLI_APP_ID", ""),
+                                       "env_has_secret": bool(os.environ.get("LARKSUITE_CLI_APP_SECRET"))}})
 def out(data=None, error=None):
     json.dump(state, open(state_path, "w"))
     payload = {{"ok": error is None, "data": data or {{}}}}
@@ -36,8 +38,30 @@ def out(data=None, error=None):
     print(json.dumps(payload))
     sys.exit(0)
 fail = state.get("fail", {{}})
-if args[:2] == ["api", "GET"]:
+if args == ["config", "show"]:
+    json.dump(state, open(state_path, "w"))
+    print(json.dumps({{"workspace": "hermes", "profile": "cli_user_app", "appId": "cli_user_app", "brand": "lark"}}))
+    sys.exit(0)
+if args[:3] == ["api", "GET", "/open-apis/authen/v1/user_info"]:
+    if "user_info" in fail:
+        out(error=fail["user_info"])
     out(state["me"])
+if args[:3] == ["api", "GET", "/open-apis/bot/v3/info"]:
+    out({{"bot": {{"app_name": "review-bot"}}}})
+if args[:3] == ["api", "POST", "/open-apis/im/v1/messages"]:
+    state["cards"] = state.get("cards", 0) + 1
+    out({{"message_id": "om_card_%d" % state["cards"], "chat_id": "oc_botchat"}})
+if args[:3] == ["im", "messages", "patch"]:
+    out({{}})
+if args[:3] == ["api", "POST", "/open-apis/interactive/v1/card/update"]:
+    if "card_update" in fail:
+        out(error=fail["card_update"])
+    out({{}})
+if args[:3] == ["event", "consume", "card.action.trigger"]:
+    json.dump(state, open(state_path, "w"))
+    for event in state.get("card_events", []):
+        print(json.dumps(event))
+    sys.exit(0)
 if args[:2] == ["im", "+messages-search"]:
     if "search" in fail:
         out(error=fail["search"])
@@ -48,13 +72,15 @@ if args[:2] == ["im", "+chat-messages-list"]:
 if args[:2] == ["im", "+threads-messages-list"]:
     out({{"messages": state.get("thread_history", [])}})
 if args[:2] in (["im", "+messages-reply"], ["im", "+messages-send"]):
+    if "reply" in fail:
+        out(error=fail["reply"])
     state["sent"] = state.get("sent", 0) + 1
     chat = args[args.index("--chat-id") + 1] if "--chat-id" in args else "oc_self"
     out({{"message_id": "om_sent_%d" % state["sent"], "chat_id": chat}})
 out(error={{"type": "validation", "message": "unexpected " + " ".join(args)}})
 '''
 
-ME = {"open_id": "ou_me", "name": "Me Myself", "tenant_key": "t1"}
+ME = {"open_id": "ou_me", "name": "Me Myself", "tenant_key": "t1", "union_id": "on_me"}
 
 
 def _stamp(epoch: float) -> str:
@@ -87,7 +113,7 @@ class FakeLark:
         self.state_path.write_text(json.dumps(state))
 
     def sends(self) -> list[dict]:
-        return [c for c in self.read().get("calls", []) if c["args"][1] in ("+messages-reply", "+messages-send")]
+        return [c for c in self.read().get("calls", []) if c["args"][1:2] in (["+messages-reply"], ["+messages-send"])]
 
 
 @pytest.fixture
@@ -201,6 +227,17 @@ async def test_per_chat_rate_limit(lark):
     lark.write(search_p2p=[msg(f"om_{i}") for i in range(4)])
     await adapter.poll_once("dm")
     assert len(events) == 2
+
+
+@pytest.mark.asyncio
+async def test_login_hint_targets_the_hermes_lark_cli_workspace(lark):
+    # lark-cli switches to its "hermes" workspace whenever HERMES_HOME is set, so a plain
+    # `lark-cli auth login` from a terminal would not fix the gateway's login.
+    lark.write(fail={"user_info": {"type": "authentication", "message": "token expired"}})
+    adapter, _ = make_adapter(lark)
+    assert not await adapter.connect()
+    assert adapter.fatal_error_code == "auth_required"
+    assert "HERMES_HOME=" in adapter.fatal_error_message and "lark-cli auth login" in adapter.fatal_error_message
 
 
 @pytest.mark.asyncio
@@ -401,6 +438,214 @@ async def test_group_context_is_off_by_default_and_per_chat_switchable(lark):
     lark.write(search_group=[{**mention, "message_id": "om_m2"}])
     await adapter2.poll_once("mention")
     assert events2[0].channel_context is None
+
+
+# ── review cards (separate review app) ─────────────────────────────────────
+
+@pytest.fixture
+def review_app(monkeypatch):
+    from plugins.platforms.lark_user.lark_user_review_bot import ReviewBot
+    monkeypatch.setenv("LARK_USER_INTERACTION_APP_ID", "cli_review")
+    monkeypatch.setenv("LARK_USER_INTERACTION_APP_SECRET", "s3cret")
+
+    async def token(self):
+        return "t-test"
+
+    monkeypatch.setattr(ReviewBot, "_tenant_token", token)
+
+
+_BOT_HEADS = {"send": ["api", "POST", "/open-apis/im/v1/messages"], "patch": ["im", "messages", "patch"],
+              "token": ["api", "POST", "/open-apis/interactive/v1/card/update"]}
+
+
+def _bot_calls(lark, *verbs):
+    heads = [_BOT_HEADS[v] for v in verbs]
+    return [c for c in lark.read().get("calls", []) if c["args"][:3] in heads]
+
+
+def _cards(lark):
+    return [json.loads(json.loads(c["stdin"])["content"]) for c in _bot_calls(lark, "send")]
+
+
+def _settled_card(call):
+    body = json.loads(call["stdin"])
+    return body["card"] if "token" in body else json.loads(body["content"])
+
+
+def _patched(lark):
+    """Every re-render of a review card, in order, whether by click token or by message patch."""
+    return [_settled_card(c) for c in _bot_calls(lark, "patch", "token")]
+
+
+def _walk(node):
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _walk(value)
+
+
+def _buttons(card):
+    return [n["name"] for n in _walk(card) if n.get("tag") == "button"]
+
+
+def _text(card):
+    return " ".join([card["header"]["title"]["content"]] + [n["content"] for n in _walk(card) if n.get("tag") == "markdown"])
+
+
+def click(verb, number="1", notes="", message_id="om_card_1", chat="oc_botchat", event_id=None):
+    return {"event_id": event_id or f"ev-{verb}-{number}-{time.time_ns()}", "message_id": message_id, "chat_id": chat,
+            "token": f"c-token-{verb}-{number}",
+            "action_value": json.dumps({"lark_user_review": verb, "draft": number}),
+            "form_value": json.dumps({"revision": notes})}
+
+
+async def _card_review(lark):
+    adapter, events = await opened(lark)
+    lark.write(search_p2p=[msg("om_q", text="when is the release?")])
+    await adapter.poll_once("dm")
+    assert (await adapter.send("oc_dm1", "Friday", reply_to="om_q")).success
+    return adapter, events
+
+
+@pytest.mark.asyncio
+async def test_review_card_comes_from_the_review_app_with_three_choices(lark, review_app):
+    await _card_review(lark)
+    assert lark.sends() == []  # nothing reaches the other person yet
+    (call,) = _bot_calls(lark, "send")
+    assert "--as" in call["args"] and call["args"][call["args"].index("--as") + 1] == "bot"
+    assert call["env_app"] == "cli_review" and call["env_has_secret"]
+    assert not any("s3cret" in arg for c in lark.read()["calls"] for arg in c["args"])
+    assert json.loads(call["stdin"])["receive_id"] == "on_me"
+    (card,) = _cards(lark)
+    assert _buttons(card) == ["approve", "revise", "reject"]
+    assert any(n.get("tag") == "input" and n.get("name") == "revision" for n in _walk(card))
+    assert "#1" in _text(card) and "Friday" in _text(card) and "when is the release?" in _text(card)
+
+
+@pytest.mark.asyncio
+async def test_approve_sends_the_reply_and_settles_the_card(lark, review_app):
+    adapter, _ = await _card_review(lark)
+    await adapter._on_review_click(click("approve"))
+    (reply,) = lark.sends()
+    assert reply["args"][reply["args"].index("--message-id") + 1] == "om_q"
+    assert reply["stdin"] == "[🤖 AI 代答] Friday"
+    (settled,) = _patched(lark)
+    assert "已发送" in _text(settled) and _buttons(settled) == []
+    assert adapter._store.drafts == {}
+
+
+@pytest.mark.asyncio
+async def test_a_clicked_card_is_rerendered_with_the_click_token(lark, review_app):
+    adapter, _ = await _card_review(lark)
+    await adapter._on_review_click(click("reject"))
+    (update,) = _bot_calls(lark, "token")
+    assert json.loads(update["stdin"])["token"] == "c-token-reject-1" and not _bot_calls(lark, "patch")
+
+    assert (await adapter.send("oc_dm1", "Saturday", reply_to="om_q")).success
+    lark.write(fail={"card_update": {"type": "api", "message": "token expired"}})
+    await adapter._on_review_click(click("reject", number="2", message_id="om_card_2"))
+    (patch,) = _bot_calls(lark, "patch")  # the token was refused: the message patch still settles the card
+    assert json.loads(patch["args"][patch["args"].index("--params") + 1])["message_id"] == "om_card_2"
+    assert "已拒绝" in _text(_settled_card(patch))
+
+
+@pytest.mark.asyncio
+async def test_failed_send_keeps_the_draft_for_a_retry(lark, review_app):
+    adapter, _ = await _card_review(lark)
+    lark.write(fail={"reply": {"type": "api", "message": "chat not found"}})
+    await adapter._on_review_click(click("approve"))
+    (failed,) = _patched(lark)
+    assert "发送失败" in _text(failed) and _buttons(failed) == ["approve", "revise", "reject"]
+    assert "1" in adapter._store.drafts
+    lark.write(fail={})
+    await adapter._on_review_click(click("approve"))
+    assert "已发送" in _text(_patched(lark)[-1]) and adapter._store.drafts == {}
+
+
+@pytest.mark.asyncio
+async def test_reject_sends_nothing(lark, review_app):
+    adapter, _ = await _card_review(lark)
+    await adapter._on_review_click(click("reject"))
+    assert lark.sends() == []
+    (settled,) = _patched(lark)
+    assert "已拒绝" in _text(settled) and _buttons(settled) == []
+    assert adapter._store.drafts == {}
+
+
+@pytest.mark.asyncio
+async def test_revise_sends_notes_back_to_the_conversation_and_resubmits(lark, review_app):
+    adapter, events = await _card_review(lark)
+    original = events[-1]
+    await adapter._on_review_click(click("revise", notes="说具体时间：周五下午三点"))
+    assert lark.sends() == []
+    (settled,) = _patched(lark)
+    assert "修订中" in _text(settled) and _buttons(settled) == []
+
+    revision = events[-1]
+    assert revision is not original and "说具体时间：周五下午三点" in revision.text and "Friday" in revision.text
+    assert revision.message_id == "om_q#rev1" and revision.reply_anchor_override == "om_q"
+    assert not revision.is_command()
+    assert adapter._event_session_key(revision) == adapter._event_session_key(original)
+
+    await adapter.send("oc_dm1", "周五下午三点发版", reply_to="om_q")  # the rewritten final
+    second = _cards(lark)[-1]
+    assert "#2" in _text(second) and "第 1 次修订" in _text(second) and "周五下午三点" in _text(second)
+    assert _buttons(second) == ["approve", "revise", "reject"]
+    await adapter._on_review_click(click("approve", number="2", message_id="om_card_2"))
+    assert [c["stdin"] for c in lark.sends()] == ["[🤖 AI 代答] 周五下午三点发版"]
+
+
+@pytest.mark.asyncio
+async def test_revise_without_notes_keeps_the_draft_open(lark, review_app):
+    adapter, events = await _card_review(lark)
+    count = len(events)
+    await adapter._on_review_click(click("revise", notes="  "))
+    (settled,) = _patched(lark)
+    assert "修改意见" in _text(settled) and _buttons(settled) == ["approve", "revise", "reject"]
+    assert "1" in adapter._store.drafts and len(events) == count
+
+
+@pytest.mark.asyncio
+async def test_only_a_click_on_the_drafts_own_card_counts(lark, review_app):
+    adapter, _ = await _card_review(lark)
+    await adapter._on_review_click(click("approve", message_id="om_other_card"))
+    await adapter._on_review_click(click("approve", chat="oc_someone_else"))
+    assert lark.sends() == [] and "1" in adapter._store.drafts
+    twice = click("approve", event_id="ev-same")
+    await adapter._on_review_click(twice)
+    await adapter._on_review_click(twice)  # a redelivered click: the draft is already decided
+    await adapter._on_review_click(click("reject"))
+    assert len(lark.sends()) == 1 and len(_patched(lark)) == 1
+
+
+@pytest.mark.asyncio
+async def test_click_listener_feeds_card_events_to_the_desk(lark, review_app):
+    adapter, _ = await _card_review(lark)
+    lark.write(card_events=[click("approve")])
+    await adapter._review_bot._consume_once(adapter._on_review_click)
+    assert [c["stdin"] for c in lark.sends()] == ["[🤖 AI 代答] Friday"]
+
+
+@pytest.mark.asyncio
+async def test_card_review_needs_its_own_app(lark, monkeypatch, review_app):
+    adapter, _ = make_adapter(lark)
+    monkeypatch.setenv("FEISHU_APP_ID", "cli_review")
+    assert not await adapter.connect()
+    assert adapter.fatal_error_code == "config_invalid"
+
+    monkeypatch.delenv("FEISHU_APP_ID")
+    monkeypatch.setenv("LARK_USER_INTERACTION_APP_ID", "cli_user_app")  # the app lark-cli's user login runs on
+    adapter2, _ = make_adapter(lark)
+    assert not await adapter2.connect()
+    assert adapter2.fatal_error_code == "config_invalid"
+
+    monkeypatch.delenv("LARK_USER_INTERACTION_APP_ID")
+    adapter3, _ = make_adapter(lark, review={"interactive": "card"})
+    assert not await adapter3.connect()
+    assert adapter3.fatal_error_code == "config_invalid"
 
 
 @pytest.mark.asyncio

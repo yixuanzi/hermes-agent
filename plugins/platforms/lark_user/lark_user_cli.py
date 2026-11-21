@@ -21,8 +21,8 @@ from hermes_platform.resolver import locate_command
 
 logger = logging.getLogger(__name__)
 
-# argv, stdin bytes -> (returncode, stdout, stderr); tests substitute a fake.
-Runner = Callable[[Sequence[str], Optional[bytes], float], Awaitable[tuple[int, bytes, bytes]]]
+# argv, stdin bytes, timeout, env (None = inherit) -> (returncode, stdout, stderr)
+Runner = Callable[[Sequence[str], Optional[bytes], float, Optional[dict[str, str]]], Awaitable[tuple[int, bytes, bytes]]]
 
 _AUTH_HINTS = ("token", "login", "unauthor", "authenticat", "expired", "scope", "permission")
 _RATE_HINTS = ("99991400", "rate limit", "frequency", "too many")
@@ -46,11 +46,12 @@ def classify_error(error: dict[str, Any]) -> str:
     return "api"
 
 
-async def _run_subprocess(argv: Sequence[str], stdin: Optional[bytes], timeout: float) -> tuple[int, bytes, bytes]:
+async def _run_subprocess(argv: Sequence[str], stdin: Optional[bytes], timeout: float,
+                          env: Optional[dict[str, str]] = None) -> tuple[int, bytes, bytes]:
     # cwd is a private temp dir: the CLI resolves relative media paths against it, never ours.
     with tempfile.TemporaryDirectory(prefix="lark_user_") as cwd:
         proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=cwd,
+            *argv, cwd=cwd, env=env,
             stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
@@ -83,13 +84,14 @@ class LarkCli:
         found = locate_command(self._binary).command
         return found[0] if found else None
 
-    async def call(self, args: Sequence[str], *, stdin: Optional[str] = None) -> dict[str, Any]:
+    async def call(self, args: Sequence[str], *, stdin: Optional[str] = None,
+                   env: Optional[dict[str, str]] = None) -> dict[str, Any]:
         binary = self.resolve_binary()
         if not binary:
             raise LarkCliError("missing", f"{self._binary} not found on PATH")
         argv = [binary, *(["--profile", self._profile] if self._profile else []), *args]
         try:
-            code, out, err = await self._runner(argv, stdin.encode() if stdin is not None else None, self._timeout)
+            code, out, err = await self._runner(argv, stdin.encode() if stdin is not None else None, self._timeout, env)
         except TimeoutError:
             raise LarkCliError("timeout", f"lark-cli {args[0]} {args[1] if len(args) > 1 else ''} timed out") from None
         try:
@@ -100,7 +102,8 @@ class LarkCli:
         if not payload.get("ok", code == 0):
             error = payload.get("error") or {}
             raise LarkCliError(classify_error(error), str(error.get("message") or f"lark-cli failed (rc={code})"))
-        return payload.get("data") or {}
+        # Most commands wrap results in {"ok", "data"}; a few (whoami) print the object itself.
+        return payload.get("data") or ({} if "ok" in payload else payload)
 
     # ── identity ────────────────────────────────────────────────────────────
 

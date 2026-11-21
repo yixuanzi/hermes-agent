@@ -6,22 +6,38 @@ you and group messages that @mention you. It does not use a bot. It polls throug
 conversation, and replies from your own account with a fixed AI-disclosure prefix.
 
 Only a turn's **final answer** is ever sent: tool progress, interim commentary and error notices
-never reach the other person. By default every reply is held for your review: Hermes posts the draft to your own Lark chat (the
-chat with yourself), and nothing goes to the other person until you release it.
+never reach the other person. By default every reply is held for your review: a review card with
+**Approve**, **Revise** (with a notes box; the agent rewrites and the new draft comes back for
+review) and **Reject** (no reply). Nothing goes to the other person until you approve it.
 
 > Use the [Feishu / Lark](./feishu.md) platform when you want a bot that people talk to. Use
 > `lark_user` when people message *you* and you want an assistant to draft or send your replies.
 
 ## Prerequisites
 
-- `lark-cli` on `PATH`, logged in as you: `lark-cli auth login`, then check
-  `lark-cli auth status` shows the user identity as available.
+- `lark-cli` on `PATH`, logged in as you **for Hermes**: `HERMES_HOME=~/.hermes lark-cli auth login`,
+  then check `HERMES_HOME=~/.hermes lark-cli whoami --as user` shows you. lark-cli keeps a separate
+  `hermes` workspace (`~/.lark-cli/hermes/`) that it uses whenever a non-empty `HERMES_HOME` is in
+  the environment, as it always is inside the gateway; a plain `lark-cli auth login` from a terminal
+  lands in the default `local` workspace, which the plugin never reads. The two workspaces can hold
+  different apps, so the same person shows a different appId and open_id in each: look up open_ids
+  for `allow_from` with `HERMES_HOME` set too. The gateway log records the workspace and app the
+  plugin uses (`lark_user: lark-cli workspace=… app=…`).
 - The user token needs these scopes: `search:message`, `im:message.p2p_msg:get_as_user`,
   `im:message.group_msg:get_as_user`, `im:message.send_as_user`, `im:message`.
 
+- For review cards, a **review app**: a Lark app used for nothing else (not the Feishu platform's
+  app, not lark-cli's). Card clicks only reach an app's event connection, and an app with several
+  connections hands each click to just one of them. In the developer console: enable the bot,
+  grant `im:message:send_as_bot` and `im:message`, under *Events & Callbacks → Callback
+  configuration* choose the long connection and add `card.action.trigger`, include yourself in
+  the availability scope, publish. Put the credentials in `~/.hermes/.env`:
+  `LARK_USER_INTERACTION_APP_ID=…` and `LARK_USER_INTERACTION_APP_SECRET=…`. Without a review
+  app, review falls back to text commands.
+
 The user token expires if it is not refreshed (about a week). When `lark-cli` rejects it, the
 platform stops polling and reports `auth_required` in `hermes gateway status`; run
-`lark-cli auth login` and restart the gateway.
+`HERMES_HOME=~/.hermes lark-cli auth login` and restart the gateway.
 
 ## Minimal setup
 
@@ -38,19 +54,33 @@ after the first poll are answered.
 
 ## How replies are released (review mode)
 
-With `reply.delivery: review` (the default), each reply arrives in your chat with yourself as
-**📝 待审核回复 #n**, showing the sender, the original message and the draft. Send one of these
-messages in that same chat:
+With `reply.delivery: review` (the default) every reply waits for you. `review.interactive`
+picks how; unset, it is `card` when the review app is configured and `text` otherwise.
+
+**Cards.** The review bot sends you, in its chat with you, a card per draft: the sender, the
+original message, the draft, a notes box and three buttons.
+
+| Button | Effect |
+|---|---|
+| ✅ Approve | Sends the reply under your name (prefix and suffix added); the card turns green |
+| ✏️ Revise | Sends your notes and the draft back into the conversation's own session; the agent's rewrite arrives as a new card marked with its revision number. Notes are required |
+| 🚫 Reject | No reply; the card turns grey |
+
+Only a click on that draft's own card, in the review bot's chat with you, counts; a decided card
+has no buttons, and a failed send keeps them so you can retry.
+
+**Text commands** (no review app). The draft is posted to your chat with yourself; answer there:
 
 | Command | Effect |
 |---|---|
-| `/send [n]` | Send draft *n* (default: the newest) |
-| `/drop [n]` | Discard draft *n* |
+| `/send [n]` | Approve draft *n* (default: the newest) |
+| `/drop [n]` | Reject draft *n* |
+| `/revise n <notes>` | Have the agent rewrite draft *n* |
 | `/edit n <text>` | Send `<text>` instead of draft *n* |
 | `/list` | List pending drafts |
 
-Commands are only accepted from you, in your own chat. Drafts older than `review.ttl` are
-discarded. Set `reply.delivery: auto` (globally or per chat) to send replies directly.
+Drafts older than `review.ttl` expire. Set `reply.delivery: auto` (globally or per chat) to send
+replies directly.
 
 ## Configuration reference
 
@@ -61,7 +91,7 @@ platforms:
   lark_user:
     enabled: true
     cli_bin: lark-cli            # name on PATH or an absolute path
-    lark_cli_profile: ""         # lark-cli --profile (one Lark account per Hermes profile)
+    lark_cli_profile: ""         # lark-cli --profile within its "hermes" workspace (one Lark account per Hermes profile)
 
     # Who may trigger a reply
     dm_policy: allowlist         # allowlist | open | disabled
@@ -100,7 +130,8 @@ platforms:
       card: { title: "🤖 {user_name} 的助理" }
 
     review:
-      chat: ""                   # empty = your chat with yourself
+      interactive: ""            # card | text; empty = card when the review app is configured
+      chat: ""                   # text mode: empty = your chat with yourself
       ttl: 24h
 
     context:                     # recent group messages given to the agent with an @mention
