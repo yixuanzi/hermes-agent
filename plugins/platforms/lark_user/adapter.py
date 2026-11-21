@@ -35,7 +35,7 @@ from .adapter_hint import PLATFORM_HINT
 from .lark_user_cli import LarkCli, LarkCliError
 from .lark_user_config import ChatSettings, LarkUserSettings, SettingsError, load_settings
 from .lark_user_context import group_context
-from .lark_user_control import lark_user_command, register_live, unregister_live
+from .lark_user_control import conversation_list, lark_user_command, register_live, unregister_live
 from .lark_user_cursor import CursorStore, state_path
 from .lark_user_intake import ChatRateLimit, Identity, drop_reason
 from .lark_user_normalize import Inbound, to_inbound
@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 _ORIGIN_CACHE = 500
 _RETRYABLE = frozenset({"timeout", "rate_limit"})
 _DROPPED = "lark_user:dropped"  # message id handed back for a suppressed non-final send
+_CONTROL_ID = "lark_user-control-"  # message ids of the gateway commands the plugin runs itself
 # Set while the gateway delivers a turn's final answer (task-local, so a concurrent progress send
 # from another task is not mistaken for it).
 _FINAL_SEND: contextvars.ContextVar[bool] = contextvars.ContextVar("lark_user_final_send", default=False)
@@ -256,10 +257,47 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         self._pending_messages.clear()
         running = list(self._inflight.values())
         for source in running:
-            await self.handle_message(MessageEvent(
-                text="/stop", message_type=MessageType.COMMAND, source=source,
-                message_id=f"lark_user-stop-{uuid.uuid4().hex}"))
+            await self._run_control("/stop", source)
         return len(running)
+
+    async def _run_control(self, command: str, source: Any) -> None:
+        """Run a gateway command as ``source``'s own conversation. Its answer is the plugin's, never
+        the sender's: ``send`` drops every reply anchored to a control id."""
+        await self.handle_message(MessageEvent(text=command, message_type=MessageType.COMMAND, source=source,
+                                               message_id=f"{_CONTROL_ID}{uuid.uuid4().hex}"))
+
+    def _live_conversations(self) -> dict[str, list[Any]]:
+        """chat_id -> this profile's lark_user sessions that have not ended, whatever scope cut them."""
+        store = getattr(self, "_session_store", None)
+        chats: dict[str, list[Any]] = collections.defaultdict(list)
+        for entry in store.list_sessions() if store is not None else ():
+            origin = entry.origin
+            if (origin is not None and origin.platform == self.platform and not entry.suspended
+                    and self.serves_profile(getattr(origin, "profile", None))):
+                chats[origin.chat_id].append(entry)
+        return chats
+
+    async def reset_conversations(self, chat_id: str) -> str:
+        """End every live conversation of one chat (a DM or a group: per user, per topic or shared);
+        a turn still running in one is interrupted. Without a chat id, list the chats that have some."""
+        chats = self._live_conversations()
+        if not chat_id:
+            return conversation_list(chats)
+        entries = chats.get(chat_id, [])
+        if not entries:
+            return f"{chat_id} 没有进行中的会话。会话 ID 区分大小写；发送 /lark-user reset 查看列表。"
+        interrupted = 0
+        for entry in entries:
+            if (source := self._inflight.get(entry.session_key)) is not None:
+                await self._run_control("/stop", source)
+                interrupted += 1
+            # Suspended: the gateway ends it and opens a fresh one on the chat's next message (as /new).
+            await asyncio.to_thread(self._session_store.suspend_session, entry.session_key)
+        logger.info("lark_user: reset %d conversation(s) of chat %s on request (%d running turn(s) interrupted)",
+                    len(entries), hash_for_log(chat_id), interrupted)
+        return (f"🔄 已重置 {chat_id} 的 {len(entries)} 个会话"
+                + (f"，中断了 {interrupted} 个正在执行的任务" if interrupted else "")
+                + "。这个会话的下一条消息会从新会话开始。")
 
     def auto_reply_status(self) -> str:
         review = type(self._desk.presenter).__name__.replace("Presenter", "").lower() if self._desk else "?"
@@ -520,6 +558,9 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         if self._is_final_only_drop(chat_id, metadata):
             logger.debug("lark_user: dropped a non-final send to %s (%d chars)", hash_for_log(chat_id), len(content))
             return SendResult(success=True, message_id=_DROPPED)
+        if reply_to and reply_to.startswith(_CONTROL_ID):
+            logger.debug("lark_user: dropped the answer to a plugin-run command in %s", hash_for_log(chat_id))
+            return SendResult(success=True, message_id=_DROPPED)
         if not self._active:
             # Switched off (/lark-user stop): no results at all, neither a reply nor a draft. Turns in
             # flight were interrupted; whatever they still emit (the /stop notice included) ends here.
@@ -558,8 +599,9 @@ def _enabled(config) -> bool:
 def register(ctx):
     ctx.register_command(
         "lark-user", lark_user_command,
-        description="Lark personal auto-reply: start / stop / status (in memory; off after every gateway start)",
-        args_hint="start|stop|status")
+        description="Lark personal auto-reply: start / stop / status (in memory; off after every gateway start), "
+                    "reset <chat_id> to end a chat's conversations",
+        args_hint="start|stop|status|reset [chat_id]")
     ctx.register_platform(
         name="lark_user",
         label="Lark (personal)",

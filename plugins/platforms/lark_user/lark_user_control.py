@@ -4,17 +4,22 @@ The switch lives in memory only. Every gateway start (and every reconnect of the
 with auto-reply OFF: nothing is polled and nothing is answered until the user runs
 ``/lark-user start``. Messages that arrive while it is off are history, never answered later.
 
-Only the user the plugin speaks for may flip it: a local session (CLI / TUI / desktop on this
+``/lark-user reset <chat_id>`` ends every live conversation of one chat (a DM or a group, whatever
+the isolation scope cut it into: per user, per topic, shared); without a chat id it lists them.
+
+Only the user the plugin speaks for may use it: a local session (CLI / TUI / desktop on this
 machine), or a Feishu/Lark sender whose union_id or open_id is that user's. A colleague who can
 talk to a shared bot cannot turn on replies under someone else's name.
 """
 
 from __future__ import annotations
 
+import time
 import weakref
-from typing import Any, Optional, Protocol
+from typing import Any, Mapping, Optional, Protocol
 
-USAGE = "用法：/lark-user start（开启自动回复）| stop（关闭）| status（查看状态）"
+USAGE = ("用法：/lark-user start（开启自动回复）| stop（关闭）| status（查看状态）"
+         "| reset [会话 ID]（重置这个私聊或群的全部会话；不带 ID 列出进行中的会话）")
 _LIVE: weakref.WeakSet[Controllable] = weakref.WeakSet()
 
 
@@ -24,6 +29,7 @@ class Controllable(Protocol):
     async def start_auto_reply(self) -> str: ...
     async def stop_auto_reply(self) -> str: ...
     def auto_reply_status(self) -> str: ...
+    async def reset_conversations(self, chat_id: str) -> str: ...
 
 
 def register_live(adapter: Controllable) -> None:
@@ -34,13 +40,33 @@ def unregister_live(adapter: Controllable) -> None:
     _LIVE.discard(adapter)
 
 
+def conversation_list(chats: Mapping[str, list[Any]]) -> str:
+    """``/lark-user reset`` without a chat id: the chats with live conversations, latest first."""
+    if not chats:
+        return "当前没有进行中的会话。"
+
+    def last(entries: list[Any]) -> float:
+        return max(e.updated_at.timestamp() for e in entries)
+
+    lines = ["进行中的会话（最近活动在前）："]
+    for chat_id, entries in sorted(chats.items(), key=lambda item: -last(item[1])):
+        origin = entries[0].origin
+        group = origin.chat_type == "group"
+        name = (origin.chat_name if group else origin.user_name) or "未知"
+        when = time.strftime("%m-%d %H:%M", time.localtime(last(entries)))
+        lines.append(f"• {'群' if group else '私聊'}「{name}」 {chat_id}：{len(entries)} 个会话，最近活动 {when}")
+    lines.append("重置某个私聊或群的全部会话：/lark-user reset <会话 ID>")
+    return "\n".join(lines)
+
+
 def _profile_of(source: Any) -> Optional[str]:
     return getattr(source, "profile", None) if source is not None else None
 
 
 async def lark_user_command(raw_args: str, source: Any = None) -> str:
-    verb = (raw_args or "").strip().lower() or "status"
-    if verb not in {"start", "stop", "status"}:
+    verb, _, arg = (raw_args or "").strip().partition(" ")
+    verb = verb.lower() or "status"
+    if verb not in {"start", "stop", "status", "reset"}:
         return USAGE
     adapter = next((a for a in list(_LIVE) if a.serves_profile(_profile_of(source))), None)
     if adapter is None:
@@ -52,4 +78,6 @@ async def lark_user_command(raw_args: str, source: Any = None) -> str:
         return await adapter.start_auto_reply()
     if verb == "stop":
         return await adapter.stop_auto_reply()
+    if verb == "reset":
+        return await adapter.reset_conversations(arg.strip())
     return adapter.auto_reply_status()

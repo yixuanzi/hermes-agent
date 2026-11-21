@@ -60,6 +60,8 @@ platform is connected but idle.
 | `/lark-user start` | Starts polling. Whatever is already there, including messages that came in while it was off, is history: only messages that arrive afterwards are answered |
 | `/lark-user stop` | Stops polling, interrupts every turn in flight and drops queued input. While off nothing runs and nothing is produced: no reply, no review draft |
 | `/lark-user status` | Shows on/off, since when, the polled sources, the reply mode and pending drafts |
+| `/lark-user reset` | Lists the DMs and groups with live conversations: name, chat id (`oc_…`), how many, last activity |
+| `/lark-user reset <chat_id>` | Ends every live conversation of that DM or group, whatever scope cut it (per user, per topic, shared, or left over from an earlier scope). A turn still running in one is interrupted, and its stop notice is not sent to Lark. The chat's next message starts a fresh session, exactly as after an idle reset. Chat ids are case-sensitive |
 
 The switch lives in memory: every gateway start begins **off**. Only the user the plugin speaks
 for may flip it: a local session (CLI / TUI / desktop) or a Feishu/Lark sender with that user's
@@ -67,6 +69,8 @@ union_id or open_id; anyone else is refused. Run it in a session served by the g
 `lark_user` (a standalone `hermes` CLI process does not host it); it acts on the caller's profile.
 Pending review drafts survive a stop and can still be approved or rejected; revising needs the
 agent, so it waits until auto-reply is on again.
+A reset leaves pending drafts alone; revising one afterwards runs in the new session, with the
+previous draft and your notes but not the conversation before the reset.
 
 ## How replies are released (review mode)
 

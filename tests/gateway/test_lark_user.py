@@ -24,6 +24,11 @@ FAKE_CLI = r'''#!{python}
 import json, os, sys
 state_path = os.environ["FAKE_LARK_STATE"]
 state = json.load(open(state_path))
+def save():  # whole-file replace: concurrent calls (two poll loops) must never interleave their writes
+    tmp = "%s.%d" % (state_path, os.getpid())
+    with open(tmp, "w") as fh:
+        json.dump(state, fh)
+    os.replace(tmp, state_path)
 args = sys.argv[1:]
 if args[:1] == ["--profile"]:
     args = args[2:]
@@ -32,7 +37,7 @@ state.setdefault("calls", []).append({{"args": args, "stdin": stdin,
                                        "env_app": os.environ.get("LARKSUITE_CLI_APP_ID", ""),
                                        "env_has_secret": bool(os.environ.get("LARKSUITE_CLI_APP_SECRET"))}})
 def out(data=None, error=None):
-    json.dump(state, open(state_path, "w"))
+    save()
     payload = {{"ok": error is None, "data": data or {{}}}}
     if error:
         payload["error"] = error
@@ -40,7 +45,7 @@ def out(data=None, error=None):
     sys.exit(0)
 fail = state.get("fail", {{}})
 if args == ["config", "show"]:
-    json.dump(state, open(state_path, "w"))
+    save()
     print(json.dumps({{"workspace": "hermes", "profile": "cli_user_app", "appId": "cli_user_app", "brand": "lark"}}))
     sys.exit(0)
 if args[:3] == ["api", "GET", "/open-apis/authen/v1/user_info"]:
@@ -59,7 +64,7 @@ if args[:3] == ["api", "POST", "/open-apis/interactive/v1/card/update"]:
         out(error=fail["card_update"])
     out({{}})
 if args[:3] == ["event", "consume", "card.action.trigger"]:
-    json.dump(state, open(state_path, "w"))
+    save()
     for event in state.get("card_events", []):
         print(json.dumps(event))
     sys.exit(0)
@@ -114,7 +119,9 @@ class FakeLark:
     def write(self, **changes) -> None:
         state = self.read() if self.state_path.exists() else {}
         state.update(changes)
-        self.state_path.write_text(json.dumps(state))
+        tmp = self.state_path.with_suffix(".test")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(self.state_path)
 
     def sends(self) -> list[dict]:
         return [c for c in self.read().get("calls", []) if c["args"][1:2] in (["+messages-reply"], ["+messages-send"])]
@@ -349,12 +356,12 @@ async def _with_store(lark, tmp_path, **extra):
             entry.updated_at = dt.datetime.now() - dt.timedelta(seconds=age_after)
         return entries
 
-    return events, turn
+    return adapter, events, turn
 
 
 @pytest.mark.asyncio
 async def test_a_conversation_quiet_past_idle_reset_starts_afresh(lark, tmp_path):
-    _, turn = await _with_store(lark, tmp_path, session={"idle_reset": "2h"})
+    _, _, turn = await _with_store(lark, tmp_path, session={"idle_reset": "2h"})
     (first,) = await turn("dm", msg("om_1"))
     (soon,) = await turn("dm", msg("om_2"), age_after=3 * 3600)  # then nobody writes for 3h
     assert soon.session_id == first.session_id
@@ -366,8 +373,8 @@ async def test_a_conversation_quiet_past_idle_reset_starts_afresh(lark, tmp_path
 
 @pytest.mark.asyncio
 async def test_idle_reset_zero_keeps_a_chat_going_and_overrides_per_chat(lark, tmp_path):
-    _, turn = await _with_store(lark, tmp_path, session={"idle_reset": "1h"},
-                                chats={"oc_dm2": {"session": {"idle_reset": 0}}})
+    _, _, turn = await _with_store(lark, tmp_path, session={"idle_reset": "1h"},
+                                   chats={"oc_dm2": {"session": {"idle_reset": 0}}})
     kept, ended = await turn("dm", msg("om_1", chat="oc_dm2", sender="ou_bob"), msg("om_2"), age_after=86400)
     kept2, ended2 = await turn("dm", msg("om_3", chat="oc_dm2", sender="ou_bob"), msg("om_4"))
     assert kept2.session_id == kept.session_id
@@ -377,8 +384,8 @@ async def test_idle_reset_zero_keeps_a_chat_going_and_overrides_per_chat(lark, t
 @pytest.mark.asyncio
 async def test_a_new_conversation_gets_group_context_again(lark, tmp_path):
     lark.write(chat_history=[_history("om_h1", "earlier")])
-    events, turn = await _with_store(lark, tmp_path, session={"idle_reset": "1h"},
-                                     context={"enabled": True, "when": "new_session"})
+    _, events, turn = await _with_store(lark, tmp_path, session={"idle_reset": "1h"},
+                                        context={"enabled": True, "when": "new_session"})
     await turn("mention", _group("om_1"))
     await turn("mention", _group("om_2"), age_after=7200)
     await turn("mention", _group("om_3"))
@@ -920,6 +927,114 @@ async def test_only_the_user_it_speaks_for_can_flip_the_switch(lark):
     finally:
         await adapter.disconnect()
 
+
+
+# ── on-demand reset (/lark-user reset) ──────────────────────────────────────
+
+@pytest.fixture
+def live():
+    """Registers adapters for /lark-user the way connect() does, and unregisters them afterwards."""
+    from plugins.platforms.lark_user.lark_user_control import register_live, unregister_live
+    adapters = []
+
+    def add(adapter):
+        register_live(adapter)
+        adapters.append(adapter)
+
+    yield add
+    for adapter in adapters:
+        unregister_live(adapter)
+
+
+def _conversation(adapter, chat, *, chat_type="group", user="ou_alice", thread=None, shared=False):
+    import dataclasses
+    source = adapter.build_source(chat_id=chat, chat_name="Team", chat_type=chat_type, user_id=user,
+                                  user_name="Alice", thread_id=thread)
+    return dataclasses.replace(source, shared_session=True) if shared else source
+
+
+@pytest.mark.asyncio
+async def test_reset_ends_every_live_conversation_of_one_chat_whatever_its_scope(lark, tmp_path, live):
+    from plugins.platforms.lark_user.lark_user_control import lark_user_command
+    adapter, _, _ = await _with_store(lark, tmp_path)
+    store = adapter._session_store
+    group = [_conversation(adapter, "oc_Team1"), _conversation(adapter, "oc_Team1", user="ou_bob"),
+             _conversation(adapter, "oc_Team1", thread="om_root"), _conversation(adapter, "oc_Team1", shared=True)]
+    others = [_conversation(adapter, "oc_other"), _conversation(adapter, "oc_dm1", chat_type="dm")]
+    before = [store.get_or_create_session(s) for s in group + others]
+    assert len({e.session_key for e in before}) == 6
+    live(adapter)
+
+    reply = await lark_user_command("reset oc_Team1", source=_source())
+    after = [store.get_or_create_session(s) for s in group + others]
+    assert "4 个会话" in reply
+    assert [a.session_id != b.session_id for a, b in zip(after, before)] == [True] * 4 + [False] * 2
+    assert "没有进行中的会话" in await lark_user_command("reset oc_nothing", source=_source())
+
+
+@pytest.mark.asyncio
+async def test_reset_without_a_chat_lists_the_chats_with_live_conversations(lark, tmp_path, live):
+    from plugins.platforms.lark_user.lark_user_control import lark_user_command
+    adapter, _, _ = await _with_store(lark, tmp_path)
+    for source in (_conversation(adapter, "oc_g1"), _conversation(adapter, "oc_g1", user="ou_bob"),
+                   _conversation(adapter, "oc_dm1", chat_type="dm")):
+        adapter._session_store.get_or_create_session(source)
+    live(adapter)
+    listing = await lark_user_command("reset", source=_source())
+    assert "群「Team」 oc_g1：2 个会话" in listing and "私聊「Alice」 oc_dm1：1 个会话" in listing
+    await lark_user_command("reset oc_g1", source=_source())
+    assert "oc_g1" not in await lark_user_command("reset", source=_source())
+
+
+class _AnsweringRunner(_BlockingRunner):
+    """Like the gateway runner, answers the commands it handles: those answers must never reach Lark."""
+
+    async def handle(self, event):
+        if event.text.startswith("/"):
+            await super().handle(event)
+            return "⏹ Stopped."
+        return await super().handle(event)
+
+
+async def _live_turn_adapter(lark, tmp_path):
+    from gateway.config import GatewayConfig
+    from gateway.session import SessionStore
+    adapter, _ = make_adapter(lark, capture=False)
+    runner = _AnsweringRunner()
+    adapter.set_message_handler(runner.handle)
+    adapter.set_session_store(SessionStore(tmp_path / "sessions", GatewayConfig()))
+    assert await adapter._open()
+    adapter._active = True
+    await adapter.poll_once("dm")
+    return adapter, runner
+
+
+@pytest.mark.asyncio
+async def test_reset_interrupts_a_running_turn_and_its_stop_answer_stays_home(lark, tmp_path):
+    adapter, runner = await _live_turn_adapter(lark, tmp_path)
+    lark.write(search_p2p=[msg("om_q")])
+    await adapter.poll_once("dm")
+    await asyncio.wait_for(runner.started.wait(), 5)
+    (source,) = adapter._inflight.values()
+    adapter._session_store.get_or_create_session(source)  # the runner opened it when the turn began
+
+    reply = await adapter.reset_conversations("oc_dm1")
+    await asyncio.wait_for(runner.cancelled.wait(), 5)
+    assert "中断了 1 个" in reply and "/stop" in runner.seen
+    assert lark.sends() == []
+
+
+@pytest.mark.asyncio
+async def test_a_stop_that_finds_the_turn_already_over_answers_nobody(lark, tmp_path):
+    from tests.waiting import async_wait_until
+    adapter, runner = await _live_turn_adapter(lark, tmp_path)
+    source = _conversation(adapter, "oc_dm1", chat_type="dm")
+    key = adapter._session_store.get_or_create_session(source).session_key
+    adapter._inflight[key] = source  # the turn ended between the reset's look and its /stop
+
+    await adapter.reset_conversations("oc_dm1")
+    await async_wait_until(lambda: "/stop" in runner.seen and not adapter._active_sessions, what="/stop handled")
+    assert lark.sends() == []
 
 def test_lark_user_command_is_registered_when_the_platform_loads():
     from gateway.platform_registry import platform_registry
