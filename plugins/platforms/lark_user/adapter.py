@@ -598,6 +598,16 @@ def _enabled(config) -> bool:
     return bool(getattr(config, "enabled", False))
 
 
+def _never_auto_enabled(config) -> bool:
+    """lark_user has no credentials to find, so nothing may switch it on by itself: it replies under
+    the user's own name, and only an explicit ``platforms.lark_user.enabled: true`` opts in.
+
+    ``is_connected`` is probed on a transient ``enabled=True`` view (``gateway.config_env`` start-up
+    sweep, ``hermes gateway setup``), so ``_enabled`` here would be True on every machine that has
+    ``lark-cli`` on PATH."""
+    return False
+
+
 def register(ctx):
     ctx.register_command(
         "lark-user", lark_user_command,
@@ -611,7 +621,7 @@ def register(ctx):
         docs_url="https://hermes-agent.nousresearch.com/docs/user-guide/messaging/lark-user",
         adapter_factory=LarkUserAdapter,
         check_fn=check_requirements,
-        is_connected=_enabled,
+        is_connected=_never_auto_enabled,
         config_connected_fn=_enabled,
         install_hint="Install lark-cli, then log in as yourself for Hermes: `HERMES_HOME=<home> lark-cli auth login`",
         max_message_length=0,  # the adapter chunks itself so the prefix/suffix land once

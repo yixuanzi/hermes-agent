@@ -1111,6 +1111,27 @@ def test_default_toolset_has_no_terminal():
     assert "terminal" not in enabled and "file" in enabled
 
 
+def test_platform_is_not_enabled_without_an_explicit_opt_in(monkeypatch):
+    from gateway.config import GatewayConfig, Platform
+    from gateway.config_env import _enable_plugin_platform
+    from gateway.platform_registry import platform_registry
+    from hermes_cli.plugins import discover_plugins
+    discover_plugins()
+    entry = platform_registry.get("lark_user")
+    monkeypatch.setattr(entry, "check_fn", lambda: True)  # lark-cli is installed
+
+    config = GatewayConfig()
+    _enable_plugin_platform(config, entry)
+    assert Platform("lark_user") not in config.platforms
+
+    config = GatewayConfig(platforms={Platform("lark_user"): PlatformConfig.from_dict({"dm_policy": "open"})})
+    _enable_plugin_platform(config, entry)
+    assert not config.platforms[Platform("lark_user")].enabled
+
+    config = GatewayConfig(platforms={Platform("lark_user"): PlatformConfig.from_dict({"enabled": True})})
+    assert Platform("lark_user") in config.get_connected_platforms()
+
+
 def test_open_policy_needs_allow_all_opt_in(monkeypatch):
     from gateway.config import GatewayConfig, Platform
     from gateway.run import _own_policy_open_startup_violation
