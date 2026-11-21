@@ -16,7 +16,8 @@ from aegis.backend.models import RbacRule, RbacRuleRole
 
 
 RBAC_RULES_ENV = "AEGIS_RBAC_RULES_PATH"
-DEFAULT_RBAC_RULES_PATH = Path("plugins/rbac-guard/role_rules.json")
+RBAC_RULES_FILENAME = "role_rules.json"
+RBAC_RULES_TEMPLATE_PATH = Path("plugins/rbac-guard/role_rules.json.example")
 RBAC_ROLES: tuple[RbacRuleRole, ...] = ("admin", "operator", "user")
 _LEGACY_UNKNOWN_ROLE = "unknown"
 RBAC_RULE_FIELDS = frozenset(
@@ -31,17 +32,34 @@ class RbacRuleConfigError(ValueError):
 
 
 def resolve_rbac_rules_path() -> Path:
-    """Resolve the configured rules path without depending on HERMES_HOME."""
-    configured = (os.environ.get(RBAC_RULES_ENV) or "").strip()
-    path = Path(configured) if configured else DEFAULT_RBAC_RULES_PATH
-    if path.is_absolute():
-        return path
+    """``$HERMES_HOME/role_rules.json`` (the file the rbac-guard plugin reads), unless
+    ``AEGIS_RBAC_RULES_PATH`` names another one; a relative value is taken from HERMES_HOME."""
+    from hermes_constants import get_hermes_home
 
-    # Relative RBAC paths resolve against the install root, so they stay stable even when
-    # Aegis changes cwd to HERMES_HOME.
+    configured = (os.environ.get(RBAC_RULES_ENV) or "").strip()
+    if not configured:
+        return get_hermes_home() / RBAC_RULES_FILENAME
+    path = Path(configured).expanduser()
+    return path if path.is_absolute() else get_hermes_home() / path
+
+
+def ensure_rbac_rules_file(path: Path) -> None:
+    """Seed ``path`` from the rbac-guard example on first start; never touch an existing file."""
+    if path.exists():
+        return
     from hermes_cli._startup_fast import project_root_str
 
-    return Path(project_root_str()) / path
+    template = Path(project_root_str()) / RBAC_RULES_TEMPLATE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # "x" so a concurrent starter (plugin + Aegis) cannot overwrite a file the other just wrote.
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(template.read_text(encoding="utf-8"))
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        path.unlink(missing_ok=True)
+        raise RbacRuleConfigError("RBAC rules file could not be created from the template.") from exc
 
 
 class RbacRuleService:
@@ -49,6 +67,8 @@ class RbacRuleService:
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = (path or resolve_rbac_rules_path()).resolve()
+        if path is None:
+            ensure_rbac_rules_file(self.path)
 
     def list_rules(self) -> dict[RbacRuleRole, RbacRule]:
         with _RULES_LOCK:

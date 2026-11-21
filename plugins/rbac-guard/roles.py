@@ -54,14 +54,34 @@ _ROLE_RULES_ENV = "AEGIS_RBAC_RULES_PATH"
 _LEGACY_UNKNOWN_ROLE = "unknown"
 
 
+_ROLE_RULES_FILENAME = "role_rules.json"
+_ROLE_RULES_TEMPLATE = Path(__file__).with_name(f"{_ROLE_RULES_FILENAME}.example")
+
+
 def _resolve_role_rules_path() -> Path:
-    """``role_rules.json`` beside this file, unless ``AEGIS_RBAC_RULES_PATH`` names another one
+    """``$HERMES_HOME/role_rules.json``, unless ``AEGIS_RBAC_RULES_PATH`` names another one
     (a relative value is taken from the active profile's HERMES_HOME)."""
     configured = (os.environ.get(_ROLE_RULES_ENV) or "").strip()
     if not configured:
-        return Path(__file__).with_name("role_rules.json")
+        return get_hermes_home() / _ROLE_RULES_FILENAME
     path = Path(configured).expanduser()
     return path if path.is_absolute() else get_hermes_home() / path
+
+
+def _ensure_role_rules_file(path: Path) -> None:
+    """Seed ``path`` from the shipped example on first start; never touch an existing file."""
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # "x" so a concurrent starter (plugin + Aegis) cannot overwrite a file the other just wrote.
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(_ROLE_RULES_TEMPLATE.read_text(encoding="utf-8"))
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        path.unlink(missing_ok=True)
+        raise RoleRulesConfigError(f"Unable to create {path.name} from template: {exc}") from exc
 
 
 _ROLE_RULES_PATH = _resolve_role_rules_path()
@@ -215,7 +235,8 @@ def _write_role_rules_atomically(path: Path, payload: dict) -> None:
 
 
 # Loaded once at plugin import/startup. User role assignments remain dynamic in SQLite.
-ROLE_RULES, DANGEROUS_PATTERN = _load_role_rules_config()
+_ensure_role_rules_file(_ROLE_RULES_PATH)
+ROLE_RULES, DANGEROUS_PATTERN = _load_role_rules_config(_ROLE_RULES_PATH)
 
 
 # ------------------------------------------------------------------ 工具函数 ----

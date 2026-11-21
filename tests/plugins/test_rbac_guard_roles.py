@@ -16,8 +16,8 @@ PLUGIN_INIT = PLUGIN_ROLES.with_name("__init__.py")
 
 @pytest.fixture(autouse=True)
 def _shipped_role_rules(monkeypatch: pytest.MonkeyPatch) -> None:
-    # role_rules.json is deployment config and gitignored; load the shipped example instead.
-    monkeypatch.setenv("AEGIS_RBAC_RULES_PATH", str(PLUGIN_ROLES.with_name("role_rules.json.example")))
+    # The rules file is seeded from the shipped example into the test's HERMES_HOME.
+    monkeypatch.delenv("AEGIS_RBAC_RULES_PATH", raising=False)
 
 
 @pytest.fixture
@@ -32,6 +32,22 @@ def rbac_roles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     spec.loader.exec_module(module)
     yield module
     module.close_role_db()
+
+
+def test_role_rules_file_is_seeded_into_hermes_home_once(
+    rbac_roles: ModuleType, tmp_path: Path
+) -> None:
+    rules_path = tmp_path / "hermes" / "role_rules.json"
+    assert rbac_roles._ROLE_RULES_PATH == rules_path
+    template = PLUGIN_ROLES.with_name("role_rules.json.example")
+    assert rules_path.read_text(encoding="utf-8") == template.read_text(encoding="utf-8")
+
+    rules_path.write_text(
+        json.dumps({**json.loads(template.read_text(encoding="utf-8")), "dangerous_pattern": "customised"}),
+        encoding="utf-8",
+    )
+    rbac_roles._ensure_role_rules_file(rules_path)
+    assert json.loads(rules_path.read_text(encoding="utf-8"))["dangerous_pattern"] == "customised"
 
 
 def test_role_lookup_reads_aegis_user_roles_dynamically(rbac_roles: ModuleType) -> None:

@@ -24,10 +24,8 @@ def rbac_plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-    # role_rules.json is deployment config and gitignored; load the shipped example instead.
-    monkeypatch.setenv(
-        "AEGIS_RBAC_RULES_PATH", str(PLUGIN_INIT.with_name("role_rules.json.example"))
-    )
+    # The rules file is seeded from the shipped example into the test's HERMES_HOME.
+    monkeypatch.delenv("AEGIS_RBAC_RULES_PATH", raising=False)
     module_name = f"rbac_guard_relay_test_{id(tmp_path)}"
     spec = importlib.util.spec_from_file_location(
         module_name, PLUGIN_INIT, submodule_search_locations=[str(PLUGIN_INIT.parent)]

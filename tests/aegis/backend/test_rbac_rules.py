@@ -39,25 +39,42 @@ def configured_rules_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pa
     return path
 
 
-def test_rules_path_defaults_to_hermes_root_and_supports_relative_and_absolute_paths(
+def test_rules_path_defaults_to_hermes_home_and_supports_relative_and_absolute_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from aegis.backend.services.rbac_rule_service import (
-        DEFAULT_RBAC_RULES_PATH,
-        resolve_rbac_rules_path,
-    )
+    from aegis.backend.services.rbac_rule_service import resolve_rbac_rules_path
+
+    hermes_home = tmp_path / "hermes"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
     monkeypatch.delenv("AEGIS_RBAC_RULES_PATH", raising=False)
-    expected_default = Path(__file__).resolve().parents[3] / DEFAULT_RBAC_RULES_PATH
-    assert resolve_rbac_rules_path() == expected_default
+    assert resolve_rbac_rules_path() == hermes_home / "role_rules.json"
 
     monkeypatch.setenv("AEGIS_RBAC_RULES_PATH", "custom/rules.json")
-    assert resolve_rbac_rules_path() == expected_default.parents[2] / "custom/rules.json"
+    assert resolve_rbac_rules_path() == hermes_home / "custom/rules.json"
 
     absolute = tmp_path / "absolute-rules.json"
     monkeypatch.setenv("AEGIS_RBAC_RULES_PATH", str(absolute))
     assert resolve_rbac_rules_path() == absolute
+
+
+def test_missing_default_rules_file_is_seeded_from_the_plugin_example(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from aegis.backend.services.rbac_rule_service import RbacRuleService
+
+    hermes_home = tmp_path / "hermes"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("AEGIS_RBAC_RULES_PATH", raising=False)
+
+    service = RbacRuleService()
+
+    template = Path(__file__).resolve().parents[3] / "plugins/rbac-guard/role_rules.json.example"
+    assert service.path == (hermes_home / "role_rules.json").resolve()
+    assert service.path.read_text(encoding="utf-8") == template.read_text(encoding="utf-8")
+    assert set(service.list_rules()) == {"admin", "operator", "user"}
 
 
 def test_admin_can_read_and_update_one_role_without_overwriting_the_others(
