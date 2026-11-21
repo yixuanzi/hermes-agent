@@ -4,7 +4,7 @@ This file records project-level working memory for this repository.
 
 ## Aegis Change-Intent Summary Rule
 
-- Scope: When a task modifies non-test code outside `aisoc/`、`workagent/`、`aegis/`、`plugins/ext-tools/` and `plugins/rbac-guard/`, maintain the detailed final change intent summary in `hermes_change_log_by_aegis.md`.
+- Scope: When a task modifies non-test code outside `aisoc/`、`workagent/`、`aegis/`、`plugins/ext-tools/` and `plugins/rbac-guard/` and `plugins/platforms/lark_user`, maintain the detailed final change intent summary in `hermes_change_log_by_aegis.md`.
 - Exclusions: Changes inside `aisoc/`,Changes inside `workagent/`, changes inside `aegis/`, changes inside `plugins/ext-tools/`, changes inside `plugins/rbac-guard/`, and test-only changes do not require an entry in `hermes_change_log_by_aegis.md`.
 - Recording unit: The summary is organized per file, using the target file as the unit of record.
 - Update behavior: If a file already has a relevant `Feature` / `Intent` pair, edit that pair in place to reflect the latest final intent instead of appending a new task log entry.
