@@ -17,8 +17,9 @@ review) and **Reject** (no reply). Nothing goes to the other person until you ap
 
 - `lark-cli` on `PATH`, logged in as you **for Hermes**: `HERMES_HOME=~/.hermes lark-cli auth login`,
   then check `HERMES_HOME=~/.hermes lark-cli whoami --as user` shows you. lark-cli keeps a separate
-  `hermes` workspace (`~/.lark-cli/hermes/`) that it uses whenever a non-empty `HERMES_HOME` is in
-  the environment, as it always is inside the gateway; a plain `lark-cli auth login` from a terminal
+  `hermes` workspace (`~/.lark-cli/hermes/`) that it uses whenever a Hermes variable
+  (`HERMES_HOME`, `HERMES_QUIET`, `HERMES_SESSION_KEY`, `HERMES_EXEC_ASK`) is in the environment,
+  as `HERMES_HOME` always is inside the gateway; a plain `lark-cli auth login` from a terminal
   lands in the default `local` workspace, which the plugin never reads. The two workspaces can hold
   different apps, so the same person shows a different appId and open_id in each: look up open_ids
   for `allow_from` with `HERMES_HOME` set too. The gateway log records the workspace and app the
@@ -49,8 +50,23 @@ platforms:
     group_allow_from: [oc_zzz]         # groups where an @mention gets a reply (chat_ids)
 ```
 
-Restart the gateway. Your existing messages are treated as history: only messages that arrive
-after the first poll are answered.
+Restart the gateway, then turn auto-reply on with `/lark-user start` (below). Until then the
+platform is connected but idle.
+
+## Turning auto-reply on and off
+
+| Command | Effect |
+|---|---|
+| `/lark-user start` | Starts polling. Whatever is already there, including messages that came in while it was off, is history: only messages that arrive afterwards are answered |
+| `/lark-user stop` | Stops polling, interrupts every turn in flight and drops queued input. While off nothing runs and nothing is produced: no reply, no review draft |
+| `/lark-user status` | Shows on/off, since when, the polled sources, the reply mode and pending drafts |
+
+The switch lives in memory: every gateway start begins **off**. Only the user the plugin speaks
+for may flip it: a local session (CLI / TUI / desktop) or a Feishu/Lark sender with that user's
+union_id or open_id; anyone else is refused. Run it in a session served by the gateway that runs
+`lark_user` (a standalone `hermes` CLI process does not host it); it acts on the caller's profile.
+Pending review drafts survive a stop and can still be approved or rejected; revising needs the
+agent, so it waits until auto-reply is on again.
 
 ## How replies are released (review mode)
 
@@ -158,7 +174,7 @@ platforms:
 | DM `per_message` | message (no memory between messages) |
 | group `per_chat` | group, shared by everyone who mentions you |
 | group `per_chat_user` | person in each group (follows the gateway's `group_sessions_per_user`, on by default) |
-| group `per_thread` | topic; a mention outside a topic starts its own |
+| group `per_thread` | root message and the topic under it: a mention in the main chat, and later mentions in the topic that grows under that message, share one session (the topic's root is looked up once per topic). Quote replies outside a topic count as new roots |
 | group `per_message` | mention |
 
 ### Group context

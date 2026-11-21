@@ -88,7 +88,8 @@ class CardPresenter:
 
 _TEXT_STATES = {"sent": "✅ #{n} 已发送", "rejected": "🚫 #{n} 已拒绝，不回复", "expired": "⌛ #{n} 已过期，未回复",
                 "revising": "✏️ #{n} 修订中，改好后会发来新的待审核回复", "failed": "❌ #{n} 发送失败：{note}",
-                "need_note": "`/revise {n} 修改意见`：缺少修改意见"}
+                "need_note": "`/revise {n} 修改意见`：缺少修改意见",
+                "paused": "自动回复已关闭，#{n} 暂不能修订：先发送 /lark-user start 开启"}
 
 
 class TextPresenter:
@@ -131,12 +132,14 @@ class TextPresenter:
 
 
 class ReviewDesk:
-    def __init__(self, *, store: CursorStore, presenter: Presenter, ttl: float, deliver: Deliver, revise: Revise):
+    def __init__(self, *, store: CursorStore, presenter: Presenter, ttl: float, deliver: Deliver, revise: Revise,
+                 revising_allowed: Callable[[], bool]):
         self._store = store
         self.presenter = presenter
         self._ttl = ttl
         self._deliver = deliver
         self._revise = revise
+        self._revising_allowed = revising_allowed  # a revision runs the agent again: only while switched on
 
     @property
     def chat_id(self) -> str:
@@ -176,6 +179,9 @@ class ReviewDesk:
 
     async def revise(self, number: str, notes: str, token: str = "") -> None:
         draft = self._store.drafts[number]
+        if not self._revising_allowed():
+            await self.presenter.settle(number, draft, "paused", token=token)
+            return
         if not notes.strip():
             await self.presenter.settle(number, draft, "need_note", token=token)
             return

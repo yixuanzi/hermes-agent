@@ -15,7 +15,7 @@
 
 1. [工作原理](#1-工作原理)
 2. [前置条件](#2-前置条件)
-3. [快速开始](#3-快速开始)
+3. [快速开始](#3-快速开始)（含 [开启 / 关闭自动回复](#31-开启--关闭自动回复lark-user)）
 4. [审核模式怎么用](#4-审核模式怎么用)
 5. [配置项详解](#5-配置项详解)
 6. [常用配置示例](#6-常用配置示例)
@@ -44,11 +44,12 @@ lark-cli 搜索 ──► 过滤（自己/bot/@所有人/白名单/过期/限流
    🚫 拒绝 → 不回复
 ```
 
+- **默认关闭，手动开启**：gateway 每次启动后自动回复都处于**关闭**状态：不拉取消息、不执行任务、不产生任何回复。需要你发送 `/lark-user start` 才开始工作，`/lark-user stop` 随时关闭（见 3.1）。开关只保存在内存里，gateway 重启后又回到关闭。
 - **只发最终答案**：agent 执行过程中的工具进度、中间说明、心跳、出错提示都不会发给对方，只有这一轮的最终答案会发出（审核模式下也只生成一条草稿）。
 - **消息来源**：
   - 私聊：`lark-cli im +messages-search --chat-type p2p`
   - @我：`lark-cli im +messages-search --is-at-me --chat-type group`，再在本地按消息的 @ 列表确认确实 @了你本人，因为这个接口会把 @所有人 的消息也一起返回。
-- **首次启动**：已有的消息一律视为历史，只回复之后新来的消息。
+- **每次开启**：开启那一刻已有的消息（包括关闭期间收到的）一律视为历史，只回复之后新来的消息。
 - **状态文件**：`<HERMES_HOME>/lark_user/<你的open_id>.json`，保存已处理的消息、轮询进度和待审核草稿。重启后不会重复回复，也不会丢失草稿。
 - **延迟**：Lark 搜索索引约有 15 秒延迟，按默认 15 秒的轮询周期，对方发消息后大约 15–30 秒开始处理。
 
@@ -67,11 +68,12 @@ lark-cli 搜索 ──► 过滤（自己/bot/@所有人/白名单/过期/限流
 
    > **为什么要带 `HERMES_HOME`：lark-cli 的工作区机制**
    >
-   > lark-cli 会识别自己是否运行在 AI agent 里：环境变量中只要有**非空的** `HERMES_HOME`，它就使用一套独立的 **`hermes` 工作区**（`~/.lark-cli/hermes/config.json`），否则使用默认的 **`local` 工作区**（`~/.lark-cli/config.json`）。两个工作区各自有各自的应用、profile 和登录状态，值是什么无所谓，有就切换。
+   > lark-cli 会识别自己是否运行在 AI agent 里：环境变量中只要有 Hermes 的变量（实测 `HERMES_HOME`、`HERMES_QUIET`、`HERMES_SESSION_KEY`、`HERMES_EXEC_ASK` 任一非空即可），它就使用一套独立的 **`hermes` 工作区**（`~/.lark-cli/hermes/config.json`），否则使用默认的 **`local` 工作区**（`~/.lark-cli/config.json`）。两个工作区各自有各自的应用、profile 和登录状态；变量的值是什么无所谓，有就切换。
    >
    > Hermes gateway 进程里一定有 `HERMES_HOME`，所以插件调用的 lark-cli **永远使用 `hermes` 工作区**；而你在普通终端里直接运行 `lark-cli`，用的是 `local` 工作区。后果是：
    > - 在普通终端执行 `lark-cli auth login`，登录的是 `local` 工作区，**插件用不上**；
    > - 两个工作区可能绑定不同的应用，你会在终端和 Hermes 里看到不同的 appId 和 open_id（同一个人在不同应用下的 open_id 不同）。
+   > - 插件读到的每条消息里，发送者的 open_id（`sender.id`）属于 `hermes` 工作区登录的那个应用。`allow_from` 必须填这个应用下的 open_id。
    >
    > 所以本文所有 lark-cli 命令都写成 `HERMES_HOME=~/.hermes lark-cli …`，这样看到的就是插件实际使用的身份。插件启动时也会在日志里记录所用的工作区和应用：`lark_user: lark-cli workspace=hermes profile=… app=cli_…`。
 
@@ -125,7 +127,10 @@ hermes gateway restart        # 或 hermes gateway run
 hermes gateway status         # 确认 lark_user 已连接
 ```
 
+**最后，开启自动回复**：在任意一个连到这个 gateway 的会话里，以你本人身份发送 `/lark-user start`（见 3.1）。不执行这一步，插件虽然已连接，但不会拉取消息，也不会回复。
+
 默认行为如下：
+- 自动回复默认**关闭**，每次 gateway 启动后都需要 `/lark-user start`。
 - 审核模式：草稿发到你和自己的会话。
 - 回复格式为 Markdown 富文本（post），引用原消息回复。
 - 回复前缀为 `[🤖 AI 代答] `。
@@ -135,6 +140,20 @@ hermes gateway status         # 确认 lark_user 已连接
 > **怎么找 open_id / chat_id**（open_id 按应用区分，必须在 `hermes` 工作区下查，否则白名单对不上）
 > - 某人的 open_id：`HERMES_HOME=~/.hermes lark-cli contact +search-user --query "姓名" --as user`；也可以在日志里找（DEBUG 级别）。
 > - 群的 chat_id：`HERMES_HOME=~/.hermes lark-cli im +chat-search --query "群名" --as user`。
+
+### 3.1 开启 / 关闭自动回复（`/lark-user`）
+
+| 命令 | 效果 |
+|---|---|
+| `/lark-user start` | **开启**：开始轮询私聊和 @我。开启那一刻已有的消息（包括关闭期间收到的）都视为历史，不会补回复，只处理之后新来的消息。 |
+| `/lark-user stop` | **关闭**：停止轮询；中断所有正在执行的任务；丢弃排队中的消息。关闭期间不执行任何任务，不产生任何结果：不回复，也不生成审核草稿。 |
+| `/lark-user status`（或只发 `/lark-user`） | 查看当前状态：开 / 关、开启时间、轮询的来源、回复方式、待审核草稿数。 |
+
+- **状态只在内存里**：gateway 每次启动（包括重启、平台重连）后都是**关闭**的，需要重新 `/lark-user start`。
+- **谁能执行**：只有插件所代表的**你本人**。具体是以下三种之一：本机的本地会话（CLI、TUI、桌面端）；Feishu/Lark 上 union_id 与 lark-cli 登录用户相同的发送者（跨应用识别，比如你在 Aegis 机器人私聊里发命令）；open_id 相同的发送者。其他人（例如能和同一个机器人对话的同事）执行会被拒绝。
+- **在哪里执行**：命令在 gateway 进程里执行，要在连到这个 gateway 的会话里发，例如 Hermes 的飞书机器人私聊、TUI 或桌面端。在独立运行的 `hermes` CLI 进程里执行，会提示 lark_user 不在本进程运行。
+- **多 profile**：命令只作用于发命令的会话所属 profile 的 lark_user。
+- **关闭时已有的审核草稿**：仍然保留。你可以在关闭状态下对它们点“通过”或“拒绝”，这是你对已有结果的明确决定，不会触发 agent。但“修订”需要 agent 重新执行，关闭期间会被拒绝，卡片提示先开启。
 
 ---
 
@@ -166,6 +185,7 @@ hermes gateway status         # 确认 lark_user 已连接
 | 🚫 拒绝 | 这条消息不回复 | 灰色“🚫 已拒绝，不回复 #n”，按钮消失 |
 
 - 修订时输入框不能为空，否则卡片会提示“请先填写修改意见”，草稿保持待审核。
+- 自动回复关闭时（`/lark-user stop`）不能修订，卡片会提示先开启；“通过”和“拒绝”仍然可用。
 - 发送失败时，卡片变为红色“❌ 发送失败，可重试”并保留按钮，可以再点“通过”。
 - 修改意见只在对方的会话里作为“来自你本人的审核意见”交给 agent，不会发给对方。
 - 只有发在审核 bot 与你私聊里的、对应草稿自己的那张卡片上的点击才有效；已经处理过的卡片再点不会重复执行。
@@ -193,7 +213,11 @@ hermes gateway status         # 确认 lark_user 已连接
 
 ## 5. 配置项详解
 
-所有配置都在 `config.yaml` 的 `platforms.lark_user` 下。时长可以写成数字（秒）或带单位的字符串：`15`、`"15s"`、`"10m"`、`"24h"`、`"1d"`。
+所有配置都在 `config.yaml` 的 `platforms.lark_user` 下，下面表格里的配置项路径（如 `poll.interval`、`reply.prefix`、`chats.<chat_id>`）都是**相对于 `platforms.lark_user`** 的，例如 `poll.interval` 的完整路径是 `platforms.lark_user.poll.interval`。只有两处例外：工具集 `platform_toolsets`（5.10 节）写在 `config.yaml` 根节点；环境变量（5.11 节）写在 `~/.hermes/.env`。
+
+> 写错层级不会报错，只会被**静默忽略**。例如把 `chats:` 写在 `config.yaml` 根节点，按会话的覆盖全部不会生效。
+
+时长可以写成数字（秒）或带单位的字符串：`15`、`"15s"`、`"10m"`、`"24h"`、`"1d"`。
 
 ### 5.1 基础
 
@@ -255,8 +279,20 @@ hermes gateway status         # 确认 lark_user 已连接
 |---|---|---|
 | `per_chat` | 整个群（所有 @你 的人共享上下文） | 小团队群，大家围绕同一件事讨论 |
 | `per_chat_user` | 群里的每个人 | 默认值，不同人的问题互不干扰（依赖 gateway 的 `group_sessions_per_user`，默认开启） |
-| `per_thread` | 每个话题；不在话题里的 @ 各自独立 | 话题群 |
+| `per_thread` | 每条“根消息”及其下的话题（见下方说明） | 话题群；习惯开话题讨论的一般群 |
 | `per_message` | 每次 @ | 一问一答、不需要记忆 |
+
+**`per_thread` 的具体规则**：会话以“根消息”为准，根消息就是话题所挂的那条消息。
+
+| 场景 | 归入的会话 |
+|---|---|
+| 在群里直接发消息 @你（不在话题里） | 以这条消息为根的会话 |
+| 之后有人在这条消息下开话题，继续在话题里 @你 | **同一个会话**，上下文延续 |
+| 同一个话题里不同的人 @你 | 同一个会话（话题内默认不按人拆分，由 gateway 的 `thread_sessions_per_user` 控制） |
+| 另一条根消息或另一个话题里 @你 | 各自独立的会话 |
+| 一般群里的“引用回复”（不开话题） | 当作新的根消息，各自独立（lark-cli 的搜索结果不带“回复的是哪条消息”） |
+
+话题里的 @ 第一次出现时，插件会查一次这个话题的根消息（约 2 秒），之后缓存，同一话题不再重复查询。查询失败时退回按话题 ID 分会话：只是失去和根消息会话的衔接，不影响回复。
 
 会话 key 统一由 gateway 生成，因此多 profile 的命名空间、`/new` 和会话过期策略都照常生效。
 
@@ -325,7 +361,7 @@ hermes gateway status         # 确认 lark_user 已连接
 
 ### 5.9 按会话覆盖（`chats`）
 
-`chats.<chat_id>` 下可以覆盖以下配置，没写的项沿用全局配置：
+`platforms.lark_user.chats.<chat_id>` 下可以覆盖以下配置，没写的项沿用全局配置。**`chats` 必须写在 `platforms.lark_user` 下面**，写在 `config.yaml` 根节点会被忽略。
 
 | 可覆盖项 | 说明 |
 |---|---|
@@ -335,15 +371,22 @@ hermes gateway status         # 确认 lark_user 已连接
 | `context.*` | 这个群的上下文开关和参数 |
 
 ```yaml
-chats:
-  oc_team:                     # 团队群：按话题隔离，直接发送，带话题上下文
-    group_scope: per_thread
-    reply: { delivery: auto, format: card }
-    context: { enabled: true, scope: thread }
-  oc_noisy: { enabled: false } # 这个群一律不理
-  oc_boss_dm:                  # 和某人的私聊：一定要审核
-    reply: { delivery: review }
+platforms:
+  lark_user:
+    enabled: true
+    # ……全局配置……
+    reply: { delivery: review }  # 全局默认：审核
+    chats:                       # 与 reply、session 等同级，都在 platforms.lark_user 下
+      oc_team:                     # 团队群：按话题隔离，直接发送，带话题上下文
+        group_scope: per_thread
+        reply: { delivery: auto, format: card }
+        context: { enabled: true, scope: thread }
+      oc_noisy: { enabled: false } # 这个群一律不理
+      oc_boss_dm:                  # 和某人的私聊：一定要审核
+        reply: { delivery: review }
 ```
+
+`<chat_id>` 是会话 ID（`oc_…`），群聊和私聊都有。查群的 chat_id 见第 3 节；私聊的 chat_id 可以在 DEBUG 日志里找到，或者用 `HERMES_HOME=~/.hermes lark-cli im +chat-messages-list --as user --user-id <对方 open_id> --page-size 1` 返回结果里的 `chat_id` 字段。
 
 ### 5.10 工具集
 
@@ -457,6 +500,9 @@ platforms:
 | 显示 `config_invalid` | 配置有误，例如 `reply.prefix` 为空、枚举值拼错；具体原因见 gateway 日志。 |
 | 显示 `cli_missing` | 找不到 lark-cli，检查 `PATH` 或配置 `cli_bin`。 |
 | 启动报 "open policy without allow-all opt-in" | 设置了 `open` 策略但没有设置 `LARK_USER_ALLOW_ALL_USERS=true`。 |
+| 插件已连接，但完全不拉取、不回复 | 自动回复默认是关闭的。发送 `/lark-user status` 查看；gateway 重启后需要重新 `/lark-user start`。 |
+| 执行 `/lark-user` 提示“只有……本人可以使用” | 发命令的人不是 lark-cli（`hermes` 工作区）登录的用户。用本人账号发送，或在本机 TUI / 桌面端发送。 |
+| 执行 `/lark-user` 提示“没有在这个 gateway / profile 里运行” | 当前会话不在运行 lark_user 的 gateway 进程里（例如独立的 `hermes` CLI），或者会话属于另一个 profile，或者 `platforms.lark_user.enabled` 没开。 |
 | 有人发消息但没有回复 | 打开 DEBUG 日志后，每条被跳过的消息都会记录原因：`self` / `bot` / `not_mentioned` / `at_all` / `dm_policy` / `group_policy` / `external` / `stale` / `echo` / `chat_disabled` / `rate_limited`。 |
 | 回复慢 | 正常延迟是 15–30 秒（索引延迟 + 轮询周期）；群上下文还会再加约 4 秒。 |
 | 显示 `review_app_error` | 审核应用凭证错误或机器人未发布 / 不可用；或者没有拿到你的 union_id。检查第 2 节第 4 步。 |

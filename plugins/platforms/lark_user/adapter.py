@@ -19,6 +19,7 @@ import datetime as dt
 import hashlib
 import logging
 import time
+import uuid
 from typing import Any, Optional
 
 from gateway.config import Platform
@@ -34,6 +35,7 @@ from .adapter_hint import PLATFORM_HINT
 from .lark_user_cli import LarkCli, LarkCliError
 from .lark_user_config import LarkUserSettings, SettingsError, load_settings
 from .lark_user_context import group_context
+from .lark_user_control import lark_user_command, register_live, unregister_live
 from .lark_user_cursor import CursorStore, state_path
 from .lark_user_intake import ChatRateLimit, Identity, drop_reason
 from .lark_user_normalize import Inbound, to_inbound
@@ -41,7 +43,7 @@ from .lark_user_poll import PollSchedule
 from .lark_user_render import render
 from .lark_user_review import CardPresenter, ReviewDesk, TextPresenter, parse_command
 from .lark_user_review_bot import APP_ID_ENV, APP_SECRET_ENV, ReviewBot
-from .lark_user_session import shape_source
+from .lark_user_session import ThreadRoots, shape_source
 
 logger = logging.getLogger(__name__)
 
@@ -89,11 +91,19 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         self._review_bot: Optional[ReviewBot] = None
         # anchor message id -> revision being produced for it (count, notes, origin)
         self._revisions: dict[str, dict[str, Any]] = {}
-        self._tasks: list[asyncio.Task] = []
+        self._tasks: list[asyncio.Task] = []  # review-card listener: runs whenever connected
+        # Auto-reply switch (/lark-user): in memory, OFF on every connect. Polling runs only while on.
+        self._active = False
+        self._active_since = 0.0
+        self._poll_tasks: list[asyncio.Task] = []
+        self._reprime: set[str] = set()  # sources whose next poll treats what is there as history
+        self._inflight: dict[str, Any] = {}  # session key -> source of a turn in flight
+        self._union_id = ""
         self._rate = ChatRateLimit(s.rate_limit_per_chat)
         self._origins: collections.OrderedDict[str, Inbound] = collections.OrderedDict()
         self._last_by_chat: dict[str, str] = {}
         self._turns: collections.Counter[str] = collections.Counter()  # chat_id -> turns in flight
+        self._thread_roots = ThreadRoots(self._cli.thread_root)
 
     @property
     def name(self) -> str:
@@ -110,10 +120,12 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         if not await self._open():
             return False
         self._mark_connected()
-        self._tasks = [asyncio.create_task(self._source_loop(name)) for name in self._sources()]
-        if self._review_bot is not None:
+        if self._review_bot is not None:  # pending drafts stay decidable while auto-reply is off
             self._tasks.append(asyncio.create_task(self._review_bot.consume(self._on_review_click)))
-        logger.info("lark_user: polling %s for %s", ",".join(self._sources()), hash_for_log(self._me.open_id))
+        self._active = False
+        register_live(self)
+        logger.info("lark_user: connected for %s; auto-reply is OFF until /lark-user start",
+                    hash_for_log(self._me.open_id))
         return True
 
     async def _open(self) -> bool:
@@ -148,7 +160,8 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         s = self.settings
         self._store = CursorStore(state_path(me.open_id), seen_ttl=max(86400.0, 4 * (s.poll.lookback + s.max_message_age)))
         self._store.load()
-        return await self._open_review(str(info.get("union_id") or ""), cli_config)
+        self._union_id = str(info.get("union_id") or "")
+        return await self._open_review(self._union_id, cli_config)
 
     async def _open_review(self, union_id: str, cli_config: dict[str, Any]) -> bool:
         """Pick the review presentation: cards from the review app when it is configured (or
@@ -176,11 +189,14 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                                   "from the review app", retryable=False)
             self._review_bot, presenter = bot, CardPresenter(bot, union_id)
         self._desk = ReviewDesk(store=self._store, presenter=presenter, ttl=s.review_ttl,
-                                deliver=self._deliver_for_review, revise=self._start_revision)
+                                deliver=self._deliver_for_review, revise=self._start_revision,
+                                revising_allowed=lambda: self._active)
         return True
 
     async def disconnect(self) -> None:
         self._mark_disconnected()
+        unregister_live(self)
+        await self._stop_polling()
         for task in self._tasks:
             await cancel_task(task)
         self._tasks = []
@@ -189,6 +205,73 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         if self._store is not None:
             self._store.save()
         self._release_platform_lock()
+
+    # ── auto-reply switch (/lark-user) ─────────────────────────────────────
+
+    def serves_profile(self, profile: Optional[str]) -> bool:
+        def norm(name: Optional[str]) -> str:
+            return (name or "").strip() or "default"
+        return self._me is not None and norm(profile) == norm(getattr(self, "_owner_profile", None))
+
+    def is_owner(self, source: Any) -> bool:
+        """The user this plugin speaks for: a local session on this machine, or a Feishu/Lark sender
+        carrying that user's union_id (any app) or open_id (lark-cli's app)."""
+        if source is None or self._me is None:
+            return False
+        if getattr(source, "platform", None) == Platform.LOCAL:
+            return True
+        return bool((self._union_id and getattr(source, "user_id_alt", None) == self._union_id)
+                    or getattr(source, "user_id", None) == self._me.open_id)
+
+    async def start_auto_reply(self) -> str:
+        if self._active:
+            return "lark_user 自动回复已经在运行。\n" + self.auto_reply_status()
+        self._active, self._active_since = True, time.time()
+        self._reprime = set(self._sources())  # what arrived while it was off is history
+        self._poll_tasks = [asyncio.create_task(self._source_loop(name)) for name in self._sources()]
+        logger.info("lark_user: auto-reply ON, polling %s", ",".join(self._sources()))
+        return "✅ lark_user 自动回复已开启（关闭期间收到的消息不会补回复）。\n" + self.auto_reply_status()
+
+    async def stop_auto_reply(self) -> str:
+        if not self._active:
+            return "lark_user 自动回复本来就是关闭的。\n" + self.auto_reply_status()
+        await self._stop_polling()
+        stopped = await self._halt_turns()
+        logger.info("lark_user: auto-reply OFF (%d running turn(s) interrupted)", stopped)
+        return (f"⏹️ lark_user 自动回复已关闭：停止拉取消息，中断了 {stopped} 个正在执行的任务，"
+                "关闭期间不执行任务、不产生任何回复或草稿。\n" + self.auto_reply_status())
+
+    async def _stop_polling(self) -> None:
+        self._active = False
+        tasks, self._poll_tasks = self._poll_tasks, []
+        for task in tasks:
+            await cancel_task(task)
+
+    async def _halt_turns(self) -> int:
+        """Drop queued input and interrupt every turn in flight through the gateway's own /stop,
+        sent as that conversation's source (the path that interrupts the agent and frees its lock)."""
+        for task in list(self._pending_text_batch_tasks.values()):
+            task.cancel()
+        self._pending_text_batches.clear()
+        self._pending_messages.clear()
+        running = list(self._inflight.values())
+        for source in running:
+            await self.handle_message(MessageEvent(
+                text="/stop", message_type=MessageType.COMMAND, source=source,
+                message_id=f"lark_user-stop-{uuid.uuid4().hex}"))
+        return len(running)
+
+    def auto_reply_status(self) -> str:
+        review = type(self._desk.presenter).__name__.replace("Presenter", "").lower() if self._desk else "?"
+        delivery = self.settings.defaults.reply.delivery
+        lines = [f"状态：{'🟢 运行中' if self._active else '⚪ 已关闭'}"
+                 + (f"（{time.strftime('%m-%d %H:%M', time.localtime(self._active_since))} 起）" if self._active else ""),
+                 f"轮询来源：{', '.join(self._sources()) or '无'}",
+                 f"默认回复方式：{'审核后发送' if delivery == 'review' else '直接发送'}（审核呈现：{review}）",
+                 f"待审核草稿：{len(self._store.drafts) if self._store else 0} 条"]
+        if not self._active:
+            lines.append("发送 /lark-user start 开启。")
+        return "\n".join(lines)
 
     def _sources(self) -> list[str]:
         poll = self.settings.poll
@@ -231,7 +314,7 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         """One search for ``source``; returns how many messages became turns."""
         store, me = self._store, self._me
         now = time.time()
-        primed = source in store.watermarks
+        primed = source in store.watermarks and source not in self._reprime
         start = min(store.watermarks.get(source, now), now) - self.settings.poll.lookback
         items = await self._cli.search(chat_type="p2p" if source == "dm" else "group", start=_iso(start),
                                        at_me=source == "mention")
@@ -259,7 +342,9 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                 await self._dispatch(inb)
                 dispatched += 1
             self._commit(source, inb)
-        store.watermarks.setdefault(source, now)
+        if not primed:  # history taken in: answer only what arrives from now on
+            store.watermarks[source] = max(store.watermarks.get(source, 0.0), now)
+            self._reprime.discard(source)
         if source == "dm" and self._desk is not None:
             await self._desk.expire(now)
         store.save()
@@ -284,7 +369,7 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             self._origins.popitem(last=False)
         self._last_by_chat[inb.chat_id] = inb.message_id
         chat = self.settings.for_chat(inb.chat_id)
-        source = shape_source(self.build_source, inb, chat)
+        source = shape_source(self.build_source, inb, chat, thread_root=await self._thread_roots.root_for(inb, chat))
         event = MessageEvent(
             text=inb.text, message_type=MessageType.TEXT, source=source, message_id=inb.message_id,
             user_id=inb.sender_id, user_name=inb.sender_name or None,
@@ -312,10 +397,12 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         self._turns[event.source.chat_id] += 1
+        self._inflight[self._event_session_key(event)] = event.source
         await super().on_processing_start(event)
 
     async def on_processing_complete(self, event: MessageEvent, outcome) -> None:
         chat_id = event.source.chat_id
+        self._inflight.pop(self._event_session_key(event), None)
         self._turns[chat_id] -= 1
         if self._turns[chat_id] <= 0:
             del self._turns[chat_id]
@@ -369,9 +456,11 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         revision = int(draft.get("revision") or 0) + 1
         self._revisions[anchor] = {"revision": revision, "notes": notes, "origin": origin}
         self._last_by_chat[inb.chat_id] = anchor
+        chat = self.settings.for_chat(inb.chat_id)
+        source = shape_source(self.build_source, inb, chat, thread_root=await self._thread_roots.root_for(inb, chat))
         event = MessageEvent(
             text=_REVISION_PROMPT.format(user_name=self._me.name, notes=notes, content=draft.get("content", "")),
-            message_type=MessageType.TEXT, source=shape_source(self.build_source, inb, self.settings.for_chat(inb.chat_id)),
+            message_type=MessageType.TEXT, source=source,
             message_id=f"{anchor}#rev{revision}", reply_anchor_override=anchor or None,
             user_id=inb.sender_id, user_name=inb.sender_name or None, allow_gateway_control=False)
         logger.info("lark_user: revision %d for %s chat=%s", revision, anchor, hash_for_log(inb.chat_id))
@@ -417,9 +506,16 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         if self._is_final_only_drop(chat_id, metadata):
             logger.debug("lark_user: dropped a non-final send to %s (%d chars)", hash_for_log(chat_id), len(content))
             return SendResult(success=True, message_id=_DROPPED)
+        if not self._active:
+            # Switched off (/lark-user stop): no results at all, neither a reply nor a draft. Turns in
+            # flight were interrupted; whatever they still emit (the /stop notice included) ends here.
+            logger.info("lark_user: auto-reply is off; dropped output for %s (%d chars)", hash_for_log(chat_id),
+                        len(content))
+            return SendResult(success=True, message_id=_DROPPED)
+        review = self.settings.for_chat(chat_id).reply.delivery == "review" and chat_id != self._desk.chat_id
         draft = self._draft_for(chat_id, reply_to)
         try:
-            if self.settings.for_chat(chat_id).reply.delivery == "review" and chat_id != self._desk.chat_id:
+            if review:
                 message_id = await self._desk.submit(draft, content)
             else:
                 message_id = await self._deliver(draft, content)
@@ -446,6 +542,10 @@ def _enabled(config) -> bool:
 
 
 def register(ctx):
+    ctx.register_command(
+        "lark-user", lark_user_command,
+        description="Lark personal auto-reply: start / stop / status (in memory; off after every gateway start)",
+        args_hint="start|stop|status")
     ctx.register_platform(
         name="lark_user",
         label="Lark (personal)",

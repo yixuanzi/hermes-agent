@@ -108,7 +108,7 @@ class LarkCli:
     # ── identity ────────────────────────────────────────────────────────────
 
     async def user_info(self) -> dict[str, Any]:
-        """``{open_id, tenant_key, name}`` of the authorized user."""
+        """``{open_id, union_id, tenant_key, name}`` of the authorized user."""
         return await self.call(["api", "GET", "/open-apis/authen/v1/user_info", "--as", "user"])
 
     # ── reads ───────────────────────────────────────────────────────────────
@@ -154,6 +154,13 @@ class LarkCli:
         data = await self.call(["im", "+chat-messages-list", "--as", "user", "--chat-id", chat_id, "--start", start,
                                 "--order", "desc", "--page-size", str(page_size), "--no-reactions"])
         return list(data.get("messages") or [])
+
+    async def thread_root(self, thread_id: str) -> str:
+        """Message id of the message a topic hangs off (the topic's oldest message); "" if unknown."""
+        data = await self.call(["im", "+threads-messages-list", "--as", "user", "--thread", thread_id,
+                                "--order", "asc", "--page-size", "1", "--no-reactions"])
+        messages = data.get("messages") or []
+        return str(messages[0].get("message_id") or "") if messages else ""
 
     async def thread_messages(self, thread_id: str, *, page_size: int) -> list[dict[str, Any]]:
         """Newest-first messages of a topic."""

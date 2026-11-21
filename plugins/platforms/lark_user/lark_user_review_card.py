@@ -20,6 +20,7 @@ _SNIPPET = 300
 _STATES = {
     "pending": ("orange", "📝 待审核回复", True),
     "need_note": ("orange", "📝 待审核回复", True),
+    "paused": ("orange", "📝 待审核回复", True),
     "failed": ("red", "❌ 发送失败，可重试", True),
     "sent": ("green", "✅ 已发送", False),
     "rejected": ("grey", "🚫 已拒绝，不回复", False),
@@ -69,7 +70,8 @@ def review_card(number: str, draft: dict[str, Any], *, state: str = "pending", n
         {"tag": "hr"},
         {"tag": "markdown", "content": neutralize_mentions(content) or " "},
     ]
-    status = {"need_note": "⚠️ 请先在输入框填写修改意见，再点“修订”。"}.get(state, note)
+    status = {"need_note": "⚠️ 请先在输入框填写修改意见，再点“修订”。",
+              "paused": "⚠️ 自动回复已关闭，修订需要 agent 重新执行：先发送 /lark-user start 开启，再点“修订”。"}.get(state, note)
     if status:
         elements += [{"tag": "hr"}, {"tag": "markdown", "content": neutralize_mentions(status), "text_size": "notation"}]
     if with_form:

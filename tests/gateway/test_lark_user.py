@@ -7,6 +7,7 @@ HERMES_HOME the suite provides.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import os
@@ -70,6 +71,9 @@ if args[:2] == ["im", "+messages-search"]:
 if args[:2] == ["im", "+chat-messages-list"]:
     out({{"messages": state.get("chat_history", [])}})
 if args[:2] == ["im", "+threads-messages-list"]:
+    if "asc" in args:  # topic root lookup: the topic's oldest message
+        root = state.get("thread_roots", {{}}).get(args[args.index("--thread") + 1])
+        out({{"messages": [{{"message_id": root}}] if root else []}})
     out({{"messages": state.get("thread_history", [])}})
 if args[:2] in (["im", "+messages-reply"], ["im", "+messages-send"]):
     if "reply" in fail:
@@ -121,7 +125,7 @@ def lark(tmp_path, monkeypatch):
     return FakeLark(tmp_path, monkeypatch)
 
 
-def make_adapter(lark: FakeLark, **extra):
+def make_adapter(lark: FakeLark, *, capture: bool = True, **extra):
     from plugins.platforms.lark_user.adapter import LarkUserAdapter
     cfg = {"enabled": True, "cli_bin": str(lark.bin), "text_batch_delay_seconds": 0,
            "dm_policy": "allowlist", "allow_from": ["ou_alice", "ou_bob"],
@@ -129,16 +133,20 @@ def make_adapter(lark: FakeLark, **extra):
     adapter = LarkUserAdapter(PlatformConfig.from_dict(cfg))
     events = []
 
-    async def capture(event):
+    async def capture_event(event):
         events.append(event)
 
-    adapter.handle_message = capture
+    if capture:
+        adapter.handle_message = capture_event
     return adapter, events
 
 
 async def opened(lark, **extra):
     adapter, events = make_adapter(lark, **extra)
     assert await adapter._open()
+    # Auto-reply switched on; these tests drive poll_once themselves rather than the poll loops
+    # /lark-user start spawns (the switch's own tests below go through the command).
+    adapter._active = True
     # Prime both sources on an empty history so later messages count as new.
     await adapter.poll_once("dm")
     await adapter.poll_once("mention")
@@ -281,6 +289,36 @@ async def test_group_scope_per_thread_and_per_message(lark):
     assert t1 == t2 and t3 != t1
     m1, m2 = await _keys(lark, [_group("om_4"), _group("om_5")], "mention", group_scope="per_message")
     assert m1 != m2
+
+
+@pytest.mark.asyncio
+async def test_per_thread_root_mention_and_its_later_topic_share_one_session(lark):
+    adapter, events = await opened(lark, group_scope="per_thread")
+    lark.write(search_group=[_group("om_root")])  # an @mention before anyone replied to it
+    await adapter.poll_once("mention")
+    lark.write(thread_roots={"omt_X": "om_root", "omt_Y": "om_other"}, search_group=[
+        _group("om_root"),
+        _group("om_t1", thread="omt_X"),                 # the topic that grew under om_root
+        _group("om_t2", sender="ou_bob", thread="omt_X"),
+        _group("om_t3", thread="omt_Y"),                 # an unrelated topic
+    ])
+    await adapter.poll_once("mention")
+    root, t1, t2, other = (adapter._event_session_key(e) for e in events)
+    assert root == t1 == t2 and other != root
+    lookups = [c for c in lark.read()["calls"] if c["args"][:2] == ["im", "+threads-messages-list"]]
+    assert len(lookups) == 2  # once per topic
+
+
+@pytest.mark.asyncio
+async def test_revising_a_topic_draft_stays_in_the_topic_session(lark):
+    adapter, events = await opened(lark, group_scope="per_thread")
+    lark.write(thread_roots={"omt_X": "om_root"}, search_group=[_group("om_t1", thread="omt_X")])
+    await adapter.poll_once("mention")
+    original = events[-1]
+    await adapter.send("oc_g1", "draft", reply_to="om_t1")
+    await adapter._desk.revise("1", "更正式一点")
+    assert adapter._event_session_key(events[-1]) == adapter._event_session_key(original)
+    assert events[-1] is not original
 
 
 @pytest.mark.asyncio
@@ -646,6 +684,167 @@ async def test_card_review_needs_its_own_app(lark, monkeypatch, review_app):
     adapter3, _ = make_adapter(lark, review={"interactive": "card"})
     assert not await adapter3.connect()
     assert adapter3.fatal_error_code == "config_invalid"
+
+
+# ── /lark-user: in-memory auto-reply switch ─────────────────────────────────
+
+def _source(platform="local", user_id="u_local", user_id_alt=None, profile=None):
+    from gateway.config import Platform
+    from gateway.session import SessionSource
+    return SessionSource(platform=Platform(platform), chat_id="c", chat_type="dm", user_id=user_id,
+                         user_id_alt=user_id_alt, profile=profile)
+
+
+def _searches(lark):
+    return [c for c in lark.read().get("calls", []) if c["args"][:2] == ["im", "+messages-search"]]
+
+
+@pytest.fixture
+def fast_polls(monkeypatch):
+    from plugins.platforms.lark_user.lark_user_poll import PollSchedule
+    monkeypatch.setattr(PollSchedule, "next_delay", lambda self: 0.05)
+
+
+@pytest.mark.asyncio
+async def test_auto_reply_is_off_after_connect_and_nothing_is_polled(lark):
+    from plugins.platforms.lark_user.lark_user_control import lark_user_command
+    adapter, _ = make_adapter(lark)
+    assert await adapter.connect()
+    try:
+        assert _searches(lark) == []
+        status = await lark_user_command("status", source=_source())
+        assert "已关闭" in status and "/lark-user start" in status
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_start_answers_only_what_arrives_while_on(lark, fast_polls):
+    from plugins.platforms.lark_user.lark_user_control import lark_user_command
+    from tests.waiting import async_wait_until
+    adapter, events = make_adapter(lark)
+    lark.write(search_p2p=[msg("om_before_start")])
+    assert await adapter.connect()
+    try:
+        assert "已开启" in await lark_user_command("start", source=_source())
+        await async_wait_until(lambda: not adapter._reprime, what="first poll takes history in")
+        lark.write(search_p2p=[msg("om_before_start"), msg("om_while_on")])
+        await async_wait_until(lambda: [e.message_id for e in events] == ["om_while_on"], what="new message answered")
+
+        assert "已关闭" in await lark_user_command("stop", source=_source())
+        assert all(task.done() for task in adapter._tasks + adapter._poll_tasks) and not adapter._poll_tasks
+        lark.write(search_p2p=[msg("om_before_start"), msg("om_while_on"), msg("om_while_off")])
+        assert "已开启" in await lark_user_command("start", source=_source())
+        await async_wait_until(lambda: not adapter._reprime, what="restart takes history in")
+        lark.write(search_p2p=[msg("om_before_start"), msg("om_while_on"), msg("om_while_off"), msg("om_back_on")])
+        await async_wait_until(lambda: events[-1].message_id == "om_back_on", what="answered after restart")
+        assert [e.message_id for e in events] == ["om_while_on", "om_back_on"]
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_switched_off_produces_no_reply_and_no_draft(lark):
+    auto, _ = await opened(lark, reply={"delivery": "auto"})
+    await auto.stop_auto_reply()
+    assert (await auto.send("oc_dm1", "late answer", reply_to="om_q")).success
+    assert lark.sends() == []
+
+    review, _ = await opened(lark)
+    await review.stop_auto_reply()
+    await review.send("oc_dm1", "late draft", reply_to="om_q")
+    assert review._store.drafts == {} and lark.sends() == []
+
+
+@pytest.mark.asyncio
+async def test_stop_interrupts_turns_in_flight_and_drops_queued_input(lark):
+    adapter, events = await opened(lark)
+    lark.write(search_p2p=[msg("om_q")])
+    await adapter.poll_once("dm")
+    (turn,) = events
+    await adapter.on_processing_start(turn)  # the agent is working on it
+    key = adapter._event_session_key(turn)
+    adapter._pending_messages[key] = turn  # and a follow-up is queued behind it
+
+    reply = await adapter.stop_auto_reply()
+    stop = events[-1]
+    assert stop.text == "/stop" and stop.is_command() and adapter._event_session_key(stop) == key
+    assert adapter._pending_messages == {} and "中断了 1" in reply
+
+
+class _BlockingRunner:
+    """Stands in for the gateway runner: a turn blocks until cancelled; /stop is accepted the way
+    the runner's stop handler accepts it, which is what lets the base adapter cancel the turn."""
+
+    def __init__(self):
+        self.seen: list[str] = []
+        self.started, self.cancelled = asyncio.Event(), asyncio.Event()
+
+    async def handle(self, event):
+        self.seen.append(event.text)
+        if event.text.startswith("/"):
+            event._interrupt_accepted = True
+            return
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_a_running_turn_through_the_session_guard(lark):
+    adapter, _ = make_adapter(lark, capture=False)
+    runner = _BlockingRunner()
+    adapter.set_message_handler(runner.handle)
+    assert await adapter._open()
+    adapter._active = True
+    await adapter.poll_once("dm")
+    lark.write(search_p2p=[msg("om_q")])
+    await adapter.poll_once("dm")  # the real handle_message starts the turn
+    await asyncio.wait_for(runner.started.wait(), 5)
+
+    reply = await adapter.stop_auto_reply()
+    await asyncio.wait_for(runner.cancelled.wait(), 5)
+    assert "/stop" in runner.seen and "中断了 1" in reply
+
+
+@pytest.mark.asyncio
+async def test_switched_off_refuses_revisions_but_keeps_decisions(lark, review_app):
+    adapter, events = await _card_review(lark)
+    await adapter.stop_auto_reply()
+    count = len(events)
+    await adapter._on_review_click(click("revise", notes="改短一点"))
+    (paused,) = _patched(lark)
+    assert "自动回复已关闭" in _text(paused) and _buttons(paused) == ["approve", "revise", "reject"]
+    assert len(events) == count and "1" in adapter._store.drafts  # the agent did not run again
+    await adapter._on_review_click(click("reject"))
+    assert adapter._store.drafts == {}
+
+
+@pytest.mark.asyncio
+async def test_only_the_user_it_speaks_for_can_flip_the_switch(lark):
+    from plugins.platforms.lark_user.lark_user_control import lark_user_command
+    adapter, _ = make_adapter(lark)
+    assert await adapter.connect()
+    try:
+        stranger = _source("feishu", user_id="ou_colleague", user_id_alt="on_colleague")
+        assert "只有" in await lark_user_command("start", source=stranger) and not adapter._active
+        assert "已开启" in await lark_user_command("start", source=_source("feishu", "ou_other_app_id", "on_me"))
+        assert "已关闭" in await lark_user_command("stop", source=_source("feishu", "ou_me"))
+        assert "没有在这个" in await lark_user_command("status", source=_source(profile="work"))
+        assert "用法" in await lark_user_command("restart", source=_source())
+    finally:
+        await adapter.disconnect()
+
+
+def test_lark_user_command_is_registered_when_the_platform_loads():
+    from gateway.platform_registry import platform_registry
+    from hermes_cli.plugins import discover_plugins, get_plugin_command_handler
+    discover_plugins()
+    assert platform_registry.get("lark_user") is not None  # what the gateway does for an enabled platform
+    assert get_plugin_command_handler("lark-user") is not None
 
 
 @pytest.mark.asyncio
