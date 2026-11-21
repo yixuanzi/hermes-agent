@@ -50,7 +50,7 @@ lark-cli 搜索 ──► 过滤（自己/bot/@所有人/白名单/过期/限流
   - 私聊：`lark-cli im +messages-search --chat-type p2p`
   - @我：`lark-cli im +messages-search --is-at-me --chat-type group`，再在本地按消息的 @ 列表确认确实 @了你本人，因为这个接口会把 @所有人 的消息也一起返回。
 - **每次开启**：开启那一刻已有的消息（包括关闭期间收到的）一律视为历史，只回复之后新来的消息。
-- **状态文件**：`<HERMES_HOME>/lark_user/<你的open_id>.json`，保存已处理的消息、轮询进度和待审核草稿。重启后不会重复回复，也不会丢失草稿。
+- **状态数据库**：`<HERMES_HOME>/plugin-data/lark_user/<你的open_id>.db`（SQLite），保存已处理的消息、轮询进度和待审核草稿。重启后不会重复回复，也不会丢失草稿。每次变化只写入改动的那一行，不会每轮轮询都重写整份数据。旧版本的 `<HERMES_HOME>/lark_user/<open_id>.json` 会在第一次启动时自动导入，导入后改名为 `.json.migrated` 保留，确认无误后可以删除。
 - **延迟**：Lark 搜索索引约有 15 秒延迟，按默认 15 秒的轮询周期，对方发消息后大约 15–30 秒开始处理。
 
 ---
@@ -531,7 +531,7 @@ platforms:
 | 显示 `review_app_error` | 审核应用凭证错误或机器人未发布 / 不可用；或者没有拿到你的 union_id。检查第 2 节第 4 步。 |
 | 收到审核卡片，点击后没有反应 | 检查审核应用是否已在“回调配置”中选择长连接并添加 `card.action.trigger`；gateway 日志中会出现 `review card listener` 相关报错；若日志提示 “already has N other event connection(s)”，说明还有别的进程连着这个应用。 |
 | 点“修订”后一直没有新卡片 | agent 改写失败（例如模型调用出错）时不会产生新卡片，原草稿已作废、对方不会收到回复。查看 gateway 日志；对方再发消息时会重新起草。 |
-| 想重新开始（忽略积压消息） | 停止 gateway，删除 `<HERMES_HOME>/lark_user/<open_id>.json`，再启动。注意：待审核草稿会一并丢失。 |
+| 想重新开始（忽略积压消息） | 一般不需要：`/lark-user start` 本来就把开启前的消息当作历史。确实要清空时，停止 gateway，删除 `<HERMES_HOME>/plugin-data/lark_user/<open_id>.db`（以及同名的 `-wal`、`-shm` 文件），再启动。注意：待审核草稿会一并丢失。 |
 
 ---
 

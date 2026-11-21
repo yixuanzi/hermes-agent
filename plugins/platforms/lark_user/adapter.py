@@ -36,7 +36,7 @@ from .lark_user_cli import LarkCli, LarkCliError
 from .lark_user_config import ChatSettings, LarkUserSettings, SettingsError, load_settings
 from .lark_user_context import group_context
 from .lark_user_control import conversation_list, lark_user_command, register_live, unregister_live
-from .lark_user_cursor import CursorStore, state_path
+from .lark_user_cursor import CursorStore
 from .lark_user_intake import ChatRateLimit, Identity, drop_reason
 from .lark_user_normalize import Inbound, to_inbound
 from .lark_user_poll import PollSchedule
@@ -159,8 +159,9 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         logger.info("lark_user: lark-cli workspace=%s profile=%s app=%s user=%s", cli_config.get("workspace") or "?",
                     cli_config.get("profile") or "?", cli_config.get("appId") or "?", hash_for_log(me.open_id))
         s = self.settings
-        self._store = CursorStore(state_path(me.open_id), seen_ttl=max(86400.0, 4 * (s.poll.lookback + s.max_message_age)))
-        self._store.load()
+        if self._store is not None:  # reconnect
+            self._store.close()
+        self._store = CursorStore.open(me.open_id, seen_ttl=max(86400.0, 4 * (s.poll.lookback + s.max_message_age)))
         self._union_id = str(info.get("union_id") or "")
         return await self._open_review(self._union_id, cli_config)
 
@@ -204,7 +205,8 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         if self._review_bot is not None:
             await self._review_bot.close()
         if self._store is not None:
-            self._store.save()
+            self._store.close()
+            self._store = None
         self._release_platform_lock()
 
     # ── auto-reply switch (/lark-user) ─────────────────────────────────────
@@ -352,8 +354,9 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         """One search for ``source``; returns how many messages became turns."""
         store, me = self._store, self._me
         now = time.time()
-        primed = source in store.watermarks and source not in self._reprime
-        start = min(store.watermarks.get(source, now), now) - self.settings.poll.lookback
+        watermark = store.watermark(source)
+        primed = watermark is not None and source not in self._reprime
+        start = min(watermark if watermark is not None else now, now) - self.settings.poll.lookback
         items = await self._cli.search(chat_type="p2p" if source == "dm" else "group", start=_iso(start),
                                        at_me=source == "mention")
         inbound = sorted(filter(None, (to_inbound(i, my_open_id=me.open_id, my_name=me.name) for i in items)),
@@ -367,7 +370,6 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                 continue
             if self._is_review_command(source, inb):
                 self._commit(source, inb)  # at most once: a command has side effects
-                store.save()
                 await self._desk.handle_text(inb.text)
                 continue
             reason = drop_reason(inb, source, me=me, settings=self.settings, now=now,
@@ -381,11 +383,11 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                 dispatched += 1
             self._commit(source, inb)
         if not primed:  # history taken in: answer only what arrives from now on
-            store.watermarks[source] = max(store.watermarks.get(source, 0.0), now)
+            store.advance(source, now)
             self._reprime.discard(source)
         if source == "dm" and self._desk is not None:
             await self._desk.expire(now)
-        store.save()
+        store.prune(now)
         return dispatched
 
     def _commit(self, source: str, inb: Inbound) -> None:

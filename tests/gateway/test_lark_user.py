@@ -202,6 +202,56 @@ async def test_handled_message_is_not_replayed_after_restart(lark):
 
 
 @pytest.mark.asyncio
+async def test_pending_drafts_and_their_numbering_survive_a_restart(lark):
+    adapter, _ = await opened(lark)
+    lark.write(search_p2p=[msg("om_q1"), msg("om_q2")])
+    await adapter.poll_once("dm")
+    await adapter.send("oc_dm1", "first", reply_to="om_q1")
+    await adapter.send("oc_dm1", "second", reply_to="om_q2")
+    await adapter._desk.reject("2")
+    await adapter.disconnect()
+
+    again, _ = make_adapter(lark)
+    assert await again._open()
+    assert {n: d["content"] for n, d in again._store.drafts.items()} == {"1": "first"}
+    assert again._store.drafts["1"]["review_msg"]  # where its card went, for the clicks to come
+    again._active = True
+    await again.send("oc_dm1", "third", reply_to="om_q1")
+    assert sorted(again._store.drafts) == ["1", "3"]  # #2 is never handed out again
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_json_state_file_is_imported_once(lark):
+    from hermes_constants import get_hermes_home
+    legacy = get_hermes_home() / "lark_user" / "ou_me.json"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({
+        "watermarks": {"dm": time.time() - 60}, "seen": {"om_handled": time.time() - 60},
+        "drafts": {"4": {"chat_id": "oc_dm1", "reply_to": "om_x", "content": "parked", "created_at": time.time()}},
+        "review_chat": "oc_self", "next_draft": 5}))
+    lark.write(search_p2p=[msg("om_handled"), msg("om_new")])
+    adapter, events = make_adapter(lark)
+    assert await adapter._open()
+    adapter._active = True
+    await adapter.poll_once("dm")  # already primed by the imported watermark
+
+    assert [e.message_id for e in events] == ["om_new"]
+    assert adapter._store.drafts["4"]["content"] == "parked" and adapter._store.review_chat == "oc_self"
+    assert adapter._store.new_draft_number() == "5"
+    assert not legacy.exists() and legacy.with_name("ou_me.json.migrated").exists()
+
+
+def test_handled_ids_are_forgotten_after_their_ttl():
+    from plugins.platforms.lark_user.lark_user_cursor import CursorStore
+    from plugins.plugin_storage import plugin_db
+    store = CursorStore(plugin_db("lark_user", "ttl.db"), seen_ttl=3600)
+    store.mark_seen("om_old", now=time.time() - 7200)
+    store.mark_seen("om_recent", now=time.time() - 60)
+    store.prune()
+    assert not store.is_seen("om_old") and store.is_seen("om_recent")
+
+
+@pytest.mark.asyncio
 async def test_at_all_is_ignored_unless_opted_in(lark):
     at_all = msg("om_all", chat="oc_g1", chat_type="group", text='<at user_id="all"></at> release')
     mention = msg("om_me", chat="oc_g1", chat_type="group", text="@Me Myself look",

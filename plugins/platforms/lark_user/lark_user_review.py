@@ -147,46 +147,39 @@ class ReviewDesk:
 
     async def submit(self, draft: dict[str, Any], content: str) -> str:
         """Park ``content`` as a draft and show it to the user; returns the review message id."""
-        number = str(self._store.next_draft)
-        self._store.next_draft += 1
+        number = self._store.new_draft_number()
         record = {**draft, "content": content, "created_at": time.time()}
-        self._store.drafts[number] = record
-        self._store.save()
+        self._store.put_draft(number, record)
         sent = await self.presenter.show(number, record)
-        record.update(review_msg=sent.message_id, review_chat=sent.chat_id)
-        self._store.save()
+        self._store.put_draft(number, {**record, "review_msg": sent.message_id, "review_chat": sent.chat_id})
         return sent.message_id
 
     # ── decisions ───────────────────────────────────────────────────────────
 
     async def approve(self, number: str, content: Optional[str] = None, token: str = "") -> None:
-        draft = self._store.drafts.pop(number)
-        self._store.save()
+        draft = self._store.pop_draft(number)
         if content is not None:
             draft["content"] = content
         error = await self._deliver(draft, draft["content"])
         if error:
-            self._store.drafts[number] = draft  # keep it so the user can retry
-            self._store.save()
+            self._store.put_draft(number, draft)  # keep it so the user can retry
             await self.presenter.settle(number, draft, "failed", error, token=token)
         else:
             await self.presenter.settle(number, draft, "sent", f"已于 {time.strftime('%H:%M')} 发送", token=token)
 
     async def reject(self, number: str, token: str = "") -> None:
-        draft = self._store.drafts.pop(number)
-        self._store.save()
+        draft = self._store.pop_draft(number)
         await self.presenter.settle(number, draft, "rejected", token=token)
 
     async def revise(self, number: str, notes: str, token: str = "") -> None:
-        draft = self._store.drafts[number]
+        draft = self._store.draft(number)
         if not self._revising_allowed():
             await self.presenter.settle(number, draft, "paused", token=token)
             return
         if not notes.strip():
             await self.presenter.settle(number, draft, "need_note", token=token)
             return
-        self._store.drafts.pop(number)
-        self._store.save()
+        self._store.pop_draft(number)
         await self.presenter.settle(number, draft, "revising", f"修订意见：{notes.strip()}\n改好后会发来新的待审核卡片。",
                                     token=token)
         await self._revise(draft, notes.strip())
@@ -195,8 +188,7 @@ class ReviewDesk:
         now = now if now is not None else time.time()
         stale = [n for n, d in self._store.drafts.items() if now - float(d.get("created_at") or 0) > self._ttl]
         for number in sorted(stale, key=int):
-            draft = self._store.drafts.pop(number)
-            self._store.save()
+            draft = self._store.pop_draft(number)
             try:
                 await self.presenter.settle(number, draft, "expired")
             except LarkCliError as exc:
@@ -214,7 +206,7 @@ class ReviewDesk:
         except ValueError:
             return
         verb, number = str(value.get(ACTION_KEY) or ""), str(value.get("draft") or "")
-        draft = self._store.drafts.get(number)
+        draft = self._store.draft(number)
         if (verb not in {"approve", "revise", "reject"} or draft is None
                 or draft.get("review_msg") != event.get("message_id") or draft.get("review_chat") != event.get("chat_id")):
             logger.debug("lark_user: ignored review click %s on #%s", verb or "?", number or "?")
