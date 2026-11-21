@@ -16,12 +16,17 @@ The key itself always comes from ``gateway.session.build_session_key`` (via the 
 by its own id before anyone replies to it; once a topic grows under it, the in-topic @mentions
 carry the topic id (``omt_…``), which ``ThreadRoots`` maps back to that same root message, so the
 root mention and its topic are one session.
+
+Senders cannot ``/new`` (they have no gateway control), so ``session.idle_reset`` and
+``session.daily_reset_at`` end a conversation for them: ``expiry_reason`` decides, and the adapter
+suspends the stale session so the gateway opens a fresh one for the message that found it stale.
 """
 
 from __future__ import annotations
 
 import collections
 import dataclasses
+import datetime as dt
 import logging
 from typing import Any, Awaitable, Callable
 
@@ -85,3 +90,18 @@ def shape_source(build_source: Callable[..., Any], inbound: Inbound, chat: ChatS
     if is_group and chat.group_scope == "per_chat":
         source = dataclasses.replace(source, shared_session=True)
     return source
+
+
+def expiry_reason(last_active: float, now: float, chat: ChatSettings) -> str:
+    """Why a conversation last active at ``last_active`` is over at ``now``; "" while it goes on."""
+    if chat.idle_reset and now - last_active >= chat.idle_reset:
+        return "idle"
+    if chat.daily_reset_at is not None:
+        today = dt.datetime.fromtimestamp(now)
+        boundary = today.replace(hour=chat.daily_reset_at // 60, minute=chat.daily_reset_at % 60,
+                                 second=0, microsecond=0)
+        if boundary > today:
+            boundary -= dt.timedelta(days=1)
+        if last_active < boundary.timestamp():
+            return "daily"
+    return ""

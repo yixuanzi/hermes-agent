@@ -24,6 +24,7 @@ POLICIES = ("allowlist", "open", "disabled")
 _DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)?\s*$")
 _DURATION_UNITS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400, None: 1}
 _HOURS_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$")
+_CLOCK_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
 
 
 class SettingsError(ValueError):
@@ -53,6 +54,16 @@ def parse_active_hours(value: Any) -> Optional[tuple[int, int]]:
     if h1 > 23 or h2 > 23 or m1 > 59 or m2 > 59:
         raise SettingsError(f"invalid active_hours {value!r}")
     return h1 * 60 + m1, h2 * 60 + m2
+
+
+def parse_clock(value: Any, key: str) -> Optional[int]:
+    """``"04:00"`` -> minute of the day; None/"" -> None."""
+    if value in (None, ""):
+        return None
+    match = _CLOCK_RE.match(str(value))
+    if not match or int(match.group(1)) > 23 or int(match.group(2)) > 59:
+        raise SettingsError(f"invalid {key} {value!r} (expected HH:MM)")
+    return int(match.group(1)) * 60 + int(match.group(2))
 
 
 def _choice(value: Any, allowed: tuple[str, ...], default: str, key: str) -> str:
@@ -131,6 +142,9 @@ class ChatSettings:
     enabled: bool = True
     dm_scope: str = "per_chat"
     group_scope: str = "per_chat_user"
+    # A conversation nobody can /new (senders have no gateway control) would otherwise grow forever.
+    idle_reset: float = 4 * 3600.0         # seconds of silence after which the next message starts afresh; 0 = never
+    daily_reset_at: Optional[int] = None   # minute of the day (local) after which the next message starts afresh
     reply: ReplySettings = ReplySettings()
     context: ContextSettings = ContextSettings()
 
@@ -215,6 +229,13 @@ def _reply(raw: Mapping[str, Any], base: ReplySettings, where: str) -> ReplySett
     )
 
 
+def _idle_reset(value: Any, default: float, key: str) -> float:
+    seconds = parse_duration(value, default)
+    if 0 < seconds < 60:
+        raise SettingsError(f"{key} must be 0 (never) or at least 1m (got {value!r})")
+    return max(0.0, seconds)
+
+
 def _chat(raw: Mapping[str, Any], base: ChatSettings, where: str) -> ChatSettings:
     session = _section(raw, "session")
     return ChatSettings(
@@ -222,6 +243,9 @@ def _chat(raw: Mapping[str, Any], base: ChatSettings, where: str) -> ChatSetting
         dm_scope=_choice(raw.get("dm_scope", session.get("dm_scope")), DM_SCOPES, base.dm_scope, f"{where}dm_scope"),
         group_scope=_choice(raw.get("group_scope", session.get("group_scope")), GROUP_SCOPES, base.group_scope,
                             f"{where}group_scope"),
+        idle_reset=_idle_reset(session.get("idle_reset"), base.idle_reset, f"{where}session.idle_reset"),
+        daily_reset_at=(parse_clock(session["daily_reset_at"], f"{where}session.daily_reset_at")
+                        if "daily_reset_at" in session else base.daily_reset_at),
         reply=_reply(_section(raw, "reply"), base.reply, where),
         context=_context(_section(raw, "context"), base.context, where),
     )

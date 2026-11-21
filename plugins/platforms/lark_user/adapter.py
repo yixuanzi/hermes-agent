@@ -33,7 +33,7 @@ from hermes_constants import display_hermes_home
 from . import gateway_env
 from .adapter_hint import PLATFORM_HINT
 from .lark_user_cli import LarkCli, LarkCliError
-from .lark_user_config import LarkUserSettings, SettingsError, load_settings
+from .lark_user_config import ChatSettings, LarkUserSettings, SettingsError, load_settings
 from .lark_user_context import group_context
 from .lark_user_control import lark_user_command, register_live, unregister_live
 from .lark_user_cursor import CursorStore, state_path
@@ -43,7 +43,7 @@ from .lark_user_poll import PollSchedule
 from .lark_user_render import render
 from .lark_user_review import CardPresenter, ReviewDesk, TextPresenter, parse_command
 from .lark_user_review_bot import APP_ID_ENV, APP_SECRET_ENV, ReviewBot
-from .lark_user_session import ThreadRoots, shape_source
+from .lark_user_session import ThreadRoots, expiry_reason, shape_source
 
 logger = logging.getLogger(__name__)
 
@@ -377,7 +377,8 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             # Senders are third parties writing to the user, never operators of this gateway.
             allow_gateway_control=False,
         )
-        if inb.chat_type == "group" and chat.context.enabled and self._wants_context(event, chat.context.when):
+        fresh = await self._open_conversation(event, chat)
+        if inb.chat_type == "group" and chat.context.enabled and (fresh or chat.context.when == "always"):
             event.channel_context = await group_context(self._cli, inb, chat.context) or None
         logger.info("lark_user: turn for %s chat=%s (%d chars)", inb.message_id, hash_for_log(inb.chat_id),
                     len(inb.text))
@@ -386,12 +387,25 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         else:
             await self.handle_message(event)
 
-    def _wants_context(self, event: MessageEvent, when: str) -> bool:
-        """``new_session``: only when the event's session has no transcript yet."""
-        if when == "always":
+    async def _open_conversation(self, event: MessageEvent, chat: ChatSettings) -> bool:
+        """End the event's conversation if it went stale (``session.idle_reset`` / ``daily_reset_at``);
+        True when the event starts a new one. Suspending is the gateway's own reset-on-next-access
+        path (/stop uses it): the turn this event starts ends the old session and opens a fresh one,
+        hooks and memory included, and the reset notice it emits mid-turn never leaves."""
+        store = getattr(self, "_session_store", None)
+        key = self._event_session_key(event)
+        entry = store.lookup_by_session_key(key) if store is not None else None
+        if entry is None or entry.suspended:
             return True
-        peek = getattr(getattr(self, "_session_store", None), "peek_session_id", None)
-        return not (callable(peek) and peek(self._event_session_key(event)))
+        if key in self._inflight:
+            return False
+        reason = expiry_reason(entry.updated_at.timestamp(), time.time(), chat)
+        if not reason:
+            return False
+        await asyncio.to_thread(store.suspend_session, key)
+        logger.info("lark_user: conversation %s ended (%s); %s starts a new one", hash_for_log(key), reason,
+                    event.message_id)
+        return True
 
     # ── turn boundaries: only the final answer leaves ───────────────────────
 

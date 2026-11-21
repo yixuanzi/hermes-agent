@@ -274,6 +274,8 @@ hermes gateway status         # 确认 lark_user 已连接
 |---|---|---|
 | `session.dm_scope`（也可以直接写 `dm_scope`） | `per_chat` \| `per_message` / `per_chat` | `per_chat`：和每个人的私聊各一个会话，有上下文记忆；`per_message`：每条消息一个独立会话，没有记忆。 |
 | `session.group_scope`（也可以直接写 `group_scope`） | `per_chat` \| `per_chat_user` \| `per_thread` \| `per_message` / `per_chat_user` | 见下表。 |
+| `session.idle_reset` | 时长（`30m`、`4h`、`1d`）或 `0` / `4h` | 一个会话超过这么久没有新消息，下一条消息就开新会话；`0` 表示从不按闲置重置。最小 `1m`。 |
+| `session.daily_reset_at` | `"HH:MM"`（本机时间）/ 不设置 | 每天这个时间之后的第一条消息开新会话，比如 `"04:00"`；不设置就不按天重置。 |
 
 | `group_scope` | 一个会话对应 | 适合 |
 |---|---|---|
@@ -294,7 +296,18 @@ hermes gateway status         # 确认 lark_user 已连接
 
 话题里的 @ 第一次出现时，插件会查一次这个话题的根消息（约 2 秒），之后缓存，同一话题不再重复查询。查询失败时退回按话题 ID 分会话：只是失去和根消息会话的衔接，不影响回复。
 
-会话 key 统一由 gateway 生成，因此多 profile 的命名空间、`/new` 和会话过期策略都照常生效。
+会话 key 统一由 gateway 生成，因此多 profile 的命名空间照常生效。
+
+**会话什么时候结束（`idle_reset` / `daily_reset_at`）**：gateway 的会话只会在收到 `/new` 或 `/reset` 时结束，可是给你发消息的人不能控制 gateway，他们发 `/new` 只会被当成普通文字。不设结束条件的话，和每个人的私聊、`per_chat_user` 和 `per_chat` 的群会话都会一直累加下去：上下文越来越长，每次回复的成本越来越高，旧话题也会一直影响新的回答。所以插件默认在会话**闲置 4 小时**后结束它：
+
+- 判断依据是这个会话最后一次活动的时间，由 gateway 记录，gateway 重启后依然有效。
+- 判断发生在下一条消息进来时：插件把旧会话标记为结束，gateway 处理这条消息时就会开一个全新的会话。旧会话的结束流程（会话钩子、记忆写入）和 `/new` 一样完整，旧对话也照常保存，agent 之后仍能用 `session_search` 查到。
+- gateway 在新会话开始时会发一条“会话已重置”提示，插件不会把它发到飞书，对方看不到。
+- 正在执行任务的会话不会被结束。
+- `per_message` 每条消息本来就是新会话；`per_thread` 一个话题一个会话，本身有边界，但话题闲置超过 `idle_reset` 后同样会开新会话。
+- 开了群上下文（`context.when: new_session`）时，每个新会话的第一条消息都会重新带上群里最近的消息，所以会话短也能接上前因后果。
+
+每个会话可以在 `chats.<chat_id>.session` 里单独设置，比如某个长期项目群不想重置，就设 `idle_reset: 0`。
 
 ### 5.6 回复（`reply`）
 
@@ -339,7 +352,7 @@ hermes gateway status         # 确认 lark_user 已连接
 | `context.hours` | 小时数 / `24` | 只带最近多少小时内的群消息。 |
 | `context.thread_limit` | int / `20`（0–50） | 最多带多少条话题消息，`0` 表示不带。 |
 | `context.msg_max_chars` | int / `1000` | 每条消息最多截取多少字，`0` 表示不截断。 |
-| `context.when` | `new_session` \| `always` / `new_session` | `new_session`：只在会话第一条消息时带上（之后会话本身已有记忆，节省 token）；`always`：每次 @ 都带上最新上下文。 |
+| `context.when` | `new_session` \| `always` / `new_session` | `new_session`：只在会话第一条消息时带上（之后会话本身已有记忆，节省 token；会话因 `idle_reset` / `daily_reset_at` 重新开始时也会带上）；`always`：每次 @ 都带上最新上下文。 |
 
 上下文拼在消息前面，agent 看到的格式如下：
 
@@ -367,6 +380,7 @@ hermes gateway status         # 确认 lark_user 已连接
 |---|---|
 | `enabled` | 设为 `false` 时完全忽略这个会话（相当于黑名单） |
 | `dm_scope` / `group_scope`（或 `session.*`） | 这个会话的隔离策略 |
+| `session.idle_reset` / `session.daily_reset_at` | 这个会话什么时候结束、开新会话 |
 | `reply.*` | 这个会话的回复方式（`delivery`、`format`、`target`、`prefix`……） |
 | `context.*` | 这个群的上下文开关和参数 |
 

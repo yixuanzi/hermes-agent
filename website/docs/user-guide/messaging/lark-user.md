@@ -135,6 +135,8 @@ platforms:
     session:
       dm_scope: per_chat         # per_chat | per_message
       group_scope: per_chat_user # per_chat | per_chat_user | per_thread | per_message
+      idle_reset: 4h             # quiet this long -> the next message starts a new session; 0 = never
+      daily_reset_at: ""         # e.g. "04:00": the first message after it starts a new session
 
     reply:
       delivery: review           # review | auto
@@ -159,7 +161,7 @@ platforms:
       msg_max_chars: 1000
       when: new_session          # new_session | always
 
-    chats:                       # per-chat overrides (enabled, scopes, reply.*, context.*), keyed by chat_id
+    chats:                       # per-chat overrides (enabled, session.*, reply.*, context.*), keyed by chat_id
       oc_team: { group_scope: per_thread, reply: { delivery: auto }, context: { enabled: true } }
       oc_noisy: { enabled: false }
 ```
@@ -176,6 +178,16 @@ platforms:
 | group `per_chat_user` | person in each group (follows the gateway's `group_sessions_per_user`, on by default) |
 | group `per_thread` | root message and the topic under it: a mention in the main chat, and later mentions in the topic that grows under that message, share one session (the topic's root is looked up once per topic). Quote replies outside a topic count as new roots |
 | group `per_message` | mention |
+
+Gateway sessions end only on `/new` or `/reset`, and the people writing to you cannot send
+gateway commands (a `/new` from them is plain text). Without an end, a DM or a `per_chat_user` /
+`per_chat` group session would grow forever, with every reply paying for the whole history. So a
+session that has been quiet for `session.idle_reset` (default `4h`), or was last active before
+`session.daily_reset_at`, ends when the next message arrives. The gateway then opens a fresh session for that message
+through the same path as `/new` (hooks and memory included; the old transcript stays searchable),
+and its "session reset" notice is not sent to Lark. A session with a turn in flight never ends this
+way. With `context.when: new_session`, each new session starts with the group's recent messages
+again. Set `idle_reset: 0` under `chats.<chat_id>.session` to keep one conversation going.
 
 ### Group context
 

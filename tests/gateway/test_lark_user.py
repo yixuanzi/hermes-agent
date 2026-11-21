@@ -329,6 +329,88 @@ async def test_dm_scopes_and_per_chat_override(lark):
     assert p1 != p2
 
 
+# ── conversation lifetime ───────────────────────────────────────────────────
+
+async def _with_store(lark, tmp_path, **extra):
+    """An opened adapter wired to a real gateway SessionStore; ``turn`` stands in for the gateway
+    opening the session of each event the adapter hands off, as the runner does when a turn starts."""
+    from gateway.config import GatewayConfig
+    from gateway.session import SessionStore
+    adapter, events = await opened(lark, **extra)
+    store = SessionStore(tmp_path / "sessions", GatewayConfig())
+    adapter.set_session_store(store)
+
+    async def turn(source, *messages, age_after=0.0):
+        lark.write(**{"search_p2p" if source == "dm" else "search_group": list(messages)})
+        before = len(events)
+        await adapter.poll_once(source)
+        entries = [store.get_or_create_session(e.source) for e in events[before:]]
+        for entry in entries:
+            entry.updated_at = dt.datetime.now() - dt.timedelta(seconds=age_after)
+        return entries
+
+    return events, turn
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_quiet_past_idle_reset_starts_afresh(lark, tmp_path):
+    _, turn = await _with_store(lark, tmp_path, session={"idle_reset": "2h"})
+    (first,) = await turn("dm", msg("om_1"))
+    (soon,) = await turn("dm", msg("om_2"), age_after=3 * 3600)  # then nobody writes for 3h
+    assert soon.session_id == first.session_id
+    (later,) = await turn("dm", msg("om_3"))
+    assert later.session_id != first.session_id and later.session_key == first.session_key
+    (after,) = await turn("dm", msg("om_4"))
+    assert after.session_id == later.session_id  # the new conversation carries on
+
+
+@pytest.mark.asyncio
+async def test_idle_reset_zero_keeps_a_chat_going_and_overrides_per_chat(lark, tmp_path):
+    _, turn = await _with_store(lark, tmp_path, session={"idle_reset": "1h"},
+                                chats={"oc_dm2": {"session": {"idle_reset": 0}}})
+    kept, ended = await turn("dm", msg("om_1", chat="oc_dm2", sender="ou_bob"), msg("om_2"), age_after=86400)
+    kept2, ended2 = await turn("dm", msg("om_3", chat="oc_dm2", sender="ou_bob"), msg("om_4"))
+    assert kept2.session_id == kept.session_id
+    assert ended2.session_id != ended.session_id
+
+
+@pytest.mark.asyncio
+async def test_a_new_conversation_gets_group_context_again(lark, tmp_path):
+    lark.write(chat_history=[_history("om_h1", "earlier")])
+    events, turn = await _with_store(lark, tmp_path, session={"idle_reset": "1h"},
+                                     context={"enabled": True, "when": "new_session"})
+    await turn("mention", _group("om_1"))
+    await turn("mention", _group("om_2"), age_after=7200)
+    await turn("mention", _group("om_3"))
+    assert [e.channel_context is not None for e in events] == [True, False, True]
+
+
+def test_daily_reset_ends_what_was_last_active_before_the_hour():
+    from plugins.platforms.lark_user.lark_user_config import ChatSettings
+    from plugins.platforms.lark_user.lark_user_session import expiry_reason
+    daily = ChatSettings(idle_reset=0, daily_reset_at=4 * 60)
+
+    def at(day, hour, minute=0):
+        return dt.datetime(2026, 1, day, hour, minute).timestamp()
+
+    assert expiry_reason(at(1, 23), at(2, 5), daily) == "daily"
+    assert expiry_reason(at(2, 4, 30), at(2, 5), daily) == ""
+    assert expiry_reason(at(1, 5), at(2, 3), daily) == ""  # today's 04:00 has not come yet
+    assert expiry_reason(at(1, 3), at(2, 3), daily) == "daily"
+    assert expiry_reason(at(1, 23), at(2, 5), ChatSettings(idle_reset=0)) == ""
+
+
+def test_reset_settings_are_validated():
+    from plugins.platforms.lark_user.lark_user_config import SettingsError, load_settings
+    with pytest.raises(SettingsError):
+        load_settings({"session": {"idle_reset": "30s"}})
+    with pytest.raises(SettingsError):
+        load_settings({"session": {"daily_reset_at": "25:00"}})
+    settings = load_settings({"session": {"daily_reset_at": "04:30"}, "chats": {"oc_x": {"session": {"daily_reset_at": None}}}})
+    assert settings.defaults.idle_reset == 4 * 3600 and settings.defaults.daily_reset_at == 270
+    assert settings.for_chat("oc_x").daily_reset_at is None
+
+
 # ── delivery ────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
