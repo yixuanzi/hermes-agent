@@ -137,6 +137,7 @@ with a name allows that one name only.
 | `hermes_cli.session_worktree` | `finish` | user-guide/features/plugins.md § A plugin with its own chat client |
 | `tools.user_env_runtime` | `get_current_user_env_identity` | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
 | `agent.tool_call_agent` | `current_tool_call_agent` | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
+| `aegis_common.source_header` | `format_source_header` | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
 | `tools.user_env_store` | whole module | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
 | `tools.cronjob_visibility` | `caller_identity` | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |
 | `tools.cronjob_visibility` | `resolve_caller_job` | Aegis fork § plugin-facing surfaces of its own core modules (aegis/docs/hermes/plugin-api.md) |

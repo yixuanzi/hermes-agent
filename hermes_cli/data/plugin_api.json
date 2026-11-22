@@ -189,6 +189,7 @@
       "entries": [
         "tools.user_env_runtime:get_current_user_env_identity",
         "agent.tool_call_agent:current_tool_call_agent",
+        "aegis_common.source_header:format_source_header",
         "tools.user_env_store",
         "tools.cronjob_visibility:caller_identity",
         "tools.cronjob_visibility:resolve_caller_job",

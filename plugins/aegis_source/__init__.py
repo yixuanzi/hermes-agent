@@ -10,12 +10,12 @@ persisted with it (``api_content``, cache-safe on replay), while the visible tra
 commands and ``/codex`` raw passthrough see the user's own text. The identity comes from the turn's
 gateway session (``HERMES_SESSION_*``): the actor is the trusted sender of THIS turn, set even in a
 shared chat whose route carries no user. ``uname`` is always present (possibly ``""``). This header
-is separate from the remote A2A envelope (``plugins.aegis_a2a``), which carries parent identity only.
+is separate from the remote A2A envelope (``plugins.aegis_a2a``), which carries parent identity only;
+both are written by ``aegis_common.source_header.format_source_header``.
 """
 
 from __future__ import annotations
 
-import json
 from typing import Optional
 
 _SOURCE_HEADER_PLATFORMS = frozenset({"slack", "feishu"})
@@ -25,14 +25,12 @@ def source_header(platform: str, channel: str, user_id: str, user_name: str) -> 
     """``<source>{...}</source>`` for a Slack/Feishu sender with a trusted user id, else None."""
     if platform not in _SOURCE_HEADER_PLATFORMS or not user_id:
         return None
-    from gateway.session import neutralize_untrusted_inline_text
+    from aegis_common.source_header import format_source_header
 
-    data: dict = {"platform": platform}
+    fields = {"platform": platform}
     if channel:
-        data["channel"] = channel
-    data["uid"] = user_id
-    data["uname"] = neutralize_untrusted_inline_text(user_name or "")
-    return f"<source>{json.dumps(data, ensure_ascii=False, separators=(',', ':'))}</source>"
+        fields["channel"] = channel
+    return format_source_header({**fields, "uid": user_id, "uname": user_name or ""})
 
 
 def turn_source_header(platform: str = "") -> Optional[str]:

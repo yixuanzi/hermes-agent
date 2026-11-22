@@ -29,6 +29,7 @@ from aegis.backend.chat.models import (
 from aegis.backend.chat.attachments import ChatAttachment, ChatAttachmentStore, prepare_turn_message
 from aegis.backend.chat.drawer import DrawerFileLedger
 from aegis.backend.chat.runtime import AegisChatInputAdapter, AegisChatOutputAdapter
+from aegis_common.source_header import format_source_header
 from hermes_constants import get_hermes_home
 from workagent.backend.agent_cache import AgentCache, release_agent_soft
 from workagent.backend.agent_runtime import default_agent_factory
@@ -252,16 +253,7 @@ def _message_delta_enabled() -> bool:
 
 
 def _aegis_source_prefix(*, uid: str, uname: str) -> str:
-    source = json.dumps(
-        {
-            "platform": "aegis",
-            "uid": uid,
-            "uname": uname,
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return f"<source>{source}</source>\n\n"
+    return format_source_header({"platform": "aegis", "uid": uid, "uname": uname}) + "\n\n"
 
 
 def _prepend_aegis_source_prefix(message: object, prefix: str) -> object:

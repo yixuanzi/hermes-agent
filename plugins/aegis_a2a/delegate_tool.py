@@ -25,6 +25,7 @@ from xml.sax.saxutils import escape
 
 import httpx
 
+from aegis_common.source_header import format_source_header
 from agent.secret_scope import get_secret
 from hermes_constants import get_hermes_home, profile_name_for_home
 from agent.tool_call_agent import current_tool_call_agent
@@ -486,8 +487,7 @@ def _format_aegis_source_header(parent_agent) -> str:
         source_data["uid"] = user_id
     if user_name:
         source_data["uname"] = user_name
-    source_payload = json.dumps(source_data, ensure_ascii=False, separators=(",", ":"))
-    return f"<source>{source_payload}</source>"
+    return format_source_header(source_data)
 
 
 def _decorate_a2a_user_message(text: str, parent_agent, *, context: str | None = None) -> str:
