@@ -41,6 +41,30 @@ def identity_platform(platform: str) -> str:
     return value
 
 
+# 定时任务的 agent 平台固定为 "cron"（cron/jobs_identify.as_job_owner），sender_id
+# 却是任务所有者 identify 里的平台用户 ID；所有者平台由 run_job 绑定在 userenv 身份上。
+_CRON_PLATFORM = "cron"
+
+
+def role_platform(platform: str, sender_id: str) -> str:
+    """本轮角色查找用的平台。
+
+    有所有者的定时任务按所有者平台查（``cron`` + ``bcge9g7d`` → ``feishu``），
+    与 v0.3 一致；只认 userenv 身份里与 sender_id 相同的那个用户，公共任务
+    （无 sender_id）和身份不一致时保持 ``cron``。
+    """
+    value = identity_platform(platform)
+    uid = str(sender_id or "").strip()
+    if value.lower() != _CRON_PLATFORM or not uid:
+        return value
+    from tools.user_env_runtime import get_current_user_env_identity
+
+    owner = get_current_user_env_identity()
+    if owner is None or owner.user_id != uid or not owner.platform:
+        return value
+    return owner.platform
+
+
 # ---------------------------------------------------------------- 身份解析 ----
 # session_id:turn_id -> (platform, uid)，由每轮 pre_llm_call 写入。
 # 群聊场景下 session_key 只含群 ID，工具层必须用这里缓存的个人身份判定，
@@ -132,7 +156,7 @@ def on_pre_llm_call(session_id="", platform="", sender_id="", turn_id="", task_i
     _TURN_IDENTITY.set(None)  # An incomplete replacement turn must clear stale identity.
     # Normalized once, so the prompt block, the turn cache and the tool gate's
     # snapshot all carry the same identity.
-    platform = identity_platform(platform)
+    platform = role_platform(platform, sender_id)
     plat, uid = (platform or "cli"), (sender_id or "local")
     _remember_identity(session_id, turn_id, plat, uid)
     snapshot = tuple(str(v or "").strip() for v in
