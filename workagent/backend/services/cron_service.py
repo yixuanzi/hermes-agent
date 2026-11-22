@@ -182,11 +182,29 @@ def create_job(
     )
 
 
+def _strip_annotation_fields(updates: dict, profile_name: str) -> dict:
+    """Drop the fields ``_annotate_cron_job`` adds to responses before they reach ``cron.jobs``.
+
+    A client that echoes a job detail back as its update carries ``profile`` and friends;
+    cron.jobs rejects ``profile``/``profile_name`` as immutable, so an unchanged echo would
+    fail the whole edit. A value naming another profile is a real move and stays an error.
+    """
+    stripped = dict(updates or {})
+    for field in ("profile", "profile_name"):
+        if field in stripped and stripped.pop(field) != profile_name:
+            raise HTTPException(status_code=400, detail="Cron job profile cannot be changed")
+    stripped.pop("hermes_home", None)
+    stripped.pop("is_default_profile", None)
+    return stripped
+
+
 def update_job(job_id: str, updates: dict, profile: str | None = None):
     selected = profile or _find_cron_job_profile(job_id)
     if not selected:
         return None
-    return _call_cron_for_profile(selected, "update_job", job_id, updates)
+    profile_name, _home = _cron_profile_home(selected)
+    return _call_cron_for_profile(
+        selected, "update_job", job_id, _strip_annotation_fields(updates, profile_name))
 
 
 def _normalize_raw_identify(value: Any) -> dict[str, str] | None:
@@ -271,12 +289,24 @@ def remove_job(job_id: str, profile: str | None = None) -> bool:
     return bool(_call_cron_for_profile(selected, "remove_job", job_id))
 
 
-def _escape_like(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+def list_job_run_sessions(job: dict[str, Any], limit: int = 20) -> list[dict[str, Any]]:
+    """Run sessions of an annotated ``job``, newest first, from its OWN profile's state.db.
 
-
-def _cron_session_pattern(job_id: str) -> str:
-    return f"cron_{_escape_like(job_id)}%"
+    Unified-runtime agent runs keep a runtime-minted ``local-*`` session id bound to the job only
+    through its scheduler admission, so an ``id LIKE 'cron_<job>_%'`` scan finds nothing newer
+    than the pre-unified runs; ``SessionDB.list_cron_job_runs`` matches both shapes. The job's
+    profile, not this process's, owns the sessions: a bare ``SessionDB()`` reads the launch
+    profile's store.
+    """
+    _name, home = _cron_profile_home(job.get("profile"))
+    db_path = home / "state.db"
+    if not db_path.exists():  # a profile that has never run anything has no store yet
+        return []
+    db = SessionDB(db_path=db_path, read_only=True)
+    try:
+        return db.list_cron_job_runs(str(job["id"]), limit=limit)
+    finally:
+        db.close()
 
 
 def get_job_history(job_id: str, profile: str | None = None) -> list[dict[str, Any]] | None:
@@ -288,24 +318,10 @@ def get_job_history(job_id: str, profile: str | None = None) -> list[dict[str, A
     if not job:
         return None
 
-    db = SessionDB()
-    try:
-        with db._lock:
-            rows = db._conn.execute(
-                """
-                SELECT id, started_at, ended_at, message_count,
-                       COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) AS total_tokens,
-                       end_reason
-                FROM sessions
-                WHERE id LIKE ? ESCAPE '\\'
-                ORDER BY started_at DESC
-                LIMIT 20
-                """,
-                (_cron_session_pattern(job_id),),
-            ).fetchall()
-        records = [dict(row) for row in rows]
-    finally:
-        db.close()
+    records = [
+        {**row, "total_tokens": (row.get("input_tokens") or 0) + (row.get("output_tokens") or 0)}
+        for row in list_job_run_sessions(job)
+    ]
 
     history: list[dict[str, Any]] = []
     for row in records:

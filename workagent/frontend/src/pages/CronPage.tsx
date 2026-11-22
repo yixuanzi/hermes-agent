@@ -55,7 +55,6 @@ const CRON_EDITABLE_KEYS = [
   "schedule_display",
   "enabled",
   "deliver",
-  "profile",
   "skills",
   "skill",
   "enabled_toolsets",
