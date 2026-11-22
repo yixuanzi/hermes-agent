@@ -44,3 +44,57 @@ def test_invalid_cron_input_is_a_client_error(client: TestClient) -> None:
 
     assert bad_schedule.status_code == 400
     assert id_change.status_code == 400
+
+
+def test_update_accepts_echoed_detail_annotations(client: TestClient) -> None:
+    job_id = client.post("/api/cron/jobs", json={"prompt": "x", "schedule": "every 2h"}).json()["id"]
+    detail = client.get(f"/api/cron/jobs/{job_id}").json()
+    echoed = {key: detail[key] for key in ("profile", "profile_name", "hermes_home", "is_default_profile")}
+
+    updated = client.put(f"/api/cron/jobs/{job_id}", json={"updates": {**echoed, "prompt": "y"}})
+
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["prompt"] == "y"
+
+
+def test_history_is_empty_before_the_profile_has_a_session_store(client: TestClient, tmp_path: Path) -> None:
+    job_id = client.post("/api/cron/jobs", json={"prompt": "x", "schedule": "every 2h"}).json()["id"]
+
+    assert not (tmp_path / "state.db").exists()
+    assert client.get(f"/api/cron/jobs/{job_id}/history").json() == []
+
+
+@pytest.mark.asyncio
+async def test_history_lists_unified_runtime_runs(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scheduler fire is a ``local-*`` session bound to its job only by its admission."""
+    from tests.fakes.cron_owner import admit_fire, cron_owner
+
+    owner = cron_owner(tmp_path, monkeypatch)
+    try:
+        job_id = client.post("/api/cron/jobs", json={"prompt": "x", "schedule": "every 2h"}).json()["id"]
+        session_id, _execution_id = await admit_fire(owner, job_id)
+    finally:
+        owner.db.close()
+
+    history = client.get(f"/api/cron/jobs/{job_id}/history").json()
+
+    assert session_id.startswith("local-")
+    assert [row["session_id"] for row in history] == [session_id]
+    assert history[0]["messages"] == 1
+
+    from aisoc.backend.services import overview_service
+
+    monkeypatch.setattr(cron_service, "_cron_profile_dicts", lambda: [{"name": "default"}])
+    [panel_row] = overview_service.get_cronjobs()
+    assert panel_row["last_run"]["session_id"] == session_id
+
+
+def test_update_rejects_profile_move(client: TestClient) -> None:
+    job_id = client.post("/api/cron/jobs", json={"prompt": "x", "schedule": "every 2h"}).json()["id"]
+
+    moved = client.put(f"/api/cron/jobs/{job_id}", json={"updates": {"profile": "other", "prompt": "y"}})
+
+    assert moved.status_code == 400
+    assert client.get(f"/api/cron/jobs/{job_id}").json()["prompt"] == "x"

@@ -152,10 +152,6 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _cron_session_pattern(job_id: str) -> str:
-    return f"cron_{_escape_like(job_id)}%"
-
-
 def _format_schedule(schedule: Any) -> str:
     if isinstance(schedule, dict):
         display = schedule.get("display")
@@ -275,55 +271,36 @@ def get_cronjobs() -> list[dict[str, Any]]:
         jobs = cron_service.list_jobs(profile="all")
     except Exception:
         return []
-    db = SessionDB()
-    try:
-        result: list[dict[str, Any]] = []
-        for job in jobs:
-            job_id = str(job.get("id") or "")
-            if not job_id:
-                continue
-            like_pattern = _cron_session_pattern(job_id)
-            last_run = _query_one(
-                db,
-                """
-                SELECT id, started_at, ended_at,
-                       COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) AS total_tokens,
-                       end_reason
-                FROM sessions
-                WHERE id LIKE ? ESCAPE '\\'
-                ORDER BY started_at DESC
-                LIMIT 1
-                """,
-                (like_pattern,),
-            )
-            run_count_row = _query_one(
-                db,
-                "SELECT COUNT(*) AS count FROM sessions WHERE id LIKE ? ESCAPE '\\'",
-                (like_pattern,),
-            )
-            result.append(
-                {
-                    "id": job_id,
-                    "name": str(job.get("name") or "unnamed"),
-                    "enabled": bool(job.get("enabled", True)),
-                    "schedule": _format_schedule(job.get("schedule")),
-                    "last_run": (
-                        {
-                            "session_id": str(last_run.get("id") or ""),
-                            "started_at": last_run.get("started_at"),
-                            "ended_at": last_run.get("ended_at"),
-                            "tokens": int(last_run.get("total_tokens") or 0),
-                            "status": str(last_run.get("end_reason") or "completed"),
-                        }
-                        if last_run
-                        else None
-                    ),
-                    "run_count": int(run_count_row.get("count") or 0),
-                }
-            )
-        return result
-    finally:
-        db.close()
+    result: list[dict[str, Any]] = []
+    for job in jobs:
+        job_id = str(job.get("id") or "")
+        if not job_id:
+            continue
+        runs = cron_service.list_job_run_sessions(job, limit=1)
+        last_run = runs[0] if runs else None
+        result.append(
+            {
+                "id": job_id,
+                "name": str(job.get("name") or "unnamed"),
+                "enabled": bool(job.get("enabled", True)),
+                "schedule": _format_schedule(job.get("schedule")),
+                "last_run": (
+                    {
+                        "session_id": str(last_run.get("id") or ""),
+                        "started_at": last_run.get("started_at"),
+                        "ended_at": last_run.get("ended_at"),
+                        "tokens": int((last_run.get("input_tokens") or 0) + (last_run.get("output_tokens") or 0)),
+                        "status": str(last_run.get("end_reason") or "completed"),
+                    }
+                    if last_run
+                    else None
+                ),
+                # The scheduler's own fire counter: run sessions are not a count (script-only
+                # fires write none, and a session store can be pruned or moved).
+                "run_count": int((job.get("repeat") or {}).get("completed") or 0),
+            }
+        )
+    return result
 
 
 def get_status() -> dict[str, Any]:
