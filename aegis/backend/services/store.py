@@ -98,7 +98,7 @@ class AegisStore:
     @staticmethod
     def _invalidate_a2a_caches() -> None:
         try:
-            from tools import a2a_delegate_tool
+            from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
         except Exception:
             return
 

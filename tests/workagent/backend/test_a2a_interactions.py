@@ -23,7 +23,7 @@ from tools.approval import (
 )
 from workagent.backend.a2a_server import create_a2a_app
 from workagent.backend.config import WorkagentSettings
-from tools.a2a_delegate_tool import _A2ADelegateSession
+from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession
 
 
 class _ApprovalAgent:

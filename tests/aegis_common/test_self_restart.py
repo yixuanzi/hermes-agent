@@ -32,13 +32,13 @@ import pytest
 def test_reconstruct_startup_argv_preserves_supported_launch_forms(
     orig_argv: list[str], expected: list[str]
 ) -> None:
-    from hermes_self_restart import reconstruct_startup_argv
+    from aegis_common.self_restart import reconstruct_startup_argv
 
     assert reconstruct_startup_argv(orig_argv=orig_argv) == expected
 
 
 def test_duplicate_request_does_not_launch_a_second_watcher(monkeypatch) -> None:
-    import hermes_self_restart as self_restart
+    from aegis_common import self_restart
 
     launched = []
     shutdown_services = []
@@ -76,7 +76,7 @@ def test_duplicate_request_does_not_launch_a_second_watcher(monkeypatch) -> None
 def test_detached_watcher_receives_startup_state_and_normal_environment(
     monkeypatch, tmp_path: Path
 ) -> None:
-    import hermes_self_restart as self_restart
+    from aegis_common import self_restart
 
     popen_calls = []
     monkeypatch.setattr(
@@ -117,7 +117,7 @@ def test_detached_watcher_receives_startup_state_and_normal_environment(
 
 
 def test_watcher_does_not_wait_on_a_reused_pid(monkeypatch) -> None:
-    import hermes_self_restart as self_restart
+    from aegis_common import self_restart
 
     class ReusedProcess:
         def create_time(self) -> float:
@@ -132,7 +132,7 @@ def test_watcher_does_not_wait_on_a_reused_pid(monkeypatch) -> None:
 
 
 def test_watcher_timeout_does_not_launch_replacement(monkeypatch, tmp_path: Path) -> None:
-    import hermes_self_restart as self_restart
+    from aegis_common import self_restart
 
     class InaccessibleProcess:
         def create_time(self) -> float:
@@ -179,7 +179,7 @@ def test_watcher_timeout_does_not_launch_replacement(monkeypatch, tmp_path: Path
 def test_replacement_launch_failure_writes_durable_diagnostic(
     monkeypatch, tmp_path: Path
 ) -> None:
-    import hermes_self_restart as self_restart
+    from aegis_common import self_restart
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr(
@@ -229,7 +229,7 @@ record = {
 if not state_path.exists():
     record["stage"] = "old"
     state_path.write_text(json.dumps(record), encoding="utf-8")
-    from hermes_self_restart import request_self_restart
+    from aegis_common.self_restart import request_self_restart
     request_self_restart("smoke", lambda: sys.exit(0))
     raise AssertionError("graceful shutdown callback did not exit")
 
@@ -241,7 +241,7 @@ state_path.write_text(json.dumps(record), encoding="utf-8")
     command = [sys.executable, str(service_path), str(state_path), "same-argument"]
     env = dict(os.environ)
     env["SMOKE_NORMAL_SETTING"] = "preserved"
-    project_root = str(Path(__file__).resolve().parents[1])
+    project_root = str(Path(__file__).resolve().parents[2])
     env["PYTHONPATH"] = os.pathsep.join(
         part for part in (project_root, env.get("PYTHONPATH", "")) if part
     )

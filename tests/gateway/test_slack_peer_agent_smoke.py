@@ -9,9 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig, PlatformConfig
-from gateway.platforms.base import MessageEvent
-from gateway.run import GatewayRunner
+from gateway.config import PlatformConfig
 
 
 def _ensure_slack_mock():
@@ -154,13 +152,6 @@ class TestSlackPeerAgentSmoke:
         assert msg_event.source.user_id == "B_PEER"
         assert msg_event.source.user_name == "Peer Bot"
         assert msg_event.source.is_bot is True
-
-        runner = object.__new__(GatewayRunner)
-        runner.config = GatewayConfig(thread_sessions_per_user=True)
-        prepared = await runner._prepare_inbound_message_text(
-            event=MessageEvent(text=msg_event.text, source=msg_event.source), source=msg_event.source, history=[])
-        assert prepared.startswith(
-            '<source>{"platform":"slack","channel":"C_SMOKE","uid":"B_PEER","uname":"Peer Bot"}</source>')
 
     @pytest.mark.asyncio
     async def test_human_message_with_current_mention_routes(self, smoke_adapter):

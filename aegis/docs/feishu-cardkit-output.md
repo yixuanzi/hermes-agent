@@ -16,7 +16,7 @@
 | `plugins/platforms/feishu/adapter.py` | `send()` / `edit_message()` / `delete_message()` 卡片拦截；turn 括起（`on_processing_start` / `on_processing_complete`）；`handle_delegate_card_event`；`_card_bypass_requested`；`_env_boolean_default_false`；`card_output` 配置；卡片模式附件（`_split_card_mode_attachments` / `_dispatch_card_attachments` / `_send_media_once`）；话题内附件重锚（`_send_attachment_message`） |
 | `plugins/platforms/feishu/plugin.yaml` | 5 个新 optional_env |
 | `gateway/run.py` | progress metadata 打 `hermes_progress`；心跳 metadata 打 `hermes_card_bypass`（**均仅 Feishu 平台**） |
-| `tools/a2a_delegate_tool.py` | `_A2ADelegateSession` 增加 `agent_name`（仅用于卡片标题展示） |
+| `plugins/aegis_a2a/delegate_tool.py` | `_A2ADelegateSession` 增加 `agent_name`（仅用于卡片标题展示） |
 | `.env.example` | 四个 FEISHU_CARD_* 示例项 |
 | `tests/gateway/test_feishu_card_output.py` | **新增** 91 个测试 |
 | `tests/gateway/test_feishu.py` | 106 个测试（含话题内附件投递 8 个、卡片关闭时的向后兼容锚点 1 个） |

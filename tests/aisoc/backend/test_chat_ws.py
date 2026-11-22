@@ -569,7 +569,7 @@ class _ClarifyOpenEndedAgent:
 
 def test_chat_session_manager_uses_aisoc_platform_name(load_backend) -> None:
     service = load_backend("aisoc.backend.chat.service")
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     a2a_delegate_tool.A2A_CONTEXT = ""
     captured: dict[str, str] = {}
@@ -664,7 +664,7 @@ def test_build_aisoc_ephemeral_system_prompt_uses_cached_a2a_context(
     monkeypatch,
 ) -> None:
     service = load_backend("aisoc.backend.chat.service")
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     monkeypatch.setattr(
         a2a_delegate_tool,
@@ -688,7 +688,7 @@ def test_build_aisoc_ephemeral_system_prompt_refreshes_empty_a2a_context(
     monkeypatch,
 ) -> None:
     service = load_backend("aisoc.backend.chat.service")
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     monkeypatch.setattr(a2a_delegate_tool, "A2A_CONTEXT", "")
     refresh_calls = {"count": 0}
@@ -713,7 +713,7 @@ def test_chat_session_manager_injects_active_aegis_context_as_xml(
     monkeypatch,
 ) -> None:
     service = load_backend("aisoc.backend.chat.service")
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     a2a_delegate_tool.A2A_CONTEXT = ""
     monkeypatch.setattr(
@@ -1259,7 +1259,7 @@ def test_chat_ws_a2a_slash_returns_cached_context_without_running_agent(
     monkeypatch,
     hermes_home,
 ) -> None:
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     a2a_delegate_tool.A2A_CONTEXT = "<aegis_context><active_agents /></aegis_context>"
     server = load_backend("aisoc.backend.server")
@@ -1290,7 +1290,7 @@ def test_chat_ws_a2a_slash_refreshes_empty_context(
     monkeypatch,
     hermes_home,
 ) -> None:
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     a2a_delegate_tool.A2A_CONTEXT = ""
     refresh_calls = {"count": 0}
@@ -1329,7 +1329,7 @@ def test_chat_ws_a2a_slash_reports_refresh_failure(
     monkeypatch,
     hermes_home,
 ) -> None:
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     a2a_delegate_tool.A2A_CONTEXT = ""
 

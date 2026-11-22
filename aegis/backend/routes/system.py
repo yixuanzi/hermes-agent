@@ -13,7 +13,7 @@ from aegis.backend.models import HealthResponse, SystemBootstrapResponse, System
 from aegis.backend.services.lark_service import lark_is_configured
 from aegis.backend.services.oidc_service import oidc_is_configured
 from aegis.backend.services.user_service import UserService
-from hermes_self_restart import request_self_restart
+from aegis_common.self_restart import request_self_restart
 
 
 def _graceful_shutdown() -> None:

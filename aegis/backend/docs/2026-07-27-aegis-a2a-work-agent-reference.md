@@ -251,7 +251,7 @@ curl -i -X POST https://work-agent.example.com/a2a \
 仓库也提供基于官方 Python SDK 的协议烟测脚本：
 
 ```bash
-python scripts/a2a_smoke_test.py \
+python workagent/scripts/a2a_smoke_test.py \
   --base-url https://work-agent.example.com \
   --auth-token "$A2A_SESSION_TOKEN"
 ```
@@ -343,7 +343,7 @@ add_a2a_routes_to_fastapi(
 - [ ] 若启用认证，Aegis 的 `Authorization: Bearer …` Header 与服务端 token 一致。
 - [ ] 服务端正确处理 Send、Task 查询和 Cancel；长任务最终进入明确终态。
 - [ ] `skills` 描述了可被路由的细粒度能力；必要时补充 Aegis `extcapabilities`。
-- [ ] 通过 `scripts/a2a_smoke_test.py` 和 Aegis Chat `/a2a` / Agents 悬浮窗验证发现、能力显示和委派。
+- [ ] 通过 `workagent/scripts/a2a_smoke_test.py` 和 Aegis Chat `/a2a` / Agents 悬浮窗验证发现、能力显示和委派。
 
 ## 8. 当前 Aegis 边界
 

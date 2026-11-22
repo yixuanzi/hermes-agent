@@ -1,0 +1,7 @@
+name: aegis_products
+version: "1.0.0"
+description: "Aegis fork product consoles: `hermes aegis`, `hermes aisoc`, `hermes workagent` (each delegates to <product>/backend/main.py)."
+author: "aegis"
+# Bundled fork plugins auto-load like a backend, so the product commands keep working without a
+# `plugins.enabled` entry (they were built-in subcommands before).
+kind: backend

@@ -806,6 +806,11 @@
     "plugins/web/xai/provider.py tools.xai_http.resolve_xai_http_credentials": 1
   },
   "core_to_module": {
+    "aegis/backend/chat/service.py plugins.aegis_a2a": 2,
+    "aegis/backend/services/a2a_context_service.py plugins.aegis_a2a": 1,
+    "aegis/backend/services/delegate_security_service.py plugins.aegis_a2a.delegate_aegis": 1,
+    "aegis/backend/services/store.py plugins.aegis_a2a": 1,
+    "aisoc/backend/chat/service.py plugins.aegis_a2a": 2,
     "gateway/platforms/api_server.py plugins.cron_providers.chronos.verify": 1,
     "gateway/run.py plugins.teams_pipeline.runtime": 1,
     "gateway/session_a2a.py plugins.platforms.a2a.adapter": 1,

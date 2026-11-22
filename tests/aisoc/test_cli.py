@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import sys
 
 from fastapi.testclient import TestClient
@@ -11,18 +10,15 @@ from aisoc.backend.config import load_aisoc_settings
 from aisoc.backend.server import create_app
 
 
-def test_aisoc_registered_in_builtin_subcommands() -> None:
-    assert "aisoc" in main_mod._BUILTIN_SUBCOMMANDS
-
-
-def test_main_routes_aisoc_with_expected_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hermes_aisoc_routes_through_the_products_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     def _fake_cmd_aisoc(args) -> None:
         captured["args"] = args
         raise SystemExit(0)
 
-    monkeypatch.setattr(main_mod, "cmd_aisoc", _fake_cmd_aisoc)
+    # `hermes aisoc` is a plugin CLI command (plugins/aegis_products); its handler calls the backend.
+    monkeypatch.setattr("aisoc.backend.main.cmd_aisoc", _fake_cmd_aisoc)
     monkeypatch.setattr(sys, "argv", ["hermes", "aisoc"])
 
     with pytest.raises(SystemExit) as exc:
@@ -56,17 +52,3 @@ def test_root_serves_index_html(tmp_path) -> None:
     resp_spa = client.get("/chat")
     assert resp_spa.status_code == 200
     assert marker in resp_spa.text
-
-
-def test_hermes_cmd_aisoc_delegates_to_backend_main(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
-
-    def _fake_cmd_aisoc(args: argparse.Namespace) -> None:
-        captured["args"] = args
-
-    monkeypatch.setattr("aisoc.backend.main.cmd_aisoc", _fake_cmd_aisoc, raising=False)
-
-    args = argparse.Namespace(module="server", port=9120)
-    main_mod.cmd_aisoc(args)
-
-    assert captured["args"] is args

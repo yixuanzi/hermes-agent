@@ -86,7 +86,7 @@ agent:
 
 同一组 `max_size` / `idle_ttl_secs` 也约束 A2A 的**任务存储**（`a2a_service/task_store.py` 的 `BoundedTaskStore`）。SDK 自带的 `InMemoryTaskStore` 只在服务端显式调用 `delete()` 时才删除记录（A2A 1.x 协议没有删除任务的 RPC），而 A2A 委派轮询到终态后就走开了，所以未加约束时每个请求都会留下一条永久记录。`BoundedTaskStore` 在每次 `save` 时按 owner 分区做 LRU + TTL 清理，但只清理**已结束**的任务：处于 `submitted` / `working` 的任务仍被请求驱动，删掉会让并发的 `GetTask`、`CancelTask` 中途报 not found；停在 `input_required` / `auth_required` 的任务则可以被 TTL 回收——客户端再也没回来正是 TTL 存在的意义。
 
-注意：调用方若不显式传 `session_id`，`aegis_a2a_delegate` 会为每次调用生成一个新的 `context_id`（见 `tools/a2a_delegate_tool.py` 的 `_default_session_id()`），即"一次委派一个 context"。需要跨轮次复用上下文时，请显式传入稳定的 `session_id`。
+注意：调用方若不显式传 `session_id`，`aegis_a2a_delegate` 会为每次调用生成一个新的 `context_id`（见 `plugins/aegis_a2a/delegate_tool.py` 的 `_default_session_id()`），即"一次委派一个 context"。需要跨轮次复用上下文时，请显式传入稳定的 `session_id`。
 
 #### A2A 模式启用 YOLO
 

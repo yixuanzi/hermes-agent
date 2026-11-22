@@ -27,8 +27,9 @@
 Slack / Feishu message
   -> platform Adapter foreground route (if active)
   -> GatewayRunner binds runtime for this turn
-  -> AIAgent._dispatch_a2a_delegate(...)
-  -> tools.a2a_delegate_tool.a2a_delegate(...)
+  -> registry tool `aegis_a2a_delegate` (aegis_a2a plugin; executor binds the live agent)
+  -> plugins.aegis_a2a.delegate_tool.delegate_handler / dispatch_for_agent(...)
+  -> plugins.aegis_a2a.delegate_tool.a2a_delegate(...)
   -> _A2ADelegateSession.send_turn(...)
   -> A2A remote agent
   -> delegate events
@@ -43,10 +44,10 @@ Slack 与 Feishu 的来源信息有两个彼此独立的注入点，二者都使
 
 | 位置 | 触发条件 | 内容 | 接收方 |
 | --- | --- | --- | --- |
-| `GatewayRunner._prepare_inbound_message_text(...)` | Slack 或 Feishu 消息已通过 gateway 命令处理、会进入主 Agent，且有 `source.user_id` | `{"platform":"slack"\|"feishu","channel":"…","uid":"…","uname":"…"}`；Feishu 的 `chat_id` 映射到 `channel`，`channel` 与 `uname` 仅在值存在时写入 | 主 Agent 的当前 user turn |
-| `tools.a2a_delegate_tool._decorate_a2a_user_message(...)` | 调用 `aegis_a2a_delegate` 时父 Agent 有用户 ID 或用户名 | `{"platform":"slack"\|"feishu","uid":"…","uname":"…"}`；由父 Agent 的 `platform`、`_user_id`、`_user_name` 重建 | 每一轮发给远端 A2A Agent 的 user message |
+| `aegis_source` 插件的 `pre_llm_call` hook（`plugins/aegis_source/`） | Slack 或 Feishu 的 gateway turn 进入主 Agent，且该 turn 有可信发送者（`HERMES_SESSION_ACTOR_ID`，缺省回退 `HERMES_SESSION_USER_ID`） | `{"platform":"slack"\|"feishu","channel":"…","uid":"…","uname":"…"}`；Feishu 的 `chat_id` 映射到 `channel`；`channel` 仅在值存在时写入，`uname` 总是存在（可能为空） | 主 Agent 的当前 user turn（追加在 user message 之后，随 `api_content` 持久化） |
+| `plugins.aegis_a2a.delegate_tool._decorate_a2a_user_message(...)` | 调用 `aegis_a2a_delegate` 时父 Agent 有用户 ID 或用户名 | `{"platform":"slack"\|"feishu","uid":"…","uname":"…"}`；由父 Agent 的 `platform`、`_user_id`、`_user_name` 重建 | 每一轮发给远端 A2A Agent 的 user message |
 
-Gateway 信封在所有入站补充信息（如 thread/reply context、附件提示和 `@` 引用展开）处理完后统一置于首行，随后以空行接正文。因此它不会影响 Slack 或 Feishu command 的解析，也不为 history backfill 单独增加来源标签。该信封适用于 DM、channel 和 Feishu 群聊；其他平台仍沿用既有的共享会话 `[user]` 前缀逻辑。
+主 Agent 信封作为 `pre_llm_call` 上下文追加在当前 user message 之后（发送给模型的内容与持久化的 `api_content` 一致，prompt cache 安全），可见 transcript、slash command 解析和 `/codex` 原文直通都只看到用户原文，也不为 history backfill 单独增加来源标签。每个 agent turn 一个信封：运行中 turn 吸收的 steer/追问不单独带信封（共享会话的 `[user]` 前缀仍标识发言人）。该信封适用于 DM、channel 和 Feishu 群聊；其他平台仍沿用既有的共享会话 `[user]` 前缀逻辑。
 
 两个信封**不会直接透传或合并**：远端 A2A 的信封不携带 `channel`，也不会从主 Agent user turn 中复制该字段。远端需要稳定的渠道标识时，必须通过 A2A 消息契约显式新增并测试，而不能假设它从 gateway 信封自动获得。
 
@@ -54,7 +55,7 @@ Gateway 信封在所有入站补充信息（如 thread/reply context、附件提
 
 主要文件：
 
-- `tools/a2a_delegate_tool.py`: 注册表发现、远端会话、循环、取消和工具 schema。
+- `plugins/aegis_a2a/delegate_tool.py`: 注册表发现、远端会话、循环、取消和工具 schema。
 - `toolsets.py`: `aegis_a2a` toolset，包含 `aegis_a2a_list` 和 `aegis_a2a_delegate`。
 - `model_tools.py`、`agent/tool_executor.py`、`agent/agent_runtime_helpers.py`、`run_agent.py`: 将工具作为 agent-owned tool 分发，保留父 Agent 的运行时状态。
 
@@ -96,7 +97,7 @@ a2a_delegate(
 
 `is_delegate_output` 在 Aegis 审计中记录调用方传入的原始值。因此，`is_loop=true` 且 `is_delegate_output=false` 时，实际会发送 adapter 事件，但审计字段仍为 `false`。
 
-调用必须经 `AIAgent._dispatch_a2a_delegate()`，该入口向工具传入：
+工具由 `aegis_a2a` 插件注册为普通 registry 工具；tool executor 在每次工具调用期间绑定正在执行的 Agent（`agent.tool_call_agent.current_tool_call_agent()`），handler 经 `dispatch_for_agent()` 向工具传入：
 
 - 当前父 Agent；工具由此获取平台、用户和停止状态。
 - `_delegate_ext_output_adapter`。
@@ -324,7 +325,7 @@ Feishu adapter 以 interactive card 实现相同语义：问题、每个选项�
 从仓库根目录执行：
 
 ```bash
-venv/bin/python -m pytest tests/tools/test_a2a_delegate_tool.py -q
+venv/bin/python -m pytest tests/plugins/aegis_a2a/test_delegate_tool.py -q
 venv/bin/python -m pytest tests/gateway/test_slack_delegate_runtime_wiring.py -q
 venv/bin/python -m pytest tests/gateway/test_slack_clarify_buttons.py -q
 venv/bin/python -m pytest tests/gateway/test_feishu_clarify_and_delegate.py -q
@@ -332,7 +333,7 @@ venv/bin/python -m pytest tests/workagent/backend/test_a2a_interactions.py tests
 venv/bin/python -m pytest tests/aegis/backend/test_chat_ws.py -q
 venv/bin/python -m pytest tests/gateway/test_shared_group_sender_prefix.py -q
 venv/bin/python -m pytest tests/run_agent/test_run_agent.py tests/test_model_tools.py -q
-venv/bin/python -m py_compile tools/a2a_delegate_tool.py plugins/platforms/slack/adapter.py plugins/platforms/feishu/adapter.py gateway/run.py run_agent.py
+venv/bin/python -m py_compile plugins/aegis_a2a/delegate_tool.py plugins/platforms/slack/adapter.py plugins/platforms/feishu/adapter.py gateway/run.py run_agent.py
 git diff --check
 ```
 

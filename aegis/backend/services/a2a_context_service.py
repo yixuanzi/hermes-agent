@@ -21,7 +21,7 @@ def _utc_timestamp() -> str:
 class A2AContextService:
     """Maintain one process-lifetime snapshot of the A2A discovery result.
 
-    The source of truth remains :mod:`tools.a2a_delegate_tool`: calling its
+    The source of truth remains :mod:`plugins.aegis_a2a.delegate_tool`: calling its
     JSON output keeps the REST view aligned with the ``/a2a`` slash command's
     registry parsing, remote agent-card probing, and capability merge rules.
     """
@@ -63,7 +63,7 @@ class A2AContextService:
         try:
             # Import on refresh so the existing A2A tool remains the single
             # owner of registry behavior and its process-level registry state.
-            from tools import a2a_delegate_tool
+            from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
             raw_payload = a2a_delegate_tool.a2a_list("json")
             payload = json.loads(raw_payload)

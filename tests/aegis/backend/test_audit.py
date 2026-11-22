@@ -8,7 +8,7 @@ import jwt
 from fastapi.testclient import TestClient
 
 from aegis.backend.chat.service import TaskAuditStore
-from tools.a2a_delegate_aegis import AegisDelegateStore
+from plugins.aegis_a2a.delegate_aegis import AegisDelegateStore
 
 
 AUTH_TOKEN = jwt.encode(

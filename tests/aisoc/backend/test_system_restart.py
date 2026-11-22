@@ -5,7 +5,7 @@ import os
 from fastapi.testclient import TestClient
 import pytest
 
-import hermes_self_restart
+from aegis_common import self_restart
 import aisoc.backend.services.user_store as _user_store_module
 from aisoc.backend.config import load_aisoc_settings
 from aisoc.backend.server import create_app
@@ -16,7 +16,7 @@ BOOTSTRAP_PASSWORD = "test-admin-password-123"
 
 @pytest.fixture(autouse=True)
 def reset_restart_guard(monkeypatch) -> None:
-    monkeypatch.setattr(hermes_self_restart, "_restart_requested", False)
+    monkeypatch.setattr(self_restart, "_restart_requested", False)
 
 
 def _client(monkeypatch) -> tuple[TestClient, dict[str, str]]:
@@ -36,7 +36,7 @@ def _client(monkeypatch) -> tuple[TestClient, dict[str, str]]:
 def test_restart_requires_valid_bearer_auth(monkeypatch) -> None:
     launched = []
     monkeypatch.setattr(
-        hermes_self_restart,
+        self_restart,
         "_start_detached_watcher",
         lambda spec: launched.append(spec),
     )
@@ -94,7 +94,7 @@ def test_restart_returns_accepted_payload_and_defers_shutdown(
     launched = []
     shutdowns = []
     monkeypatch.setattr(
-        hermes_self_restart,
+        self_restart,
         "_start_detached_watcher",
         lambda spec: launched.append(spec),
     )
@@ -127,7 +127,7 @@ def test_duplicate_restart_returns_202_without_second_watcher(
     launched = []
     shutdowns = []
     monkeypatch.setattr(
-        hermes_self_restart,
+        self_restart,
         "_start_detached_watcher",
         lambda spec: launched.append(spec),
     )

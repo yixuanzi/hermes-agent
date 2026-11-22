@@ -1,7 +1,8 @@
 # Hermes Change Intent Summary by Aegis
 
 Final summary for recording change intent when a task modifies non-test code
-outside `aisoc/`、`workagent/`、`aegis/`、`plugins/ext-tools/` and `plugins/rbac-guard/`.
+outside `aisoc/`、`workagent/`、`aegis/`、`aegis_common/`、`plugins/ext-tools/`、`plugins/rbac-guard/`、
+`plugins/aegis_a2a/`、`plugins/aegis_products/` and `plugins/aegis_source/`.
 
 Maintain this file as the current per-file summary of change intent. Do not
 backfill prior historical repository changes, and do not add task-completion log
@@ -46,85 +47,41 @@ Intent: Keep command routing predictable while extending an existing command flo
 ```
 
 
-## File: `tools/a2a_delegate_tool.py`
-
-Feature: Opt-in remote A2A delegation.
-Intent: Provide `aegis_a2a_list` and remote-only `aegis_a2a_delegate` behind the opt-in `aegis_a2a` toolset, load the SDK lazily, return clear unavailable/configuration errors, and keep the default core tool schema from growing. Remote agents come from `$HERMES_HOME/a2a.json` (the `a2a` map plus `global` routing rules); only `status: active` entries count, each card is fetched from `/.well-known/agent-card.json` with a 5 s timeout, and `aegis_a2a_list` renders them as `<aegis_context>` (cached in `A2A_CONTEXT`, which the Aegis console reads). Unknown model arguments are ignored, so a stale schema cannot select behaviour the tool does not have. The resolved `agent_name` rides on the delegate session purely for platform presentation; it must never participate in routing, session identity, or authorization.
-
-Feature: Foreground loop and source identity envelope.
-Intent: Keep one remote A2A session alive across foreground input (reuse context/task state; default ids are `delegate_{profile}_a2a_{timestamp}_{NN}`, the random suffix reducing collisions), stream status, AI deltas, tool calls, final output and errors (a follow-up input only refreshes the parent's activity), and return explicit exit reasons for `/main`, input closure, timeout, errors and interruption without injecting synthetic user messages into the main conversation. Every remote turn is prefixed with a compact source envelope rebuilt from the parent Agent's platform, user ID and display name (optional context only on the initial turn); this stays separate from the gateway's channel envelope so channel data is never assumed to be forwarded.
-
-Feature: `hermes.interaction.v1` client bridge and interaction-only output.
-Intent: Read the optional Agent Card extension (URI `https://hermes.dev/extensions/interaction/v1`, metadata under `hermes`), parse approval/clarify metadata from streaming and polling updates, de-duplicate events, and send authenticated responses with task/context/interaction IDs on the session owner loop; fail closed when the remote does not declare or cannot serve the response channel. Loop mode always delivers output. When a non-loop call sets `is_delegate_output` false, keep the output adapter bound and mark the session interaction-only so every event except remote `approval_request`/`clarify_request` and their `_resolved` events is filtered at one gate — otherwise a silent delegation swallows the approval card and the remote approval can only time out.
-
-Feature: Polling deadline, heartbeat and stream fallback.
-Intent: Default to a 120-second polling deadline (`A2A_POLL_TIMEOUT` / `A2A_POLL_INTERVAL`, read through the turn's profile scope, override it; explicit session arguments win; HTTP and remote approval timeouts are unchanged). Pause the deadline while a supported approval/clarify is pending, restore it after the matching resolved event, and clear stale markers on terminal states. Refresh the parent Agent's activity timestamp on every SSE event and successful `get_task` poll so the gateway inactivity timeout does not kill a turn whose delegate is still reporting. If the SSE stream raises after this turn's task ID is known, hand the last snapshot to polling instead of failing; errors before any task is known, and stream errors after a user stop, still propagate.
-
-Feature: Mid-turn steering.
-Intent: Read the optional `steer_path` and expose `schedule_steer(text)`, which posts guidance to the remote task of the turn in flight and resolves to whether the remote accepted it. The turn's own task ID is tracked separately from `task_id` so a loop never steers a finished task; it returns `None` when the remote does not declare steering or no turn is running, so callers keep the next-turn queue. In loop mode the session is bound to the foreground input adapter so platform adapters can reach it. (Native A2A messages cannot do this: the SDK serializes requests per task.)
-
-Feature: Stopping a delegation.
-Intent: The active-delegate cancel handle stops a delegation in either state: a running turn gets an A2A `cancel_task` for that turn's task; a loop idle between turns closes its input adapter instead, and returns the interrupted payload rather than waiting out the 25-minute input timeout. `has_live_task` reports either case. `cancel_active_a2a_delegate(parent_agent)` gives callers that hold only the agent (the gateway `/stop` path) the same stop; it ignores non-delegation handles and never raises.
-
-Feature: Aegis delegation authorization.
-Intent: With `AEGIS_BOOTSTRAP_ADMIN_PASSWORD` set in the turn's profile, every call first passes `tools.a2a_delegate_aegis.run_aegis_checked_delegate`; a refused call returns its `success: false` payload and never contacts the remote. Without it no check or audit runs.
-
-Feature: Agent-loop dispatch entry.
-Intent: `dispatch_for_agent(agent, args)` is the one call site `AIAgent._dispatch_a2a_delegate` forwards to, so the sequential, concurrent and helper paths all hand the delegate the same parent agent and the gateway-bound `_delegate_ext_output_adapter` / `_delegate_ext_input_factory`.
-
-## File: `tools/a2a_delegate_aegis.py`
-
-Feature: Aegis policy check and audit for A2A delegation.
-Intent: Back the Aegis console's Agent Policy and delegation audit with one SQLite store (`$HERMES_HOME/aegis.db`, tables `policy` and `a2a_delegate_audit`), enabled only when `AEGIS_BOOTSTRAP_ADMIN_PASSWORD` is non-empty in the turn's profile scope (`agent.secret_scope.get_secret`: under a multiplexing gateway `os.environ` holds the launch profile's password, which must not switch the check for another profile). A rule is (platform, user_id, agent_name, allow|deny), each field exact or `*` (platform lowercased); the matching rule with the lowest `rank_id` wins and no match allows. The caller is the parent agent's `_user_env_platform` (else `platform`) plus `_user_id`, never anything the model supplied. Any store or evaluation error denies (`authorization: "error"`), so the gate fails closed. Each check writes one audit row (`succ` authorized, `fail` denied or errored) recording the authorization decision, not the remote outcome; a failed audit write is logged and never blocks the call. The check owns no remote I/O, so the tool decides what to run.
-
 ## File: `toolsets.py`
 
-Feature: Opt-in `userenv` and `aegis_a2a` toolsets.
-Intent: Expose the user-env tool and the Aegis A2A tools behind explicit toolsets so users opt in without adding schema cost to every session. The `aegis_` names keep them apart from upstream's `a2a` platform-plugin toolset, and its `a2a_list`, which a same-named fork tool would shadow.
+Feature: Opt-in `userenv` toolset.
+Intent: Expose the user-env tool behind an explicit toolset so users opt in without adding schema cost to every session. (`aegis_a2a` is the `plugins/aegis_a2a` plugin's toolset, not a shipped one.)
 
 Feature: Fork names stay out of shared metrics.
-Intent: `BUILTIN_TOOL_NAMES` / `BUILTIN_TOOLSET_NAMES` are the names shared metrics may export, and upstream's `hermes.shared_metrics.v4` schema enumerates only upstream's. `_FORK_TOOLSET_NAMES` keeps the fork's toolsets and their tools out, so they record as `custom` / `plugin` and an opted-in upload never carries a value the schema rejects.
+Intent: `BUILTIN_TOOL_NAMES` / `BUILTIN_TOOLSET_NAMES` are the names shared metrics may export, and upstream's `hermes.shared_metrics.v4` schema enumerates only upstream's. `_FORK_TOOLSET_NAMES` keeps the fork's shipped toolset (`userenv`) and its tool out, so they record as `custom` / `plugin` and an opted-in upload never carries a value the schema rejects; plugin toolsets such as `aegis_a2a` already record that way.
+
+Feature: `hermes-lark_user` platform toolset.
+Intent: The Lark personal auto-reply platform answers as the user beside the user's own lark-cli token, so its default toolset drops the terminal and process tools (`platform_toolsets.lark_user` can opt back in).
 
 ## File: `hermes_cli/tools_config.py`
 
 Feature: Configurable user environment and A2A toolsets.
-Intent: Surface `userenv` and `aegis_a2a` in the standard `hermes tools` flow, off by default until enabled per platform and never part of the core set, without changing AISOC's dedicated A2A runtime.
-
-## File: `model_tools.py`
-
-Feature: Agent-loop tool ownership.
-Intent: List `aegis_a2a_delegate` in `_AGENT_LOOP_TOOLS` so registry dispatch never runs it directly: like `delegate_task` it needs the live `AIAgent`'s runtime state and adapter-bound foreground I/O.
+Intent: Surface `userenv` in the standard `hermes tools` flow and keep both `userenv` and the `aegis_a2a` plugin toolset in `_DEFAULT_OFF_TOOLSETS`, so neither is on until enabled per platform (a plugin toolset is otherwise on once its plugin loads, and `aegis_a2a` auto-loads); `aegis_a2a` shows in `hermes tools` as a plugin toolset. AISOC's dedicated A2A runtime is unchanged.
 
 ## File: `run_agent.py`
-
-Feature: Remote-only A2A delegate dispatch.
-Intent: `AIAgent._dispatch_a2a_delegate` is a one-line forward to `tools.a2a_delegate_tool.dispatch_for_agent`, so the facade stays thin while sequential, concurrent and helper execution share one dispatch.
 
 Feature: Host runtime reported during owner sessions.
 Intent: `_current_main_runtime` reports the host `api_mode` while an owner-attached codex session runs (see `agent/codex_owner_runtime.py`), so auxiliary routing follows the provider the user configured.
 
 ## File: `agent/tool_executor.py`
 
-Feature: Tool-execution identity binding.
-Intent: Every tool call reaches its executor through `_dispatch_authorized_once`, which binds the agent's platform user (`call_as_agent_user`) for the call. One binding point covers the sequential, concurrent and helper paths, so terminal and runtime tools see the calling user even when cron cleared `HERMES_SESSION_*` or execution crossed threads.
+Feature: Tool-execution identity and agent binding.
+Intent: Every tool call reaches its executor through `_dispatch_authorized_once`, which runs it under `agent.tool_call_agent.call_as_tool_agent`: the agent's platform user is bound (`call_as_agent_user`) and the live agent is exposed to the call (`current_tool_call_agent`). One binding point covers the sequential, concurrent and helper paths, so terminal and runtime tools see the calling user even when cron cleared `HERMES_SESSION_*` or execution crossed threads, and a plugin tool that must act on the running agent (`aegis_a2a_delegate`) needs no name-specific wiring in the agent loop.
 
-Feature: A2A delegate sequential handling.
-Intent: `aegis_a2a_delegate` spins in quiet mode, stops the spinner on failure, and is exempt from the sequential deadline like `delegate_task`, because a foreground loop blocks by design.
+## File: `agent/tool_call_agent.py`
 
-## File: `agent/agent_runtime_helpers.py`
+Feature: The live agent of the running tool call.
+Intent: The registry hands handlers ids only, never the `AIAgent`. `call_as_tool_agent(agent, execute, args)` binds the agent in a ContextVar on the thread that runs the call (plus the user-env identity) and always restores it; `current_tool_call_agent()` reads it, `None` outside a tool call and in a host-isolated plugin process. It replaces wiring `aegis_a2a_delegate` into `_AGENT_LOOP_TOOLS`, the inline executor table, the post-hook name set and `AIAgent._dispatch_a2a_delegate`; it is published to plugins in the "Aegis fork" group of `plugin_api.json`.
 
-Feature: Agent-runtime tool inventory.
-Intent: Name `aegis_a2a_delegate` in `AGENT_RUNTIME_POST_HOOK_TOOL_NAMES`, the tools that run inline on the live agent (never through the registry) and fire `post_tool_call` exactly once per executor path, so the delegate is held to the same hook contract as `delegate_task`.
+## File: `hermes_cli/plugins_context.py`
 
-## File: `agent/inline_tool_executors.py`
-
-Feature: Inline executor for the A2A delegate.
-Intent: One `aegis_a2a_delegate` entry routes both the sequential and concurrent paths to `agent._dispatch_a2a_delegate`.
-
-## File: `agent/display.py`
-
-Feature: Tool progress display.
-Intent: Preview `aegis_a2a_delegate` by its goal and give it a compact 🤝 row that reuses the localized `delegate` verb, so foreground delegation stays legible without new locale keys.
+Feature: `ctx.register_tool(..., execution_timeout=)`.
+Intent: Pass a plugin tool's own call budget to the registry entry, as built-ins already declare one, so the generic sequential/concurrent tool deadline never cuts it short and a tool with an extended budget is planned as a sequential segment. `aegis_a2a_delegate` declares 24 h because a foreground loop blocks on input for up to 25 minutes per turn and supervises its own liveness (poll deadline, input timeout, `/stop` cancel); it replaces the name in `_SEQUENTIAL_DEADLINE_EXEMPT_TOOLS`.
 
 ## File: `plugins/platforms/slack/adapter.py`
 
@@ -284,7 +241,7 @@ Intent: `apply_tier_to_agent` swaps a band pinned to another provider with `AIAg
 ## File: `gateway/run_aegis_delegate.py`
 
 Feature: Stopping a turn blocked in an A2A delegation.
-Intent: `_interrupt_running_turn` (behind `/stop`, `/new`, `/reset` and eviction) also cancels the running agent's A2A delegation — a delegate blocks the turn on a remote task or loop input, neither of which watches the interrupt flag. The cancel runs on a daemon thread that carries the profile context, so it never blocks the gateway loop or reorders the interrupt, invalidation and reap steps (wired from `gateway/run_agent_cache.py`).
+Intent: `_interrupt_running_turn` (behind `/stop`, `/new`, `/reset` and eviction) also cancels the running agent's A2A delegation — a delegate blocks the turn on a remote task or loop input, neither of which watches the interrupt flag. Core never imports the plugin: the `aegis_a2a` plugin parks the running delegation's cancel handle on the agent as `ACTIVE_DELEGATION_ATTR` (`_active_a2a_delegate_session`), and the gateway calls its `cancel()` on a daemon thread that carries the profile context, so it never blocks the gateway loop or reorders the interrupt, invalidation and reap steps (wired from `gateway/run_agent_cache.py`); a failed cancel is logged, never raised, and no thread starts when nothing is delegating.
 
 Feature: Delegate runtime binding per gateway turn.
 Intent: Bind adapter-provided delegate output and input factories onto both fresh and cached agents each turn so Slack/Feishu thread and user runtime state never leaks across cached sessions. Every turn (`gateway/run_turn_runner.py`) binds the adapter's `build_delegate_foreground_runtime` output adapter and input factory; Slack DMs that treat top-level messages as sessions key the route on the event message id.
@@ -301,16 +258,6 @@ Intent: The turn runner resolves the turn route first (with the session id, and 
 
 Feature: Delegate runtime binding per turn.
 Intent: After the agent is resolved (fresh or cached), `bind_delegate_foreground_runtime_for_turn` binds the adapter's delegate output adapter and input factory for this turn's source, so a cached agent never keeps another thread's or user's delegate I/O.
-
-## File: `gateway/run_source_envelope.py`
-
-Feature: Source identity envelope for agent-bound messages.
-Intent: Prefix Slack and Feishu agent-bound turns with compact structured metadata after command handling and all inbound-context assembly, whenever a trusted user ID exists (Feishu `chat_id` maps to the shared `channel` field; user ID and optional display name on the first line; Slack's shared-session participant prefix is preserved). It must not affect command parsing or other platforms' attribution, and stays distinct from the remote A2A envelope, which carries only parent platform/user identity. Built in `_prepare_inbound_message_text` (`gateway/run_inbound.py`), so Slack replay and relay follow-ups carry it too; `uname` is always present, possibly empty.
-
-## File: `gateway/run_inbound.py`
-
-Feature: Source envelope placement.
-Intent: `_prepare_inbound_message_text` applies `add_source_preamble` as its last step, over the reply-context-prefixed text, so the `<source>` header sits above everything on every path through it (normal turns, Slack replay and relay follow-ups).
 
 ## File: `gateway/run_feishu_card_markers.py`
 
@@ -372,7 +319,7 @@ Feature: Runtime user env identity.
 Intent: Carry platform/user identity in ContextVars (callers that hop threads copy the context; `call_as_agent_user` re-binds per tool call), falling back to the turn's `HERMES_SESSION_PLATFORM` / `_USER_ID` / `_USER_NAME`, with a stable local runtime scope key that isolates terminal environments by platform and user ID.
 
 Feature: `call_as_agent_user`.
-Intent: The one helper `agent/tool_executor.py` uses to bind the agent's platform user around a tool call and always restore the previous binding.
+Intent: The one helper that binds the agent's platform user around a tool call and always restores the previous binding; the tool executor reaches it through `agent.tool_call_agent.call_as_tool_agent`, which also binds the live agent.
 
 ## File: `tools/userenv_tool.py`
 
@@ -455,40 +402,15 @@ Intent: Monitor and `no_agent` scripts bind the job owner like agent runs; a mal
 Feature: Feishu topic delivery for cron output.
 Intent: An explicit Feishu target on the origin chat inherits the origin topic, like Slack threads; the lost-thread warning fires only for the origin chat, and only dict responses are read for `thread_fallback`, so an SDK response object cannot crash bookkeeping and cause a duplicate send.
 
-## File: `hermes_cli/main.py`
-
-Feature: AISOC, Aegis and Workagent builtin CLI dispatch.
-Intent: `main.py` only calls the builder in `hermes_cli/subcommands/products.py` and re-exports `cmd_aegis` / `cmd_aisoc` / `cmd_workagent`, listed as builtins so no plugin discovery is needed; product startup and security policy stay in each product's backend.
-
-## File: `hermes_cli/subcommands/products.py`
-
-Feature: `hermes aegis` / `hermes aisoc` / `hermes workagent`.
-Intent: Attach each product's own parser and delegate to its backend `cmd_*` with lazy imports, so the product CLIs ship without growing `hermes_cli/main.py` or relying on plugin discovery.
-
 ## File: `pyproject.toml`
 
 Feature: Opt-in A2A SDK and fork app packaging.
-Intent: Keep `a2a-sdk[fastapi]` behind the opt-in `a2a` extra (out of `[all]`), pin the same version in the `test` group so the A2A suites run against the real SDK, and ship the aegis/aisoc/workagent packages through `packages.find`. `uv.lock` is regenerated with both pins. The root `hermes_self_restart` module needs no entry: `setup.py` ships every root `.py` module.
+Intent: Keep `a2a-sdk[fastapi]` behind the opt-in `a2a` extra (out of `[all]`), pin the same version in the `test` group so the A2A suites run against the real SDK, and ship the aegis/aisoc/workagent packages and their shared `aegis_common` helpers through `packages.find`. `uv.lock` is regenerated with both pins.
 
 ## File: `pm/extras.py`
 
 Feature: A2A extra anchor.
 Intent: Register `a2a.client` / `a2a.types` as the `a2a` extra's import anchor so PM can tell whether the opt-in SDK is installed.
-
-## File: `scripts/a2a_smoke_test.py`
-
-Feature: Official A2A protocol smoke test.
-Intent: Exercise Agent Card discovery, single and multi-turn context reuse, polling, streaming, terminal states and optional bearer auth through the installed A2A SDK, for verifying the workagent A2A module (default base URL `http://127.0.0.1:9086`, its default port).
-
-## File: `scripts/a2a_chat_cli.py`
-
-Feature: Interactive A2A chat client.
-Intent: A standalone multi-turn terminal client for any A2A endpoint (base or agent-card URL, optional bearer token): it keeps one context across turns (`/reset` starts a new one), streams through the installed SDK (polling when the card declares no streaming), and prints tool calls and results from the `hermes` message metadata, for manual checks of the workagent A2A module and remote agents. It imports nothing from Hermes.
-
-## File: `hermes_self_restart.py`
-
-Feature: Detached self-restart for the product services.
-Intent: `request_self_restart(service, graceful_shutdown)` backs the aegis/aisoc/workagent restart routes: it accepts one request per process, starts a detached watcher with the original `sys.orig_argv` (so `python -m` and console-script launches replay exactly), cwd and environment, then runs the caller's graceful shutdown. The watcher waits up to 60 s for the old process identity (pid plus create time) to exit before launching the replacement, so the new server never races the old one for its port. Failures go to `logs/self-restart.log` under `HERMES_HOME` without argv, cwd or environment, which may carry tokens.
 
 ## File: `hermes_cli/config_defaults.py`
 
@@ -574,12 +496,15 @@ Intent: `context_session_id(manager)` backs `ctx.session_id()` so ext-tools `/co
 ## File: `hermes_cli/data/plugin_api.json`
 
 Feature: The "Aegis fork" published names.
-Intent: The fork's bundled plugins import nothing outside the published list. The fork groups list only fork-owned plugin-facing surfaces (user-env identity and store, cron caller visibility, the codex owner-session surface and `agent.codex_owner_runtime`) and stable generic helpers (`spawn_owned`, `release_process_group_once_empty`, `hermes_subprocess_env`, approval-bypass queries, `neutralize_untrusted_inline_text`), each with no `ctx` or upstream equivalent; underscore names are never published. Documented in `aegis/docs/hermes/plugin-api.md` and the regenerated public-api page.
+Intent: The fork's bundled plugins import nothing outside the published list. The fork groups list only fork-owned plugin-facing surfaces (user-env identity and store, `agent.tool_call_agent:current_tool_call_agent`, cron caller visibility, the codex owner-session surface and `agent.codex_owner_runtime`) and stable generic helpers (`spawn_owned`, `release_process_group_once_empty`, `hermes_subprocess_env`, approval-bypass queries, `neutralize_untrusted_inline_text`), each with no `ctx` or upstream equivalent; underscore names are never published. Documented in `aegis/docs/hermes/plugin-api.md` and the regenerated public-api page.
 
 ## File: `scripts/boundary_lint_baseline.json`
 
 Feature: Intended Feishu/Slack fork crossings.
 Intent: The fork's `adapter_aegis*.py` siblings import the fork's own core modules (`agent.jev_policy`, `tools.feishu_group_history`) and helpers the adapters already used (`gateway.session.build_session_key`, `utils.env_float`); added by hand, never with `--update`, so no other crossing is baselined.
+
+Feature: Consoles read the aegis_a2a plugin's state.
+Intent: The Aegis and AISOC console backends import `plugins.aegis_a2a.delegate_tool` (`a2a_list`, `A2A_CONTEXT`, `A2A_REGISTRY`) and `plugins.aegis_a2a.delegate_aegis` (policy/audit store): one module shared with the plugin, so the consoles see the same registry and context the tool refreshed. Added by hand.
 
 ## File: `scripts/install_root_lint_baseline.json`
 

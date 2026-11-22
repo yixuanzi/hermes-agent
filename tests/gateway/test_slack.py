@@ -3756,9 +3756,7 @@ class TestSlackThreadParentContext:
             history=[{"role": "user", "content": "original task"}],
         )
 
-        # Slack turns carry the fork's structured <source> header ahead of the body.
-        assert prepared.endswith("\n\none more detail")
-        assert prepared.startswith("<source>")
+        assert prepared == "one more detail"
         assert "[Replying to:" not in prepared
 
 

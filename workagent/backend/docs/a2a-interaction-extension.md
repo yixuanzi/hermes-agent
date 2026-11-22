@@ -13,7 +13,7 @@
 | `a2a_service/interactions.py` | 维护进程内 pending/resolved/cancelled registry，校验远端响应并解除底层 wait。 |
 | `tools.approval` / `tools.clarify_gateway` | 提供既有审批策略、deny/hardline 规则、超时和澄清等待语义；本扩展不替换这些安全策略。 |
 
-调用方侧的 `tools/a2a_delegate_tool.py`、Slack/Feishu adapter 和 Aegis UI 说明分别见 [`aegis/docs/a2a_delegate_and_slack_io_adapters.md`](../../../aegis/docs/a2a_delegate_and_slack_io_adapters.md)、[`aegis/docs/a2a-delegate-interaction.md`](../../../aegis/docs/a2a-delegate-interaction.md) 和对应平台 adapter 代码。
+调用方侧的 `plugins/aegis_a2a/delegate_tool.py`、Slack/Feishu adapter 和 Aegis UI 说明分别见 [`aegis/docs/a2a_delegate_and_slack_io_adapters.md`](../../../aegis/docs/a2a_delegate_and_slack_io_adapters.md)、[`aegis/docs/a2a-delegate-interaction.md`](../../../aegis/docs/a2a-delegate-interaction.md) 和对应平台 adapter 代码。
 
 ## 2. Agent Card 声明
 
@@ -210,7 +210,7 @@ POST /a2a/hermes/steer
 
 ```bash
 venv/bin/python -m pytest tests/workagent/backend/test_a2a_interactions.py tests/workagent/backend/test_a2a_executor.py tests/workagent/backend/test_a2a_steer.py -q
-venv/bin/python -m pytest tests/tools/test_a2a_delegate_tool.py tests/gateway/test_feishu_clarify_and_delegate.py tests/gateway/test_slack_delegate_runtime_wiring.py -q
+venv/bin/python -m pytest tests/plugins/aegis_a2a/test_delegate_tool.py tests/gateway/test_feishu_clarify_and_delegate.py tests/gateway/test_slack_delegate_runtime_wiring.py -q
 venv/bin/python -m pytest tests/aegis/backend/test_chat_ws.py -q
 git diff --check
 ```

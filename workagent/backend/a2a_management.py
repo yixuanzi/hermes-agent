@@ -24,7 +24,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
-from hermes_self_restart import request_self_restart
+from aegis_common.self_restart import request_self_restart
 from workagent.backend.a2a_management_page import render_management_page
 from workagent.backend.a2a_service.mcp_keys import McpKeyError, McpKeyStore
 from workagent.backend.auth import extract_bearer_token, token_matches_value

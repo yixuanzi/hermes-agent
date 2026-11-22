@@ -32,7 +32,7 @@ def test_a2a_context_requires_auth_and_uses_a_process_snapshot(
     auth_headers: dict[str, str],
     monkeypatch,
 ) -> None:
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     calls = 0
 
@@ -69,7 +69,7 @@ def test_a2a_context_keeps_last_snapshot_when_refresh_fails(
     auth_headers: dict[str, str],
     monkeypatch,
 ) -> None:
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     monkeypatch.setattr(a2a_delegate_tool, "a2a_list", lambda _otype="json": _context_payload())
     first = client.get("/api/a2a/context", headers=auth_headers)
@@ -92,7 +92,7 @@ def test_a2a_context_exposes_initial_refresh_failure_as_an_empty_error_snapshot(
     auth_headers: dict[str, str],
     monkeypatch,
 ) -> None:
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     monkeypatch.setattr(
         a2a_delegate_tool,

@@ -151,8 +151,6 @@ TOOLSETS = {
     "code_execution": _ts("Run Python scripts that call tools programmatically (reduces LLM round trips)", ["execute_code"]),
     "delegation": _ts("Spawn subagents with isolated context for complex subtasks", ["delegate_task"]),
     "userenv": _ts("Manage the calling user's persisted runtime environment variables", ["userenv"]),
-    "aegis_a2a": _ts("Opt-in Aegis A2A delegation and remote agent discovery tools",
-                     ["aegis_a2a_list", "aegis_a2a_delegate"]),
     "kanban": _ts(
         "Kanban multi-agent coordination — only active when the agent is spawned by "
         "the kanban dispatcher (HERMES_KANBAN_TASK env set). The dispatcher runs "
@@ -248,7 +246,7 @@ TOOLSET_SESSION_PLATFORMS = {name: spec["platforms"] for name, spec in TOOLSETS.
 # these names, so a plugin, MCP server or custom toolset name never leaves the machine. The Aegis
 # fork's toolsets enable like shipped ones but are not upstream's, so they stay out and record as
 # custom / plugin, which upstream's shared-metrics schema accepts.
-_FORK_TOOLSET_NAMES = frozenset({"aegis_a2a", "userenv"})
+_FORK_TOOLSET_NAMES = frozenset({"userenv"})
 BUILTIN_TOOL_NAMES = frozenset(
     tool for name, spec in TOOLSETS.items() if name not in _FORK_TOOLSET_NAMES for tool in spec["tools"]
 )

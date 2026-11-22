@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from run_agent import AIAgent
-from tools.a2a_delegate_tool import (
+from plugins.aegis_a2a.delegate_tool import (
     _A2ADelegateSession,
     _summarize_agent_card,
     _a2a_steer_path,

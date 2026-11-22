@@ -68,9 +68,23 @@ class _Input:
         return next(self._values)
 
 
-def test_a2a_schemas_are_registered_and_toolset_is_opt_in():
-    from tools import a2a_delegate_tool
+def test_a2a_schemas_are_registered_by_the_plugin_and_toolset_is_opt_in(tmp_path, monkeypatch):
+    import hermes_yaml as yaml
+    from hermes_cli import plugins as pmod
+    from hermes_cli.tools_config import _DEFAULT_OFF_TOOLSETS
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
+    from toolsets import resolve_toolset
 
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    (home / "config.yaml").write_text(yaml.safe_dump({}), encoding="utf-8")
+    manager = pmod.PluginManager()
+    manager.discover_and_load()  # bundled kind: backend -> loads without plugins.enabled
+
+    loaded = manager._plugins["aegis_a2a"]
+    assert loaded.enabled, loaded.error
+    assert {"aegis_a2a_list", "aegis_a2a_delegate"} <= set(loaded.tools_registered)
     list_schema = registry.get_schema("aegis_a2a_list")
     assert list_schema is not None
     assert list_schema["parameters"]["properties"] == {}
@@ -81,15 +95,18 @@ def test_a2a_schemas_are_registered_and_toolset_is_opt_in():
     assert "type" not in props
     assert "toolsets" not in props
     assert "max_iterations" not in props
-    assert "aegis_a2a" in TOOLSETS
-    assert TOOLSETS["aegis_a2a"]["tools"] == ["aegis_a2a_list", "aegis_a2a_delegate"]
+    assert "aegis_a2a" not in TOOLSETS  # a plugin toolset, not a shipped one
+    assert set(resolve_toolset("aegis_a2a")) == {"aegis_a2a_list", "aegis_a2a_delegate"}
+    assert "aegis_a2a" in _DEFAULT_OFF_TOOLSETS
     assert "aegis_a2a_list" not in _HERMES_CORE_TOOLS
     assert "aegis_a2a_delegate" not in _HERMES_CORE_TOOLS
+    # The delegate supervises its own liveness; the generic tool deadline must not abandon a loop.
+    assert registry.get_entry("aegis_a2a_delegate").execution_timeout >= 24 * 60 * 60
     assert a2a_delegate_tool.A2A_DELEGATE_SCHEMA["name"] == "aegis_a2a_delegate"
 
 
 def test_a2a_list_supports_compact_json_and_bare_xml_outputs(monkeypatch, tmp_path):
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     registry_path = tmp_path / "a2a.json"
     registry_path.write_text(
@@ -238,7 +255,7 @@ def test_a2a_list_supports_compact_json_and_bare_xml_outputs(monkeypatch, tmp_pa
 
 
 def test_a2a_list_keeps_an_empty_global_routing_container(monkeypatch, tmp_path):
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     registry_path = tmp_path / "a2a.json"
     registry_path.write_text(json.dumps({"a2a": {}, "global": []}), encoding="utf-8")
@@ -251,7 +268,7 @@ def test_a2a_list_keeps_an_empty_global_routing_container(monkeypatch, tmp_path)
 
 
 def test_a2a_list_rejects_unknown_output_type():
-    from tools.a2a_delegate_tool import a2a_list
+    from plugins.aegis_a2a.delegate_tool import a2a_list
 
     assert json.loads(a2a_list(otype="yaml")) == {
         "error": "otype must be 'json' or 'xml'"
@@ -259,7 +276,7 @@ def test_a2a_list_rejects_unknown_output_type():
 
 
 def test_remote_delegate_session_uses_default_poll_settings(monkeypatch):
-    from tools.a2a_delegate_tool import _A2ADelegateSession
+    from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession
 
     monkeypatch.delenv("A2A_POLL_TIMEOUT", raising=False)
     monkeypatch.delenv("A2A_POLL_INTERVAL", raising=False)
@@ -270,7 +287,7 @@ def test_remote_delegate_session_uses_default_poll_settings(monkeypatch):
 
 
 def test_remote_delegate_session_reads_poll_settings_from_environment(monkeypatch):
-    from tools.a2a_delegate_tool import _A2ADelegateSession
+    from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession
 
     monkeypatch.setenv("A2A_POLL_TIMEOUT", "180.5")
     monkeypatch.setenv("A2A_POLL_INTERVAL", "0.25")
@@ -282,7 +299,7 @@ def test_remote_delegate_session_reads_poll_settings_from_environment(monkeypatc
 
 
 def test_remote_delegate_session_rejects_invalid_poll_settings(monkeypatch):
-    from tools.a2a_delegate_tool import _A2ADelegateSession
+    from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession
 
     monkeypatch.setenv("A2A_POLL_TIMEOUT", "not-a-number")
     monkeypatch.setenv("A2A_POLL_INTERVAL", "-1")
@@ -294,7 +311,7 @@ def test_remote_delegate_session_rejects_invalid_poll_settings(monkeypatch):
 
 
 def test_remote_task_poll_refreshes_parent_activity():
-    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+    from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession, _run_coro_sync
 
     parent = _make_parent()
     parent._touch_activity = MagicMock()
@@ -341,7 +358,7 @@ def _stream_task(state):
 
 
 def test_remote_stream_events_refresh_parent_activity():
-    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+    from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession, _run_coro_sync
 
     parent = _make_parent()
     parent._touch_activity = MagicMock()
@@ -368,7 +385,7 @@ def test_remote_stream_events_refresh_parent_activity():
 
 
 def test_remote_stream_failure_after_task_falls_back_to_polling():
-    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+    from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession, _run_coro_sync
 
     parent = _make_parent()
     parent._touch_activity = MagicMock()
@@ -401,7 +418,7 @@ def test_remote_stream_failure_after_task_falls_back_to_polling():
 
 
 def test_remote_stream_failure_before_task_is_raised():
-    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+    from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession, _run_coro_sync
 
     class FakeClient:
         async def send_message(self, request):
@@ -420,7 +437,7 @@ def test_remote_stream_failure_before_task_is_raised():
 
 
 def test_remote_stream_failure_after_stop_is_raised():
-    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+    from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession, _run_coro_sync
 
     session = _A2ADelegateSession("http://agent.local/a2a", poll_interval=0)
 
@@ -450,13 +467,13 @@ def test_remote_stream_failure_after_stop_is_raised():
     ],
 )
 def test_a2a_steer_path_requires_card_declaration(card, expected):
-    from tools.a2a_delegate_tool import _a2a_steer_path
+    from plugins.aegis_a2a.delegate_tool import _a2a_steer_path
 
     assert _a2a_steer_path({"agent_card": card}) == expected
 
 
 def test_schedule_steer_only_targets_this_turns_remote_task():
-    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+    from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession, _run_coro_sync
 
     posted = []
     observed = {}
@@ -506,7 +523,7 @@ def test_schedule_steer_only_targets_this_turns_remote_task():
 
 
 def test_schedule_steer_is_disabled_without_declared_steer_path():
-    from tools.a2a_delegate_tool import _A2ADelegateSession
+    from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession
 
     session = _A2ADelegateSession("http://agent.local/a2a")
     session._turn_in_flight = True
@@ -542,8 +559,8 @@ class _BlockingInput:
 
 
 def test_stopping_an_idle_foreground_loop_ends_it_as_interrupted(monkeypatch):
-    from tools import a2a_delegate_tool
-    from tools.a2a_delegate_tool import A2A_REGISTRY, _A2ADelegateSession, a2a_delegate
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
+    from plugins.aegis_a2a.delegate_tool import A2A_REGISTRY, _A2ADelegateSession, a2a_delegate
 
     A2A_REGISTRY.clear()
     A2A_REGISTRY["remote"] = {
@@ -553,7 +570,7 @@ def test_stopping_an_idle_foreground_loop_ends_it_as_interrupted(monkeypatch):
         "agent_card": {"supported_interfaces": [{"url": "http://agent.local/a2a"}]},
         "error": None,
     }
-    monkeypatch.setattr("tools.a2a_delegate_tool._a2a_sdk_available", lambda: True)
+    monkeypatch.setattr("plugins.aegis_a2a.delegate_tool._a2a_sdk_available", lambda: True)
 
     class OneTurnSession(_A2ADelegateSession):
         async def send_turn(self, text, *, is_delegate_output=True):
@@ -598,7 +615,7 @@ def test_stopping_an_idle_foreground_loop_ends_it_as_interrupted(monkeypatch):
 
 
 def test_cancel_active_a2a_delegate_stops_an_idle_loop_and_never_raises():
-    from tools.a2a_delegate_tool import (
+    from plugins.aegis_a2a.delegate_tool import (
         _A2ADelegateSession,
         _RemoteA2ADelegateCancelHandle,
         cancel_active_a2a_delegate,
@@ -625,7 +642,7 @@ def test_cancel_active_a2a_delegate_stops_an_idle_loop_and_never_raises():
 
 
 def test_stopping_a_running_remote_turn_still_cancels_the_remote_task():
-    from tools.a2a_delegate_tool import _A2ADelegateSession, _RemoteA2ADelegateCancelHandle
+    from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession, _RemoteA2ADelegateCancelHandle
 
     session = _A2ADelegateSession("http://agent.local/a2a")
     session.cancel = MagicMock(side_effect=lambda **kwargs: asyncio.sleep(0))
@@ -642,7 +659,7 @@ def test_stopping_a_running_remote_turn_still_cancels_the_remote_task():
 
 def test_remote_task_deadline_pauses_while_interaction_is_pending():
     from a2a.types import Message, Part, Role
-    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+    from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession, _run_coro_sync
 
     output = _OutputSink()
     interaction = Message(
@@ -698,7 +715,7 @@ def test_remote_task_deadline_pauses_while_interaction_is_pending():
 
 def test_remote_task_deadline_resumes_after_interaction_is_resolved():
     from a2a.types import Message, Part, Role
-    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+    from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession, _run_coro_sync
 
     output = _OutputSink()
 
@@ -770,7 +787,7 @@ def test_remote_task_deadline_resumes_after_interaction_is_resolved():
 
 
 def test_aegis_gate_absent_skips_policy_and_audit(monkeypatch):
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     monkeypatch.delenv("AEGIS_BOOTSTRAP_ADMIN_PASSWORD", raising=False)
     parent = _make_parent()
@@ -797,7 +814,7 @@ def test_aegis_gate_absent_skips_policy_and_audit(monkeypatch):
 
 
 def test_aegis_gate_absent_preserves_agent_name_compatibility(monkeypatch):
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     monkeypatch.delenv("AEGIS_BOOTSTRAP_ADMIN_PASSWORD", raising=False)
     run_delegate = MagicMock(return_value={"success": False, "type": "a2a", "error": "unknown"})
@@ -819,8 +836,8 @@ def test_aegis_gate_absent_preserves_agent_name_compatibility(monkeypatch):
 
 
 def test_aegis_deny_short_circuits_remote_and_audits(monkeypatch, tmp_path):
-    from tools import a2a_delegate_tool
-    from tools.a2a_delegate_aegis import AegisDelegateStore
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
+    from plugins.aegis_a2a.delegate_aegis import AegisDelegateStore
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("AEGIS_BOOTSTRAP_ADMIN_PASSWORD", "configured")
@@ -872,8 +889,8 @@ def test_aegis_deny_short_circuits_remote_and_audits(monkeypatch, tmp_path):
 
 
 def test_aegis_nested_subagent_uses_originating_platform_for_policy(monkeypatch, tmp_path):
-    from tools import a2a_delegate_tool
-    from tools.a2a_delegate_aegis import AegisDelegateStore
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
+    from plugins.aegis_a2a.delegate_aegis import AegisDelegateStore
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("AEGIS_BOOTSTRAP_ADMIN_PASSWORD", "configured")
@@ -907,8 +924,8 @@ def test_aegis_nested_subagent_uses_originating_platform_for_policy(monkeypatch,
 
 
 def test_aegis_allowed_delegate_records_successful_authorization(monkeypatch, tmp_path):
-    from tools import a2a_delegate_tool
-    from tools.a2a_delegate_aegis import AegisDelegateStore
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
+    from plugins.aegis_a2a.delegate_aegis import AegisDelegateStore
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("AEGIS_BOOTSTRAP_ADMIN_PASSWORD", "configured")
@@ -947,8 +964,8 @@ def test_aegis_allowed_delegate_records_successful_authorization(monkeypatch, tm
 
 
 def test_aegis_successful_delegate_records_succ(monkeypatch, tmp_path):
-    from tools import a2a_delegate_tool
-    from tools.a2a_delegate_aegis import AegisDelegateStore
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
+    from plugins.aegis_a2a.delegate_aegis import AegisDelegateStore
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("AEGIS_BOOTSTRAP_ADMIN_PASSWORD", "configured")
@@ -972,7 +989,7 @@ def test_aegis_successful_delegate_records_succ(monkeypatch, tmp_path):
 
 
 def test_aegis_policy_check_error_fails_closed(monkeypatch, tmp_path):
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("AEGIS_BOOTSTRAP_ADMIN_PASSWORD", "configured")
@@ -1003,7 +1020,7 @@ def test_aegis_policy_check_error_fails_closed(monkeypatch, tmp_path):
 
 
 def test_aegis_audit_failure_does_not_replace_delegate_result(monkeypatch, tmp_path):
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("AEGIS_BOOTSTRAP_ADMIN_PASSWORD", "configured")
@@ -1031,8 +1048,8 @@ def test_aegis_audit_failure_does_not_replace_delegate_result(monkeypatch, tmp_p
 
 
 def test_aegis_delegate_exception_does_not_change_authorization_audit(monkeypatch, tmp_path):
-    from tools import a2a_delegate_tool
-    from tools.a2a_delegate_aegis import AegisDelegateStore
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
+    from plugins.aegis_a2a.delegate_aegis import AegisDelegateStore
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("AEGIS_BOOTSTRAP_ADMIN_PASSWORD", "configured")
@@ -1054,9 +1071,9 @@ def test_aegis_delegate_exception_does_not_change_authorization_audit(monkeypatc
 
 
 def test_default_a2a_session_id_adds_two_digit_random_suffix(monkeypatch):
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
-    monkeypatch.setattr(a2a_delegate_tool, "get_active_profile_name", lambda: "main")
+    monkeypatch.setattr(a2a_delegate_tool, "_active_profile_name", lambda: "main")
     monkeypatch.setattr(a2a_delegate_tool.time, "strftime", lambda fmt: "20260710_123456")
 
     session_id = a2a_delegate_tool._resolve_delegate_session_id(None)
@@ -1066,31 +1083,34 @@ def test_default_a2a_session_id_adds_two_digit_random_suffix(monkeypatch):
     assert 1 <= int(match.group(1)) <= 99
 
 
-def test_dispatch_helper_forwards_agent_runtime_bindings(monkeypatch):
+def test_delegate_handler_runs_for_the_agent_executing_the_call(monkeypatch):
+    from agent.tool_call_agent import call_as_tool_agent
+    from plugins.aegis_a2a.delegate_tool import delegate_handler
+
     captured = {}
 
     def fake_delegate(**kwargs):
         captured.update(kwargs)
         return '{"ok": true}'
 
-    monkeypatch.setattr("tools.a2a_delegate_tool.a2a_delegate", fake_delegate)
+    monkeypatch.setattr("plugins.aegis_a2a.delegate_tool.a2a_delegate", fake_delegate)
     agent = object.__new__(AIAgent)
     agent._delegate_ext_output_adapter = "output"
     agent._delegate_ext_input_factory = lambda: "input"
+    agent._user_env_platform, agent._user_id, agent._user_name = None, None, None
+    agent.platform = "cli"
 
-    result = agent._dispatch_a2a_delegate(
-        {
-            "goal": "inspect",
-            "context": "ctx",
-            "agent_name": "remote",
-            "type": "local",
-            "toolsets": ["terminal"],
-            "max_iterations": 3,
-            "session_id": "child-session",
-            "is_delegate_output": False,
-            "is_loop": True,
-        }
-    )
+    result = call_as_tool_agent(agent, lambda args: delegate_handler(args, task_id="t"), {
+        "goal": "inspect",
+        "context": "ctx",
+        "agent_name": "remote",
+        "type": "local",
+        "toolsets": ["terminal"],
+        "max_iterations": 3,
+        "session_id": "child-session",
+        "is_delegate_output": False,
+        "is_loop": True,
+    })
 
     assert json.loads(result) == {"ok": True}
     assert captured["parent_agent"] is agent
@@ -1106,8 +1126,16 @@ def test_dispatch_helper_forwards_agent_runtime_bindings(monkeypatch):
     assert captured["is_loop"] is True
 
 
+def test_delegate_handler_outside_a_tool_call_refuses_without_contacting_a_remote(monkeypatch):
+    from plugins.aegis_a2a.delegate_tool import delegate_handler
+
+    monkeypatch.setattr("plugins.aegis_a2a.delegate_tool.a2a_delegate", MagicMock(side_effect=AssertionError))
+
+    assert "requires a parent agent" in delegate_handler({"goal": "g", "agent_name": "remote"})
+
+
 def test_a2a_remote_without_sdk_returns_clear_error(monkeypatch):
-    from tools.a2a_delegate_tool import A2A_REGISTRY, a2a_delegate
+    from plugins.aegis_a2a.delegate_tool import A2A_REGISTRY, a2a_delegate
 
     A2A_REGISTRY.clear()
     A2A_REGISTRY["remote"] = {
@@ -1117,7 +1145,7 @@ def test_a2a_remote_without_sdk_returns_clear_error(monkeypatch):
         "agent_card": {"supported_interfaces": [{"url": "http://agent.local/a2a"}]},
         "error": None,
     }
-    monkeypatch.setattr("tools.a2a_delegate_tool._a2a_sdk_available", lambda: False)
+    monkeypatch.setattr("plugins.aegis_a2a.delegate_tool._a2a_sdk_available", lambda: False)
 
     result = json.loads(
         a2a_delegate(goal="remote", type="a2a", agent_name="remote", parent_agent=_make_parent())
@@ -1128,7 +1156,7 @@ def test_a2a_remote_without_sdk_returns_clear_error(monkeypatch):
 
 
 def test_a2a_loop_requires_input_adapter(monkeypatch):
-    from tools.a2a_delegate_tool import A2A_REGISTRY, a2a_delegate
+    from plugins.aegis_a2a.delegate_tool import A2A_REGISTRY, a2a_delegate
 
     A2A_REGISTRY.clear()
     A2A_REGISTRY["remote"] = {
@@ -1138,7 +1166,7 @@ def test_a2a_loop_requires_input_adapter(monkeypatch):
         "agent_card": {"supported_interfaces": [{"url": "http://agent.local/a2a"}]},
         "error": None,
     }
-    monkeypatch.setattr("tools.a2a_delegate_tool._a2a_sdk_available", lambda: True)
+    monkeypatch.setattr("plugins.aegis_a2a.delegate_tool._a2a_sdk_available", lambda: True)
 
     result = json.loads(a2a_delegate(goal="remote", agent_name="remote", is_loop=True, parent_agent=_make_parent()))
 
@@ -1148,8 +1176,8 @@ def test_a2a_loop_requires_input_adapter(monkeypatch):
 
 @pytest.mark.parametrize("is_delegate_output", [True, False])
 def test_remote_loop_reuses_session_and_routes_foreground_input(monkeypatch, is_delegate_output):
-    from tools import a2a_delegate_tool
-    from tools.a2a_delegate_tool import A2A_REGISTRY, a2a_delegate
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
+    from plugins.aegis_a2a.delegate_tool import A2A_REGISTRY, a2a_delegate
 
     A2A_REGISTRY.clear()
     A2A_REGISTRY["remote"] = {
@@ -1159,7 +1187,7 @@ def test_remote_loop_reuses_session_and_routes_foreground_input(monkeypatch, is_
         "agent_card": {"supported_interfaces": [{"url": "http://agent.local/a2a"}]},
         "error": None,
     }
-    monkeypatch.setattr("tools.a2a_delegate_tool._a2a_sdk_available", lambda: True)
+    monkeypatch.setattr("plugins.aegis_a2a.delegate_tool._a2a_sdk_available", lambda: True)
 
     sessions = []
 
@@ -1243,8 +1271,8 @@ def test_remote_loop_reuses_session_and_routes_foreground_input(monkeypatch, is_
 
 
 def test_remote_non_loop_without_output_binds_adapter_in_interaction_only_mode(monkeypatch):
-    from tools import a2a_delegate_tool
-    from tools.a2a_delegate_tool import A2A_REGISTRY, a2a_delegate
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
+    from plugins.aegis_a2a.delegate_tool import A2A_REGISTRY, a2a_delegate
 
     A2A_REGISTRY.clear()
     A2A_REGISTRY["remote"] = {
@@ -1254,7 +1282,7 @@ def test_remote_non_loop_without_output_binds_adapter_in_interaction_only_mode(m
         "agent_card": {"supported_interfaces": [{"url": "http://agent.local/a2a"}]},
         "error": None,
     }
-    monkeypatch.setattr("tools.a2a_delegate_tool._a2a_sdk_available", lambda: True)
+    monkeypatch.setattr("plugins.aegis_a2a.delegate_tool._a2a_sdk_available", lambda: True)
 
     sessions = []
 
@@ -1320,7 +1348,7 @@ def test_remote_non_loop_without_output_binds_adapter_in_interaction_only_mode(m
 )
 def test_remote_session_interaction_only_forwards_only_interaction_events(interaction_only, expected_event_types):
     from a2a.types import Message, Part, Role
-    from tools.a2a_delegate_tool import _A2ADelegateSession, _run_coro_sync
+    from plugins.aegis_a2a.delegate_tool import _A2ADelegateSession, _run_coro_sync
 
     def hermes_message(message_id, kind, **extra):
         return Message(
@@ -1385,8 +1413,8 @@ def test_remote_session_interaction_only_forwards_only_interaction_events(intera
 
 
 def test_remote_loop_timeout_returns_clear_payload(monkeypatch):
-    from tools import a2a_delegate_tool
-    from tools.a2a_delegate_tool import A2A_REGISTRY, _DELEGATE_INPUT_TIMEOUT, a2a_delegate
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
+    from plugins.aegis_a2a.delegate_tool import A2A_REGISTRY, _DELEGATE_INPUT_TIMEOUT, a2a_delegate
 
     A2A_REGISTRY.clear()
     A2A_REGISTRY["remote"] = {
@@ -1396,7 +1424,7 @@ def test_remote_loop_timeout_returns_clear_payload(monkeypatch):
         "agent_card": {"supported_interfaces": [{"url": "http://agent.local/a2a"}]},
         "error": None,
     }
-    monkeypatch.setattr("tools.a2a_delegate_tool._a2a_sdk_available", lambda: True)
+    monkeypatch.setattr("plugins.aegis_a2a.delegate_tool._a2a_sdk_available", lambda: True)
 
     class FakeInput(_Input):
         def read_line(self, timeout=None):

@@ -316,7 +316,7 @@ def build_aegis_ephemeral_system_prompt(
 ) -> str | None:
     del agent_service, routing_service
 
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     cached_context = str(getattr(a2a_delegate_tool, "A2A_CONTEXT", "") or "").strip()
     if cached_context:
@@ -653,7 +653,7 @@ class ChatSessionActor:
         )
 
     def _handle_a2a_slash(self, turn_id: str) -> None:
-        from tools import a2a_delegate_tool
+        from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
         cached_context = str(getattr(a2a_delegate_tool, "A2A_CONTEXT", "") or "").strip()
         if cached_context:

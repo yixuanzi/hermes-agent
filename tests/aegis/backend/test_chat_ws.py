@@ -586,7 +586,7 @@ class _ClarifyOpenEndedAgent:
 
 def test_chat_session_manager_uses_aegis_platform_name(load_backend) -> None:
     service = load_backend("aegis.backend.chat.service")
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     a2a_delegate_tool.A2A_CONTEXT = ""
     captured: dict[str, str] = {}
@@ -753,7 +753,7 @@ def test_build_aegis_ephemeral_system_prompt_uses_cached_a2a_context(
     monkeypatch,
 ) -> None:
     service = load_backend("aegis.backend.chat.service")
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     monkeypatch.setattr(
         a2a_delegate_tool,
@@ -777,7 +777,7 @@ def test_build_aegis_ephemeral_system_prompt_refreshes_empty_a2a_context(
     monkeypatch,
 ) -> None:
     service = load_backend("aegis.backend.chat.service")
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     monkeypatch.setattr(a2a_delegate_tool, "A2A_CONTEXT", "")
     refresh_calls = {"count": 0}
@@ -802,7 +802,7 @@ def test_chat_session_manager_injects_active_aegis_context_as_xml(
     monkeypatch,
 ) -> None:
     service = load_backend("aegis.backend.chat.service")
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     a2a_delegate_tool.A2A_CONTEXT = ""
     monkeypatch.setattr(
@@ -1368,7 +1368,7 @@ def test_chat_ws_a2a_slash_returns_cached_context_without_running_agent(
     hermes_home,
 ) -> None:
     monkeypatch.setenv("AEGIS_JWT_SECRET", "test-jwt-secret-1234567890-abcdef")
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     a2a_delegate_tool.A2A_CONTEXT = "<aegis_context><active_agents /></aegis_context>"
     server = load_backend("aegis.backend.server")
@@ -1400,7 +1400,7 @@ def test_chat_ws_a2a_slash_refreshes_empty_context(
     hermes_home,
 ) -> None:
     monkeypatch.setenv("AEGIS_JWT_SECRET", "test-jwt-secret-1234567890-abcdef")
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     a2a_delegate_tool.A2A_CONTEXT = ""
     refresh_calls = {"count": 0}
@@ -1440,7 +1440,7 @@ def test_chat_ws_a2a_slash_reports_refresh_failure(
     hermes_home,
 ) -> None:
     monkeypatch.setenv("AEGIS_JWT_SECRET", "test-jwt-secret-1234567890-abcdef")
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     a2a_delegate_tool.A2A_CONTEXT = ""
 

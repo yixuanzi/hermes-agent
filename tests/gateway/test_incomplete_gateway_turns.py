@@ -150,10 +150,7 @@ async def test_incomplete_codex_turn_closes_transcript_without_slack_delivery(mo
         for call in runner.session_store.append_to_transcript.call_args_list
     ]
     assert transcript_roles == ["session_meta", "user", "assistant"]
-    # Slack/Feishu inbound text carries the structured <source> header ahead of the body.
-    assert runner.session_store.append_to_transcript.call_args_list[1].args[1]["content"] == (
-        '<source>{"platform":"slack","channel":"C123","uid":"U123","uname":""}</source>\n\nhello'
-    )
+    assert runner.session_store.append_to_transcript.call_args_list[1].args[1]["content"] == "hello"
     boundary = runner.session_store.append_to_transcript.call_args_list[2].args[1]["content"]
     assert boundary == FAILED_TURN_NOTICE
     assert adapter.processing_hooks == [

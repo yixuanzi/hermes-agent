@@ -47,7 +47,7 @@ def test_a2a_context_refresh_does_not_block_health(
     auth_headers: dict[str, str],
     monkeypatch,
 ) -> None:
-    from tools import a2a_delegate_tool
+    from plugins.aegis_a2a import delegate_tool as a2a_delegate_tool
 
     entered, release = threading.Event(), threading.Event()
 

@@ -1,0 +1,10 @@
+name: aegis_a2a
+version: "1.0.0"
+description: "Aegis A2A delegation: discover remote A2A agents ($HERMES_HOME/a2a.json) and delegate work to them, with an optional foreground loop on Slack/Feishu and the Aegis policy check/audit. Toolset `aegis_a2a` (off by default per platform). Needs the `a2a` extra."
+author: "aegis"
+# Bundled fork plugins auto-load like a backend, so existing `platform_toolsets: [aegis_a2a]` configs
+# keep their tools without a `plugins.enabled` entry; the toolset itself stays opt-in.
+kind: backend
+provides_tools:
+  - aegis_a2a_list
+  - aegis_a2a_delegate

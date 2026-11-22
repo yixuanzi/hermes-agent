@@ -4,7 +4,7 @@ A root (non-topic) group message can carry the group's recent messages,
 wrapped in ``<group_messages>``, ahead of the user text.  These tests pin the
 opt-in settings, the request the adapter sends, how history items are
 rendered, the inbound gate, that batching keeps one block per turn, and
-that the gateway's ``<source>`` header still comes first.
+where the gateway places it.
 """
 
 import asyncio
@@ -886,7 +886,7 @@ def test_media_batch_keeps_first_events_block_and_plain_caption(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Gateway places the block under <source>, above every other block
+# Gateway places the block above every other block
 # ---------------------------------------------------------------------------
 
 
@@ -901,11 +901,8 @@ def _runner():
     return runner
 
 
-SOURCE_HEADER = '<source>{"platform":"feishu","channel":"oc_g","uid":"ou_user","uname":"Ada"}</source>'
-
-
 @pytest.mark.asyncio
-async def test_gateway_renders_block_as_channel_context_under_source():
+async def test_gateway_renders_block_as_channel_context():
     """Shared thread session: the block is upstream's backfill above ``[New message]``; [Ada] stays on the trigger."""
     runner = _runner()
     source = SessionSource(
@@ -920,7 +917,6 @@ async def test_gateway_renders_block_as_channel_context_under_source():
     result = await runner._prepare_inbound_message_text(event=event, source=source, history=[])
 
     assert result == (
-        f"{SOURCE_HEADER}\n\n"
         '[Replying to: "上一条消息"]\n\n'
         f"{BLOCK}\n\n[New message]\n"
         "[Ada] 继续处理"
@@ -928,14 +924,14 @@ async def test_gateway_renders_block_as_channel_context_under_source():
 
 
 @pytest.mark.asyncio
-async def test_gateway_renders_block_under_source_for_plain_group_message():
+async def test_gateway_renders_block_for_plain_group_message():
     runner = _runner()
     source = SessionSource(platform=Platform.FEISHU, chat_id="oc_g", chat_type="group", user_id="ou_user", user_name="Ada")
     event = MessageEvent(text="继续处理", source=source, channel_context=BLOCK)
 
     result = await runner._prepare_inbound_message_text(event=event, source=source, history=[])
 
-    assert result == f"{SOURCE_HEADER}\n\n{BLOCK}\n\n[New message]\n继续处理"
+    assert result == f"{BLOCK}\n\n[New message]\n继续处理"
 
 
 @pytest.mark.asyncio
@@ -949,7 +945,7 @@ async def test_gateway_output_is_unchanged_without_block():
 
     result = await runner._prepare_inbound_message_text(event=event, source=source, history=[])
 
-    assert result == f"{SOURCE_HEADER}\n\n[Ada] 继续处理"
+    assert result == "[Ada] 继续处理"
 
 
 @pytest.mark.asyncio
@@ -959,4 +955,4 @@ async def test_gateway_ignores_an_empty_block():
     for empty in ("", None):
         event = MessageEvent(text="hi", source=source, channel_context=empty)
         result = await runner._prepare_inbound_message_text(event=event, source=source, history=[])
-        assert result == f"{SOURCE_HEADER}\n\nhi"
+        assert result == "hi"

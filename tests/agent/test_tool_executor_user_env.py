@@ -1,4 +1,4 @@
-"""Tool execution acts for the agent's platform user (``userenv``), and the Aegis A2A delegate stays inline."""
+"""Tool execution acts for the agent's platform user (``userenv``) and exposes the live agent to the call."""
 from __future__ import annotations
 
 import json
@@ -87,29 +87,22 @@ def test_the_binding_does_not_outlive_the_call(agent):
 
 
 @pytest.mark.parametrize("path", ["sequential", "concurrent"])
-def test_the_aegis_a2a_delegate_runs_inline_through_the_agent(agent, monkeypatch, path):
+def test_registry_tools_see_the_live_agent_only_during_the_call(agent, path):
+    """A plugin tool that needs the running agent (``aegis_a2a_delegate``) gets it on both paths."""
+    from agent.tool_call_agent import current_tool_call_agent
+
     seen = []
-    monkeypatch.setattr(agent, "_dispatch_a2a_delegate", lambda args: seen.append(args) or '{"ok": true}')
-    call = _call("aegis_a2a_delegate", json.dumps({"agent_name": "threat-intel", "goal": "check"}))
-    messages: list = []
 
-    with patch("model_tools.handle_function_call", side_effect=AssertionError("must stay inline")):
+    def _capture(*_args, **_kwargs):
+        seen.append(current_tool_call_agent())
+        return "{}"
+
+    with patch("model_tools.handle_function_call", side_effect=_capture):
         if path == "sequential":
-            agent._execute_tool_calls_sequential(SimpleNamespace(content="", tool_calls=[call]), messages, "t")
+            agent._execute_tool_calls_sequential(SimpleNamespace(content="", tool_calls=[_call("web_search")]), [], "t")
         else:
-            agent._invoke_tool("aegis_a2a_delegate", {"agent_name": "threat-intel", "goal": "check"}, "t")
+            calls = [_call("web_search", '{"q":"a"}'), _call("read_file", '{"path":"/tmp/x"}')]
+            agent._execute_tool_calls_concurrent(SimpleNamespace(content="", tool_calls=calls), [], "t")
 
-    assert seen and seen[0]["goal"] == "check"
-
-
-def test_dispatch_hands_the_gateway_bound_foreground_io_to_the_tool(agent, monkeypatch):
-    captured = {}
-    monkeypatch.setattr("tools.a2a_delegate_tool.a2a_delegate", lambda **kwargs: captured.update(kwargs) or "{}")
-    output, inputs = object(), []
-    agent._delegate_ext_output_adapter = output
-    agent._delegate_ext_input_factory = lambda: inputs.append(object()) or inputs[-1]
-
-    agent._dispatch_a2a_delegate({"goal": "g", "agent_name": "a", "is_loop": True})
-
-    assert captured["parent_agent"] is agent and captured["output"] is output
-    assert captured["input"] is inputs[0] and captured["is_loop"] is True and captured["is_delegate_output"] is True
+    assert seen and all(bound is agent for bound in seen)
+    assert current_tool_call_agent() is None

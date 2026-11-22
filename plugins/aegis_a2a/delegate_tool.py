@@ -1,4 +1,10 @@
-"""A2A foreground delegation tools."""
+"""A2A foreground delegation tools (the ``aegis_a2a`` toolset of the ``aegis_a2a`` plugin).
+
+The plugin's ``register(ctx)`` registers ``aegis_a2a_list`` / ``aegis_a2a_delegate``; this module
+holds the implementation and the state the Aegis/AISOC consoles read (``A2A_CONTEXT``,
+``A2A_REGISTRY``). Import it as ``plugins.aegis_a2a.delegate_tool`` everywhere, the plugin included,
+so there is one module and one copy of that state.
+"""
 
 from __future__ import annotations
 
@@ -20,10 +26,10 @@ from xml.sax.saxutils import escape
 import httpx
 
 from agent.secret_scope import get_secret
-from hermes_cli.profiles import get_active_profile_name
-from hermes_constants import get_hermes_home
-from tools import a2a_delegate_aegis
-from tools.registry import registry, tool_error
+from hermes_constants import get_hermes_home, profile_name_for_home
+from agent.tool_call_agent import current_tool_call_agent
+from . import delegate_aegis as a2a_delegate_aegis
+from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -360,9 +366,14 @@ def _run_coro_sync(coro):
     return result.get("value")
 
 
+def _active_profile_name() -> str:
+    """The profile this turn runs for (``custom`` for a home outside the profiles tree)."""
+    return profile_name_for_home(get_hermes_home()) or "custom"
+
+
 def _default_session_id(kind: str) -> str:
     try:
-        profile = get_active_profile_name()
+        profile = _active_profile_name()
     except Exception:
         profile = "default"
     suffix = random.randint(1, 99)
@@ -953,7 +964,7 @@ class _A2ADelegateSession:
         )
 
     async def _create_remote_client(self, http_client):
-        from a2a.client import ClientConfig, ClientFactory
+        from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
 
         factory = ClientFactory(
             ClientConfig(
@@ -962,7 +973,12 @@ class _A2ADelegateSession:
                 polling=True,
             )
         )
-        return await factory.create_from_url(self.base_url)
+        # The SDK sends to the card's advertised interface URL; pin it to the
+        # address we reached the card at (see _reachable_interface_url).
+        card = await A2ACardResolver(http_client, self.base_url).get_agent_card()
+        for interface in card.supported_interfaces:
+            interface.url = _reachable_interface_url(interface.url, self.base_url)
+        return factory.create(card)
 
     async def open(self) -> None:
         self._bind_owner_runtime()
@@ -1360,7 +1376,28 @@ def _resolve_a2a_entry(agent_name: str) -> dict[str, Any] | None:
     return A2A_REGISTRY.get(agent_name)
 
 
+def _origin(url: str) -> tuple[str, str]:
+    parts = urlsplit(url)
+    return parts.scheme.lower(), parts.netloc.lower()
+
+
+def _reachable_interface_url(advertised: str, configured: str) -> str:
+    """The card's interface URL only when it is on the configured origin.
+
+    A remote advertises the address it binds (``http://0.0.0.0:9086/a2a``) or
+    an internal host it cannot know is unreachable from here; the operator's
+    ``a2a.json`` URL is the address that reaches it.  Same-origin URLs are kept
+    so a card can still point at an RPC path other than its base.
+    """
+    advertised = _normalize_a2a_base_url(advertised)
+    configured = _normalize_a2a_base_url(configured)
+    if not advertised or not configured or _origin(advertised) == _origin(configured):
+        return advertised or configured
+    return configured
+
+
 def _resolve_a2a_remote_url(entry: dict[str, Any]) -> str:
+    configured = _normalize_a2a_base_url(str(entry.get("url") or ""))
     agent_card = entry.get("agent_card")
     if isinstance(agent_card, dict):
         for interface in agent_card.get("supported_interfaces", []):
@@ -1368,8 +1405,8 @@ def _resolve_a2a_remote_url(entry: dict[str, Any]) -> str:
                 continue
             url = interface.get("url")
             if isinstance(url, str) and url:
-                return _normalize_a2a_base_url(url)
-    return _normalize_a2a_base_url(str(entry.get("url") or ""))
+                return _reachable_interface_url(url, configured)
+    return configured
 
 
 def _a2a_interaction_config(entry: dict[str, Any]) -> tuple[bool, str | None]:
@@ -1836,11 +1873,7 @@ def a2a_delegate(
 
 
 def dispatch_for_agent(agent, function_args: dict) -> str:
-    """``AIAgent._dispatch_a2a_delegate``: the one agent-loop call site for the delegate tool.
-
-    Every execution path (sequential, concurrent, helper) reaches the tool through here so each
-    gets the same parent agent and the adapter-bound foreground I/O the gateway put on it.
-    """
+    """Run the delegate for *agent* with the adapter-bound foreground I/O the gateway put on it."""
     input_factory = getattr(agent, "_delegate_ext_input_factory", None)
     return a2a_delegate(
         goal=function_args.get("goal"),
@@ -1880,26 +1913,19 @@ A2A_DELEGATE_SCHEMA = {
 }
 
 
-registry.register(
-    name="aegis_a2a_list",
-    toolset="aegis_a2a",
-    schema=A2A_LIST_SCHEMA,
-    handler=lambda args, **kw: a2a_list(),
-    emoji="A2A",
-)
+def list_handler(args: dict, **_kwargs) -> str:
+    """``aegis_a2a_list`` handler."""
+    return a2a_list()
 
-registry.register(
-    name="aegis_a2a_delegate",
-    toolset="aegis_a2a",
-    schema=A2A_DELEGATE_SCHEMA,
-    handler=lambda args, **kw: a2a_delegate(
-        goal=args.get("goal", ""),
-        context=args.get("context"),
-        agent_name=args.get("agent_name"),
-        session_id=args.get("session_id"),
-        is_delegate_output=args.get("is_delegate_output", True),
-        is_loop=args.get("is_loop", False),
-        parent_agent=kw.get("agent") or kw.get("parent_agent"),
-    ),
-    emoji="A2A",
-)
+
+def delegate_handler(args: dict, **_kwargs) -> str:
+    """``aegis_a2a_delegate`` handler: runs against the live agent executing this tool call.
+
+    The delegate needs that agent's runtime (gateway-bound foreground I/O, caller identity,
+    activity heartbeat, cancel handle), which the registry does not pass to handlers; the tool
+    executor binds it for the call (``agent.tool_call_agent``).
+    """
+    agent = current_tool_call_agent()
+    if agent is None:
+        return tool_error("aegis_a2a_delegate requires a parent agent")
+    return dispatch_for_agent(agent, args)

@@ -16,7 +16,7 @@ from aegis.backend.models import (
     TaskAuditResponse,
 )
 from aegis.backend.chat.service import TaskAuditStore, get_task_audit_store
-from tools.a2a_delegate_aegis import (
+from plugins.aegis_a2a.delegate_aegis import (
     AegisDelegateStore,
     AgentPolicyConflictError,
     AgentPolicyNotFoundError,

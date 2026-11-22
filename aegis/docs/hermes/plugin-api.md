@@ -2,7 +2,8 @@
 
 Bundled plugins may import only the names in `hermes_cli/data/plugin_api.json`
 (`scripts/boundary_lint.py`, `hermes plugins validate`). The fork's plugins
-(`plugins/ext-tools`, `plugins/rbac-guard`) use the two "Aegis fork" groups below on top of
+(`plugins/ext-tools`, `plugins/rbac-guard`, `plugins/aegis_a2a`, `plugins/aegis_products`,
+`plugins/aegis_source`) use the two "Aegis fork" groups below on top of
 upstream's list and the `ctx` surface (`ctx.session_surface()`, `ctx.session_id()`, ...).
 Every name is listed because no `ctx` method or upstream-published name covers the need.
 
@@ -11,6 +12,7 @@ Every name is listed because no `ctx` method or upstream-published name covers t
 | Name | What a plugin uses it for |
 |---|---|
 | `tools.user_env_runtime:get_current_user_env_identity` | The platform user a tool call or plugin command acts for (bound by the tool executor and the gateway); `None` when there is none. Never taken from model arguments. |
+| `agent.tool_call_agent:current_tool_call_agent` | The live `AIAgent` whose tool call is running on this thread (bound by the tool executor on every path); `None` outside a tool call and in a host-isolated plugin process. For a tool that must act on the running agent itself — `aegis_a2a_delegate` reads its gateway-bound foreground I/O, caller identity and activity heartbeat, and parks its cancel handle on it. The registry passes handlers ids only. |
 | `tools.user_env_store` (module) | The calling user's persisted env values: `list_user_env`, `set_user_env_var`, `delete_user_env_var`, `CURRENT_USER_NAME_KEY` (system-managed, never deletable). |
 | `tools.cronjob_visibility:caller_identity` | Same identity as above, as the cron visibility rules see it. |
 | `tools.cronjob_visibility:resolve_caller_job` | A cron job by ID or name, as the caller may see it (own and ownerless jobs only; another user's job reads as missing). Ambiguity raises `AmbiguousJobReference`, a `LookupError`, over the caller's own matches only. |

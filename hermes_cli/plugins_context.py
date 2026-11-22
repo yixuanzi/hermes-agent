@@ -272,9 +272,11 @@ class PluginContext(PluginCapabilityCtxMixin, PluginIdleTaskCtxMixin):
     def register_tool(
         self, name: str, toolset: str, schema: dict, handler: Callable,
         check_fn: Callable | None = None, requires_env: list | None = None, is_async: bool = False,
-        description: str = "", emoji: str = "", override: bool = False,
+        description: str = "", emoji: str = "", override: bool = False, execution_timeout: float | None = None,
     ) -> Optional[PluginRegistration]:
-        """Register a tool in the global registry and track it as plugin-provided. ``override=True``
+        """Register a tool in the global registry and track it as plugin-provided. ``execution_timeout`` is
+        the call's own budget in seconds, which the generic tool deadline never cuts short (as for a
+        built-in's). ``override=True``
         replaces a same-named built-in (without it a name claimed by another toolset is rejected) and
         needs operator opt-in via ``plugins.entries.<plugin_id>.allow_tool_override: true`` — otherwise
         any enabled plugin could silently replace a privileged built-in like ``write_file`` (#23194)."""
@@ -294,7 +296,7 @@ class PluginContext(PluginCapabilityCtxMixin, PluginIdleTaskCtxMixin):
         registry.register(
             name=name, toolset=toolset, schema=schema, handler=handler, check_fn=check_fn,
             requires_env=requires_env, is_async=is_async, description=description, emoji=emoji,
-            override=override, scope=scope,
+            override=override, scope=scope, execution_timeout=execution_timeout,
         )
         registered = registry.snapshot_registration(name, scope=scope)
         handle = None

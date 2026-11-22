@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import sys
 
 from fastapi.testclient import TestClient
@@ -11,18 +10,15 @@ from aegis.backend.config import load_aegis_settings
 from aegis.backend.server import create_app
 
 
-def test_aegis_registered_in_builtin_subcommands() -> None:
-    assert "aegis" in main_mod._BUILTIN_SUBCOMMANDS
-
-
-def test_main_routes_aegis_with_expected_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hermes_aegis_routes_through_the_products_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     def _fake_cmd_aegis(args) -> None:
         captured["args"] = args
         raise SystemExit(0)
 
-    monkeypatch.setattr(main_mod, "cmd_aegis", _fake_cmd_aegis)
+    # `hermes aegis` is a plugin CLI command (plugins/aegis_products); its handler calls the backend.
+    monkeypatch.setattr("aegis.backend.main.cmd_aegis", _fake_cmd_aegis)
     monkeypatch.setattr(sys, "argv", ["hermes", "aegis"])
 
     with pytest.raises(SystemExit) as exc:
@@ -57,17 +53,3 @@ def test_root_serves_index_html(tmp_path) -> None:
     resp_spa = client.get("/policy")
     assert resp_spa.status_code == 200
     assert marker in resp_spa.text
-
-
-def test_hermes_cmd_aegis_delegates_to_backend_main(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
-
-    def _fake_cmd_aegis(args: argparse.Namespace) -> None:
-        captured["args"] = args
-
-    monkeypatch.setattr("aegis.backend.main.cmd_aegis", _fake_cmd_aegis, raising=False)
-
-    args = argparse.Namespace(port=9130)
-    main_mod.cmd_aegis(args)
-
-    assert captured["args"] is args

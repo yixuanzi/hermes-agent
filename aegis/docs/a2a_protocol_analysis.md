@@ -69,7 +69,7 @@ A2A 协议定义了两种任务处理模式：
 ### 当前代码的设置
 
 ```python
-# tools/a2a_delegate_tool.py 第1040行
+# plugins/aegis_a2a/delegate_tool.py 第1040行
 configuration=SendMessageConfiguration(return_immediately=True)
 ```
 

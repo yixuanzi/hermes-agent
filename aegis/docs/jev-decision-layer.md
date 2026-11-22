@@ -614,7 +614,7 @@ declined request completes with a `SKIPPED: …` marker and
 and is **never** gated — the caller is blocking on an answer, and silently
 refusing it would strand them.
 
-In practice no in-tree caller populates `chat_type`: `tools/a2a_delegate_tool.py`
+In practice no in-tree caller populates `chat_type`: `plugins/aegis_a2a/delegate_tool.py`
 builds an envelope of `platform` / `conn` / `uid` / `uname` only. The gate is
 therefore inert on this surface today, which is also why the `HERMES_JEV_AUTOREPLY`
 master switch deliberately does not reach it.

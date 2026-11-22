@@ -15,7 +15,7 @@ from aisoc.backend.models import (
     SystemRestartResponse,
 )
 from aisoc.backend.services.user_service import UserService
-from hermes_self_restart import request_self_restart
+from aegis_common.self_restart import request_self_restart
 
 
 def _graceful_shutdown() -> None:

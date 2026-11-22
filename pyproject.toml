@@ -739,9 +739,12 @@ include = [
   "pm.*",
   "tools",
   "tools.*",
-  # Aegis fork product apps (FastAPI backends launched as `hermes aegis|aisoc|workagent`).
+  # Aegis fork product apps (FastAPI backends launched as `hermes aegis|aisoc|workagent`) and the
+  # helpers they share.
   "aegis",
   "aegis.*",
+  "aegis_common",
+  "aegis_common.*",
   "aisoc",
   "aisoc.*",
   "workagent",

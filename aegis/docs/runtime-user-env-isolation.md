@@ -46,7 +46,7 @@
 - `agent/tool_executor.py`、`agent/agent_runtime_helpers.py`: 所有工具执行路径的身份绑定。
 - `tools/environments/base.py`、`tools/environments/local.py`、`tools/terminal_tool.py`: 注入、snapshot hygiene 和 local cache isolation。
 - `gateway/run.py`: 为 Slack 直入 Agent 的入站 turn 组装 `<source>` 前缀。
-- `tools/a2a_delegate_tool.py`: Aegis 父 Agent 委托远端 A2A Agent 时组装 `<source>` 前缀。
+- `plugins/aegis_a2a/delegate_tool.py`: Aegis 父 Agent 委托远端 A2A Agent 时组装 `<source>` 前缀。
 - `workagent/backend/a2a_service/executor.py`: 解析收到的 `<source>` 前缀，将身份绑定到 Workagent Agent runtime，并桥接 A2A 审批/澄清交互。
 - `workagent/backend/a2a_service/interactions.py`、`workagent/backend/a2a_server.py`: 注册交互等待、校验响应并在同一 A2A task 上发布 resolved metadata。
 - `cron/jobs.py`、`tools/cronjob_tools.py`、`cron/scheduler.py`: 延迟执行时的 cron 所属身份。
@@ -129,7 +129,7 @@ Slack adapter / gateway
 
 #### 场景 B：Aegis 与远端 A2A Agent 通信
 
-当 Aegis 父 Agent 调用 `aegis_a2a_delegate` 向远端 A2A Agent 发送首轮目标或前台 follow-up 时，`tools/a2a_delegate_tool.py::_decorate_a2a_user_message()` 会根据父 Agent 当前绑定的 runtime identity 重建前缀，并把它置于远端请求首行：
+当 Aegis 父 Agent 调用 `aegis_a2a_delegate` 向远端 A2A Agent 发送首轮目标或前台 follow-up 时，`plugins/aegis_a2a/delegate_tool.py::_decorate_a2a_user_message()` 会根据父 Agent 当前绑定的 runtime identity 重建前缀，并把它置于远端请求首行：
 
 ```text
 <source>{"platform":"slack","uid":"U02LQJ2S5HN","uname":"Guisheng(郭桂生)"}</source>
@@ -289,7 +289,7 @@ run_job(job)
 venv/bin/python -m pytest tests/tools/test_user_env_store.py tests/tools/test_user_env_runtime.py tests/tools/test_userenv_tool.py -q
 venv/bin/python -m pytest tests/tools/test_local_user_env.py tests/tools/test_userenv_terminal_isolation.py -q
 venv/bin/python -m pytest tests/tools/test_cronjob_tools.py tests/cron/test_scheduler.py tests/cron/test_cron_no_agent.py -q
-venv/bin/python -m pytest tests/gateway/test_shared_group_sender_prefix.py tests/tools/test_a2a_delegate_tool.py tests/workagent/backend/test_a2a_interactions.py tests/workagent/backend/test_a2a_executor.py -q
+venv/bin/python -m pytest tests/gateway/test_shared_group_sender_prefix.py tests/plugins/aegis_a2a/test_delegate_tool.py tests/workagent/backend/test_a2a_interactions.py tests/workagent/backend/test_a2a_executor.py -q
 venv/bin/python -m py_compile tools/user_env_store.py tools/user_env_runtime.py tools/userenv_tool.py tools/cronjob_tools.py cron/jobs.py cron/scheduler.py
 git diff --check
 ```

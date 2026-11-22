@@ -48,7 +48,7 @@ from agent.inline_tool_executors import (
 )
 from agent.message_metadata import stamp_data_use
 from agent.session_persistence import sync_rewritten_tool_rows
-from tools.user_env_runtime import call_as_agent_user
+from agent.tool_call_agent import call_as_tool_agent
 from agent.tool_dispatch_helpers import (
     _NEVER_PARALLEL_TOOLS,
     _is_destructive_command,
@@ -757,7 +757,7 @@ def _dispatch_authorized_once(
     with bound_tool_progress(agent.tool_progress_callback, ref.name, ref.call_id), collect_data_use() as data_use, \
             bound_form_asker(getattr(agent, "clarify_callback", None)):
         try:
-            return _run_with_activity_heartbeat(agent, ref.name, lambda: call_as_agent_user(agent, execute, ref.args))
+            return _run_with_activity_heartbeat(agent, ref.name, lambda: call_as_tool_agent(agent, execute, ref.args))
         finally:
             state.data_use = frozenset(data_use)
 
@@ -875,8 +875,7 @@ def _resolve_sequential_tool_timeout() -> float | None:
 # one run).
 # ``manage_connections`` waits on the connection operation's own deadline; the generic deadline
 # would return tool_timeout while its approval card is still open.
-_SEQUENTIAL_DEADLINE_EXEMPT_TOOLS = frozenset({"delegate_task", "manage_connections", "aegis_a2a_delegate"})
-_SPINNING_INLINE_TOOLS = frozenset({"aegis_a2a_delegate"})  # inline tools that block for a remote run
+_SEQUENTIAL_DEADLINE_EXEMPT_TOOLS = frozenset({"delegate_task", "manage_connections"})
 
 
 def _abandoned_sequential_result(agent, ref: _ToolCallRef, message: str, result_cls, **outcome) -> _ManagedToolResult:
@@ -1708,9 +1707,7 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
         # Agent-level tools that need live AIAgent state; table shared with invoke_tool.
         inline_executor = INLINE_TOOL_EXECUTORS[function_name]
         inline_ctx = InlineToolContext(effective_task_id=effective_task_id, tool_call_id=tool_call_id, messages=messages)
-        spins = function_name in _SPINNING_INLINE_TOOLS  # long-running: spin, and stop the spinner even on failure
-        return _SequentialDispatch(lambda next_args: inline_executor(agent, next_args, inline_ctx), finish_in_finally=spins,
-                                   spinner=_start_quiet_tool_spinner(agent, function_name, function_args) if spins else None)
+        return _SequentialDispatch(lambda next_args: inline_executor(agent, next_args, inline_ctx), finish_in_finally=False)
     if function_name == "delegate_task":
         spinner = _start_quiet_tool_spinner(agent, function_name, function_args, label=_delegate_spinner_label(function_args))
         agent._delegate_spinner = spinner

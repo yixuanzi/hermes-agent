@@ -89,7 +89,6 @@ CONFIGURABLE_TOOLSETS = [
     ("clarify",         "❓ Clarifying Questions",      "clarify"),
     ("delegation",      "👥 Task Delegation",           "delegate_task"),
     ("userenv",         "🔐 User Environment",          "manage the calling user's persisted runtime environment variables"),
-    ("aegis_a2a",       "🤝 Aegis A2A Delegation",      "discover and delegate work to configured remote A2A agents"),
     ("cronjob",         "⏰ Cron Jobs",                 "create/list/update/pause/resume/run, with optional attached skills"),
     ("discord",         "💬 Discord (read/participate)", "fetch messages, search members, create thread"),
     ("discord_admin",   "🛡️  Discord Server Admin",    "list channels/roles, pin, assign roles"),

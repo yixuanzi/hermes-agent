@@ -314,7 +314,7 @@ through the normal `message.completed` event flow:
 - `/a2a` — return the current `A2A_CONTEXT` XML. If the cache is empty, the
   backend refreshes it by calling `a2a_list()` first.
 
-Agent creation in Aegis also now uses the `tools.a2a_delegate_tool.A2A_CONTEXT`
+Agent creation in Aegis also now uses the `plugins.aegis_a2a.delegate_tool.A2A_CONTEXT`
 module global directly for the ephemeral system prompt. When the cache is
 empty, Aegis refreshes it with `a2a_list()` and then injects the refreshed XML.
 

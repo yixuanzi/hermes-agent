@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tools import a2a_delegate_aegis
-from tools.a2a_delegate_aegis import (
+from plugins.aegis_a2a import delegate_aegis as a2a_delegate_aegis
+from plugins.aegis_a2a.delegate_aegis import (
     AegisDelegateStore,
     AgentPolicyConflictError,
     AgentPolicyNotFoundError,

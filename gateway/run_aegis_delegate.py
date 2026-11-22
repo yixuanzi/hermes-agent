@@ -14,6 +14,18 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
+# The aegis_a2a plugin parks the running delegation's cancel handle on the agent under this name
+# (``plugins/aegis_a2a/delegate_tool.py``); core reaches it by contract, never by importing the plugin.
+ACTIVE_DELEGATION_ATTR = "_active_a2a_delegate_session"
+
+
+def _cancel_quietly(handle: Any) -> None:
+    try:
+        handle.cancel()
+    except Exception:
+        logger.warning("Failed to cancel the active A2A delegation", exc_info=True)
+
+
 def cancel_running_delegation(agent: Any) -> None:
     """Stop the A2A delegation ``agent`` is blocked in, if any, without blocking the caller.
 
@@ -21,11 +33,12 @@ def cancel_running_delegation(agent: Any) -> None:
     neither watches the interrupt flag; cancelling lets the turn reach its interrupt check. A
     remote cancel may block, so it runs on a daemon thread like the turn-process reaper.
     """
-    from tools.a2a_delegate_tool import cancel_active_a2a_delegate
-
+    handle = getattr(agent, ACTIVE_DELEGATION_ATTR, None)
+    if not callable(getattr(handle, "cancel", None)):
+        return
     threading.Thread(
         target=copy_context().run,
-        args=(cancel_active_a2a_delegate, agent),
+        args=(_cancel_quietly, handle),
         name="gateway-a2a-delegate-cancel",
         daemon=True,
     ).start()

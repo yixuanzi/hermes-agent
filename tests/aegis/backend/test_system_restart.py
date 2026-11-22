@@ -5,12 +5,12 @@ import os
 from fastapi.testclient import TestClient
 import pytest
 
-import hermes_self_restart
+from aegis_common import self_restart
 
 
 @pytest.fixture(autouse=True)
 def reset_restart_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(hermes_self_restart, "_restart_requested", False)
+    monkeypatch.setattr(self_restart, "_restart_requested", False)
 
 
 def _create_non_admin_headers(
@@ -91,7 +91,7 @@ def test_admin_restart_returns_unified_payload_after_response_is_sent(
     response_complete = False
     shutdown_boundaries: list[bool] = []
     monkeypatch.setattr(
-        hermes_self_restart,
+        self_restart,
         "_start_detached_watcher",
         lambda spec: launched.append(spec),
     )
@@ -136,7 +136,7 @@ def test_duplicate_restart_returns_202_without_second_watcher(
     launched: list[object] = []
     shutdowns: list[str] = []
     monkeypatch.setattr(
-        hermes_self_restart,
+        self_restart,
         "_start_detached_watcher",
         lambda spec: launched.append(spec),
     )

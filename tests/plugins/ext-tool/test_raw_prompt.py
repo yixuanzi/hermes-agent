@@ -95,8 +95,8 @@ def test_text_message_reaches_backend_verbatim():
     )
 
     assert session.inputs == [text]
-    # Hermes 自己的记录照旧带网关上下文
-    assert prepared.startswith("<source>") and "[群聊历史]" in prepared
+    # Hermes 自己的记录照旧带网关上下文；<source> 头由 aegis_source 插件经 pre_llm_call 注入，不在入站文本里
+    assert "<source>" not in prepared and "[群聊历史]" in prepared
     assert '[Replying to: "上一条回复"]' in prepared
 
 

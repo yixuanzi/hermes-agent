@@ -13,7 +13,7 @@ LLM/httpx client pool, tool schemas, an MCP client and the live
 ``_session_messages`` transcript — tens of MB on a tool-heavy session.  The A2A
 surface grows faster than "one entry per conversation", because a caller that
 does not pass an explicit ``session_id`` gets a freshly generated context id
-per delegation (``tools/a2a_delegate_tool._default_session_id``).
+per delegation (``plugins/aegis_a2a/delegate_tool._default_session_id``).
 
 Eviction is safe on both surfaces because each reloads conversation history
 from ``SessionDB`` at the start of every turn

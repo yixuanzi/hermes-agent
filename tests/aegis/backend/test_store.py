@@ -278,7 +278,7 @@ def test_mutate_locked_invalidates_a2a_caches_after_successful_write(
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     store_module = load_backend("aegis.backend.services.store")
-    a2a_delegate_tool = load_backend("tools.a2a_delegate_tool")
+    a2a_delegate_tool = load_backend("plugins.aegis_a2a.delegate_tool")
     store = store_module.get_aegis_store()
 
     a2a_delegate_tool.A2A_REGISTRY["cached-agent"] = {
@@ -307,7 +307,7 @@ def test_mutate_locked_keeps_a2a_caches_when_write_fails(
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     store_module = load_backend("aegis.backend.services.store")
-    a2a_delegate_tool = load_backend("tools.a2a_delegate_tool")
+    a2a_delegate_tool = load_backend("plugins.aegis_a2a.delegate_tool")
     store = store_module.get_aegis_store()
 
     a2a_delegate_tool.A2A_REGISTRY["cached-agent"] = {
