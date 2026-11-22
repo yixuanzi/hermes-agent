@@ -1,4 +1,4 @@
-"""tools.feishu_group_history — backend-independent history rendering.
+"""plugins.platforms.feishu.feishu_group_history — backend-independent history rendering.
 
 Pins the pieces that must not drift between the two fetch backends: the
 ``FEISHU_GROUP_HISTORY_SOURCE`` spellings, the lark-cli argv and envelope
@@ -22,7 +22,7 @@ if _repo not in sys.path:
     sys.path.insert(0, _repo)
 
 from hermes_platform.resolver.core import Candidate, Resolution
-from tools import feishu_group_history as gh
+from plugins.platforms.feishu import feishu_group_history as gh
 
 
 class _RecordingRequestBuilder:
@@ -134,7 +134,7 @@ def _cli_source(runner, binary="lark-cli"):
 def _lookup(found):
     cand = Candidate(found or "lark-cli", "PATH", found is not None)
     resolution = Resolution("path_executable" if found else "missing", (cand,))
-    return patch("tools.feishu_group_history.locate_command", return_value=resolution)
+    return patch("plugins.platforms.feishu.feishu_group_history.locate_command", return_value=resolution)
 
 
 def _with_binary(fn):

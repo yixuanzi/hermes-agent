@@ -180,8 +180,8 @@ def _reply_anchor_for_event(event) -> str | None:
         if getattr(source, "chat_type", None) != "dm":
             return None
         return getattr(event, "message_id", None) or getattr(event, "reply_to_message_id", None)
-    if platform == "feishu" and thread_id and not str(thread_id).startswith("om_"):  # om_*: prospective auto-topic root
-        return getattr(event, "reply_to_message_id", None) or getattr(event, "message_id", None)
+    if platform == "feishu" and thread_id and getattr(event, "reply_to_message_id", None):
+        return getattr(event, "reply_to_message_id", None)
     return getattr(event, "message_id", None)
 
 

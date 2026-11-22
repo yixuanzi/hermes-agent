@@ -69,6 +69,21 @@ class FeishuAutoTopicMixin:
         """
         return str(thread_id or "").startswith("om_")
 
+    async def handle_message(self, event: Any) -> None:
+        """Answer a turn keyed on an ``om_*`` root under its own message, not the one it quotes.
+
+        The base reply rule answers a Feishu topic message under ``reply_to_message_id``. An
+        ``om_*`` thread id is a topic that does not exist yet (a top-level message, or a
+        main-timeline quote reply Feishu roots at the reply itself) or an automatic topic's
+        root-keyed session, so the answer must go under this message for the topic to be created
+        or continued there. Pinned here, after text batching settled ``message_id``; a busy
+        redirect may still re-anchor the turn later.
+        """
+        if (event.reply_anchor_override is None and not event.internal and event.message_id
+                and self._is_message_thread_anchor(getattr(event.source, "thread_id", None))):
+            event.reply_anchor_override = event.message_id
+        await super().handle_message(event)
+
     def _note_topic_root(self, thread_id: Any, root_message_id: Any) -> None:
         """Remember the root message of a real ``omt_*`` topic (seen on an inbound message)."""
         if str(thread_id or "").startswith("omt_") and root_message_id:

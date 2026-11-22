@@ -32,3 +32,5 @@ Every name is listed because no `ctx` method or upstream-published name covers t
 | `tools.environments.local:hermes_subprocess_env` | The scrubbed environment for a child process (`inherit_credentials=False` keeps Hermes' provider keys out of it). |
 | `tools.approval:is_approval_bypass_active`, `is_approval_bypass_active_for_session` | Whether an explicit approval bypass (`approvals.mode: off`, `/yolo`) is on, to show users what will be auto-approved. |
 | `gateway.session:neutralize_untrusted_inline_text` | Neutralize untrusted inline metadata before it reaches a model prompt. |
+| `hermes_platform.resolver:locate_command` | Resolve an executable (e.g. `lark-cli`) the way the rest of Hermes does; AGENTS.md routes every executable lookup through `hermes_platform`. Used by the Feishu group-history CLI backend and `lark_user`. |
+| `hermes_time:get_timezone` | The configured user timezone (`None` = local), for plugins that render timestamps (Feishu group-history `MM-DD HH:MM` stamps). |

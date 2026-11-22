@@ -13,7 +13,7 @@ from typing import Any, Optional
 from gateway.platforms.base import (
     MessageType,
 )
-from tools import feishu_group_history as _group_history
+from . import feishu_group_history as _group_history
 
 logger = logging.getLogger("plugins.platforms.feishu.adapter")
 
@@ -26,7 +26,7 @@ def _fa():
 
 # Recent-group-history injection for the first turn of a new group session
 # (FEISHU_GROUP_HISTORY).  Fetching and rendering live in
-# tools/feishu_group_history.py; these aliases keep the adapter-side names.
+# feishu_group_history.py (this plugin); these aliases keep the adapter-side names.
 _DEFAULT_GROUP_HISTORY_LIMIT = _group_history.DEFAULT_LIMIT
 
 
@@ -248,10 +248,10 @@ class FeishuAdmissionMixin:
     ) -> str:
         """Render recent history for a cold-start group turn.
 
-        Thin adapter over :mod:`tools.feishu_group_history`: picks the backend
+        Thin adapter over :mod:`.feishu_group_history`: picks the backend
         from ``FEISHU_GROUP_HISTORY_SOURCE`` and supplies the adapter-owned
         pieces (SDK client, text extraction, sender-name cache, app id).  See
-        :func:`tools.feishu_group_history.build_group_history_block` for the
+        :func:`.feishu_group_history.build_group_history_block` for the
         block contract.  Every failure degrades to ``""``.
         """
         if getattr(self, "_client", None) is None or not chat_id:

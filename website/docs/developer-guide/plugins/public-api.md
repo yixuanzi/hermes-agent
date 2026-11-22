@@ -154,3 +154,5 @@ with a name allows that one name only.
 | `tools.approval` | `is_approval_bypass_active` | Aegis fork § generic helpers its bundled plugins need (aegis/docs/hermes/plugin-api.md) |
 | `tools.approval` | `is_approval_bypass_active_for_session` | Aegis fork § generic helpers its bundled plugins need (aegis/docs/hermes/plugin-api.md) |
 | `gateway.session` | `neutralize_untrusted_inline_text` | Aegis fork § generic helpers its bundled plugins need (aegis/docs/hermes/plugin-api.md) |
+| `hermes_time` | `get_timezone` | Aegis fork § generic helpers its bundled plugins need (aegis/docs/hermes/plugin-api.md) |
+| `hermes_platform.resolver` | `locate_command` | Aegis fork § generic helpers its bundled plugins need (aegis/docs/hermes/plugin-api.md) |

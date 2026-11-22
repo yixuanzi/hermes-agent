@@ -176,7 +176,7 @@ def test_group_history_cli_bin_setting(monkeypatch):
 
 
 def test_adapter_picks_backend_from_source_setting():
-    from tools import feishu_group_history as gh
+    from plugins.platforms.feishu import feishu_group_history as gh
 
     adapter = _history_adapter()
     api_settings = adapter._group_history_settings()
@@ -194,7 +194,7 @@ def test_adapter_picks_backend_from_source_setting():
 
 def test_adapter_cli_mode_never_touches_sdk_list_and_renders_cli_content():
     """End to end through the adapter wrapper in cli mode with a fake CLI runner."""
-    from tools import feishu_group_history as gh
+    from plugins.platforms.feishu import feishu_group_history as gh
 
     adapter = _history_adapter()
     adapter._group_history_source = "cli"
@@ -217,7 +217,7 @@ def test_adapter_cli_mode_never_touches_sdk_list_and_renders_cli_content():
 
     adapter._build_group_history_source = patched_builder
     found = Resolution("path_executable", (Candidate("/opt/bin/lark-cli", "PATH", True),))
-    with patch("tools.feishu_group_history.locate_command", return_value=found):
+    with patch("plugins.platforms.feishu.feishu_group_history.locate_command", return_value=found):
         block = asyncio.run(adapter._fetch_group_history_block(chat_id="oc_g", exclude_message_id="om_now"))
     # Default card regions (title,body): the card renders as 【title】 body.
     assert block == "<group_messages>\n[09-26 20:15] [assistant]: 【x】 body\n</group_messages>"
@@ -243,7 +243,7 @@ def test_group_history_card_regions_extra_accepts_list_and_beats_env(monkeypatch
 
 
 def test_adapter_passes_card_regions_to_both_backends():
-    from tools import feishu_group_history as gh
+    from plugins.platforms.feishu import feishu_group_history as gh
 
     adapter = _history_adapter()
     assert adapter._group_history_settings().card_regions == ("title", "body")  # default when unset

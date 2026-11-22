@@ -210,7 +210,9 @@
         "tools.environments.local:hermes_subprocess_env",
         "tools.approval:is_approval_bypass_active",
         "tools.approval:is_approval_bypass_active_for_session",
-        "gateway.session:neutralize_untrusted_inline_text"
+        "gateway.session:neutralize_untrusted_inline_text",
+        "hermes_time:get_timezone",
+        "hermes_platform.resolver:locate_command"
       ]
     }
   ]
