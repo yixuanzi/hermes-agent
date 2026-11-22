@@ -1,7 +1,7 @@
 """The fork's opt-in toolsets are configurable, off by default, and never core.
 
-``userenv`` is a shipped toolset; ``aegis_a2a`` is the bundled ``aegis_a2a`` plugin's toolset, which
-auto-loads (``kind: backend``) and shows in ``hermes tools`` as a plugin toolset.
+Both are plugin toolsets shown in ``hermes tools``: ``userenv`` comes from the ``ext-tools`` plugin (enabled
+in ``plugins.enabled``), ``aegis_a2a`` from the bundled ``aegis_a2a`` plugin, which auto-loads (``kind: backend``).
 """
 from __future__ import annotations
 
@@ -16,7 +16,10 @@ def plugins_loaded(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    import hermes_yaml as yaml
     from hermes_cli.plugins import discover_plugins
+
+    (home / "config.yaml").write_text(yaml.safe_dump({"plugins": {"enabled": ["ext-tools"]}}), encoding="utf-8")
 
     discover_plugins(force=True)
 
@@ -24,8 +27,8 @@ def plugins_loaded(tmp_path, monkeypatch):
 def test_userenv_and_aegis_a2a_appear_in_hermes_tools_and_start_off(plugins_loaded):
     from hermes_cli.tools_config import _get_plugin_toolset_keys
 
-    assert "userenv" in {key for key, _label, _desc in CONFIGURABLE_TOOLSETS}
-    assert "aegis_a2a" in _get_plugin_toolset_keys()
+    assert {"userenv", "aegis_a2a"} <= _get_plugin_toolset_keys()
+    assert not {"userenv", "aegis_a2a"} & {key for key, _label, _desc in CONFIGURABLE_TOOLSETS}
     assert {"userenv", "aegis_a2a"} <= _DEFAULT_OFF_TOOLSETS
 
 

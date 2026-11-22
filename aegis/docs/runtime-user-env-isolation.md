@@ -42,7 +42,7 @@
 
 - `tools/user_env_store.py`: JSON 存储、迁移和保留字段。
 - `tools/user_env_runtime.py`: `UserEnvIdentity` 与 ContextVar binding。
-- `tools/userenv_tool.py`: 当前用户的管理入口。
+- `plugins/ext-tools/userenv_tool.py`: 当前用户的管理入口（`ext-tools` 插件的 `userenv` 工具，需在 `plugins.enabled` 中启用 `ext-tools`；同插件的 `/userenv` 命令不经模型）。
 - `agent/tool_executor.py`、`agent/agent_runtime_helpers.py`: 所有工具执行路径的身份绑定。
 - `tools/environments/base.py`、`tools/environments/local.py`、`tools/terminal_tool.py`: 注入、snapshot hygiene 和 local cache isolation。
 - `gateway/run.py`: 为 Slack 直入 Agent 的入站 turn 组装 `<source>` 前缀。
@@ -76,6 +76,8 @@ userenv(action="list")
 userenv(action="set", key="NAME", value="value")
 userenv(action="delete", key="NAME")
 ```
+
+工具由 `ext-tools` 插件注册，toolset 名仍为 `userenv`：`platform_toolsets.<platform>` 中写了 `userenv` 才开启（`_DEFAULT_OFF_TOOLSETS`），未启用 `ext-tools` 插件时该工具不存在。
 
 它只通过当前 `UserEnvIdentity` 操作自己的 storage key。返回值隐藏变量值，也隐藏 `CURRENT_USER_NAME`，因此模型无法借由该工具列出另一位用户的数据或回显 secret。没有已绑定身份时，工具应返回明确错误，而不是退化为全局环境。
 
@@ -286,11 +288,11 @@ run_job(job)
 从仓库根目录执行：
 
 ```bash
-venv/bin/python -m pytest tests/tools/test_user_env_store.py tests/tools/test_user_env_runtime.py tests/tools/test_userenv_tool.py -q
+venv/bin/python -m pytest tests/tools/test_user_env_store.py tests/tools/test_user_env_runtime.py tests/plugins/ext-tool/test_userenv_tool.py -q
 venv/bin/python -m pytest tests/tools/test_local_user_env.py tests/tools/test_userenv_terminal_isolation.py -q
 venv/bin/python -m pytest tests/tools/test_cronjob_tools.py tests/cron/test_scheduler.py tests/cron/test_cron_no_agent.py -q
 venv/bin/python -m pytest tests/gateway/test_shared_group_sender_prefix.py tests/plugins/aegis_a2a/test_delegate_tool.py tests/workagent/backend/test_a2a_interactions.py tests/workagent/backend/test_a2a_executor.py -q
-venv/bin/python -m py_compile tools/user_env_store.py tools/user_env_runtime.py tools/userenv_tool.py tools/cronjob_tools.py cron/jobs.py cron/scheduler.py
+venv/bin/python -m py_compile tools/user_env_store.py tools/user_env_runtime.py plugins/ext-tools/userenv_tool.py tools/cronjob_tools.py cron/jobs.py cron/scheduler.py
 git diff --check
 ```
 

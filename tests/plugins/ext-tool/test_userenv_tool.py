@@ -14,7 +14,7 @@ def test_userenv_set_and_list_are_scoped_to_current_user_and_mask_values(monkeyp
 
     from tools.environments.local import _make_run_env
     from tools.user_env_runtime import reset_current_user_env_identity, set_current_user_env_identity
-    from tools.userenv_tool import userenv_tool
+    from userenv_tool import userenv_tool
 
     token = set_current_user_env_identity("slack", "u123", "alice")
     try:
@@ -39,7 +39,7 @@ def test_userenv_delete_keeps_system_current_user_name(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     from tools.user_env_runtime import reset_current_user_env_identity, set_current_user_env_identity
-    from tools.userenv_tool import userenv_tool
+    from userenv_tool import userenv_tool
 
     token = set_current_user_env_identity("telegram", "u123", "alice")
     try:
@@ -57,7 +57,7 @@ def test_userenv_delete_keeps_system_current_user_name(monkeypatch, tmp_path):
 def test_userenv_requires_current_user_identity(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
-    from tools.userenv_tool import userenv_tool
+    from userenv_tool import userenv_tool
 
     result = json.loads(userenv_tool(action="list"))
     assert "error" in result

@@ -1,9 +1,10 @@
 name: ext-tools
 version: "1.0.0"
-description: "Stateless extension tools host — read-only utilities that don't warrant core tool surface. Tools: cron_prompt (full cron job prompt with owner identity check). Commands: /userenv (self-managed user env vars, identity-scoped, bypasses LLM context); /codex (session-scoped switch that hands turns to the locally configured codex app-server); /claude (same switch for the locally installed and logged-in Claude Code, driven over ACP by @agentclientprotocol/claude-agent-acp)."
+description: "Stateless extension tools host — read-only utilities that don't warrant core tool surface. Tools: cron_prompt (full cron job prompt with owner identity check); userenv (the calling user's own persisted env vars, toolset `userenv`, off until a platform lists it; values never returned). Commands: /userenv (self-managed user env vars, identity-scoped, bypasses LLM context); /codex (session-scoped switch that hands turns to the locally configured codex app-server); /claude (same switch for the locally installed and logged-in Claude Code, driven over ACP by @agentclientprotocol/claude-agent-acp)."
 author: "guisheng"
 provides_tools:
   - cron_prompt
+  - userenv
 provides_commands:
   - userenv
   - codex

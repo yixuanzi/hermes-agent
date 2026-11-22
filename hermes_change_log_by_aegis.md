@@ -49,19 +49,13 @@ Intent: Keep command routing predictable while extending an existing command flo
 
 ## File: `toolsets.py`
 
-Feature: Opt-in `userenv` toolset.
-Intent: Expose the user-env tool behind an explicit toolset so users opt in without adding schema cost to every session. (`aegis_a2a` is the `plugins/aegis_a2a` plugin's toolset, not a shipped one.)
-
-Feature: Fork names stay out of shared metrics.
-Intent: `BUILTIN_TOOL_NAMES` / `BUILTIN_TOOLSET_NAMES` are the names shared metrics may export, and upstream's `hermes.shared_metrics.v4` schema enumerates only upstream's. `_FORK_TOOLSET_NAMES` keeps the fork's shipped toolset (`userenv`) and its tool out, so they record as `custom` / `plugin` and an opted-in upload never carries a value the schema rejects; plugin toolsets such as `aegis_a2a` already record that way.
-
 Feature: `hermes-lark_user` platform toolset.
 Intent: The Lark personal auto-reply platform answers as the user beside the user's own lark-cli token, so its default toolset drops the terminal and process tools (`platform_toolsets.lark_user` can opt back in).
 
 ## File: `hermes_cli/tools_config.py`
 
-Feature: Configurable user environment and A2A toolsets.
-Intent: Surface `userenv` in the standard `hermes tools` flow and keep both `userenv` and the `aegis_a2a` plugin toolset in `_DEFAULT_OFF_TOOLSETS`, so neither is on until enabled per platform (a plugin toolset is otherwise on once its plugin loads, and `aegis_a2a` auto-loads); `aegis_a2a` shows in `hermes tools` as a plugin toolset. AISOC's dedicated A2A runtime is unchanged.
+Feature: Fork plugin toolsets start off.
+Intent: Keep the `userenv` (ext-tools plugin) and `aegis_a2a` plugin toolsets in `_DEFAULT_OFF_TOOLSETS`, so neither is on until a platform lists it (a plugin toolset is otherwise on once its plugin loads, and `aegis_a2a` auto-loads); both show in `hermes tools` as plugin toolsets, and a `platform_toolsets` list that already names `userenv` keeps working. AISOC's dedicated A2A runtime is unchanged.
 
 ## File: `run_agent.py`
 
@@ -320,11 +314,6 @@ Intent: Carry platform/user identity in ContextVars (callers that hop threads co
 
 Feature: `call_as_agent_user`.
 Intent: The one helper that binds the agent's platform user around a tool call and always restores the previous binding; the tool executor reaches it through `agent.tool_call_agent.call_as_tool_agent`, which also binds the live agent.
-
-## File: `tools/userenv_tool.py`
-
-Feature: User-scoped env management tool.
-Intent: Let authenticated runtime users list, set and delete only their own env values, never returning secret values and never deleting `CURRENT_USER_NAME`.
 
 ## File: `tools/environments/local.py`
 

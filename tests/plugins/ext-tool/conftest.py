@@ -11,7 +11,7 @@ from pathlib import Path
 
 PLUGIN_DIR = Path(__file__).resolve().parents[3] / "plugins" / "ext-tools"
 PACKAGE = "hermes_plugins.ext_tools"
-_MODULES = ("raw_prompt", "tool_record", "claude_acp", "codex_cmd", "claude_cmd", "cron_prompt", "userenv_cmd")
+_MODULES = ("raw_prompt", "tool_record", "claude_acp", "codex_cmd", "claude_cmd", "cron_prompt", "userenv_cmd", "userenv_tool")
 
 
 def load_ext_tools() -> types.ModuleType:
