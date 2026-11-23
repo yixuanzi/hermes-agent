@@ -133,7 +133,7 @@ platforms:
         mention: { enabled: true, include_at_all: false }
 
     max_message_age: 10m         # older messages are never answered
-    text_batch_delay_seconds: 2  # a sender's burst of messages becomes one turn
+    text_batch_delay_seconds: 2  # a sender's burst of messages becomes one turn (all of one poll's always do)
     rate_limit: { per_chat: 5 }  # replies per chat per minute (0 = unlimited)
     instructions: ""             # your standing guidance for the agent, added to every turn's system prompt
 

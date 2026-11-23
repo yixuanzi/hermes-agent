@@ -83,6 +83,8 @@ if args[:2] == ["im", "+threads-messages-list"]:
 if args[:2] == ["im", "+messages-resources-download"]:
     if "download" in fail:
         out(error=fail["download"])
+    if state.get("slow_download"):  # a transfer that outlasts the text batch delay
+        import time; time.sleep(state["slow_download"])
     name = args[args.index("--output") + 1]
     if args[args.index("--type") + 1] == "image" and "." not in name:
         name += ".png"  # like lark-cli: the extension comes from the Content-Type
@@ -643,7 +645,7 @@ async def test_images_and_files_reach_the_agent_as_cached_local_files(lark):
     await adapter.poll_once("dm")
 
     (event,) = events
-    image_a, image_b, report = event.media_urls
+    image_a, _, report = event.media_urls
     assert Path(image_a).parent == get_image_cache_dir() and Path(report).parent == get_document_cache_dir()
     assert Path(image_a).read_bytes() == b"bytes of img_v3_a" and Path(report).read_bytes() == b"bytes of file_v3_c"
     assert event.media_types == ["image/png", "image/png", "application/pdf"]
@@ -680,6 +682,18 @@ async def test_a_failed_download_keeps_the_marker_and_still_starts_the_turn(lark
     await adapter.poll_once("dm")
     (event,) = events
     assert event.text == '<file key="file_v3_gone" name="a.docx"/> 帮我看看' and event.media_urls == []
+
+
+@pytest.mark.asyncio
+async def test_a_burst_found_by_one_poll_is_one_turn_however_long_its_attachments_take(lark):
+    from tests.waiting import async_wait_until
+    adapter, events = await opened(lark, text_batch_delay_seconds=0.2)
+    lark.write(slow_download=2.0, search_p2p=[msg("om_1", text="帮我看下这张图", age=2),
+                                              msg("om_2", text="[Image: img_v3_slow]", age=1)])
+    await adapter.poll_once("dm")
+    await async_wait_until(lambda: events and not adapter._pending_text_batches, what="the batch is flushed")
+    (event,) = events
+    assert event.text == "帮我看下这张图\n[Image: img_v3_slow]" and len(event.media_urls) == 1
 
 
 def test_a_senders_file_name_cannot_leave_the_cache_directory():

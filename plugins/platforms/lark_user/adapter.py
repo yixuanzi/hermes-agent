@@ -362,7 +362,7 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                                        at_me=source == "mention")
         inbound = sorted(filter(None, (to_inbound(i, my_open_id=me.open_id, my_name=me.name) for i in items)),
                          key=lambda m: m.created_at)
-        dispatched = 0
+        ready: list[Inbound] = []
         for inb in inbound:
             if store.is_seen(inb.message_id):
                 continue
@@ -379,9 +379,15 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                 reason = "rate_limited"
             if reason:
                 logger.debug("lark_user: skip %s (%s)", inb.message_id, reason)
+                self._commit(source, inb)
             else:
-                await self._dispatch(inb)
-                dispatched += 1
+                ready.append(inb)
+        # Every turn is prepared before any is handed off: preparing one (attachments, topic root,
+        # group context) can take longer than the text batch delay, which would otherwise flush a
+        # sender's earlier message alone and turn one burst found by this poll into several turns.
+        events = [await self._prepare(inb) for inb in ready]
+        for inb, event in zip(ready, events):
+            await self._hand_off(event)
             self._commit(source, inb)
         if not primed:  # history taken in: answer only what arrives from now on
             store.advance(source, now)
@@ -389,7 +395,7 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         if source == "dm" and self._desk is not None:
             await self._desk.expire(now)
         store.prune(now)
-        return dispatched
+        return len(ready)
 
     def _commit(self, source: str, inb: Inbound) -> None:
         self._store.mark_seen(inb.message_id)
@@ -404,7 +410,8 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         return (source == "dm" and self._text_review and bool(desk.chat_id) and inb.chat_id == desk.chat_id
                 and inb.sender_id == self._me.open_id and parse_command(inb.text) is not None)
 
-    async def _dispatch(self, inb: Inbound) -> None:
+    async def _prepare(self, inb: Inbound) -> MessageEvent:
+        """The turn ``inb`` starts, with everything it needs fetched; not handed off yet."""
         self._origins[inb.message_id] = inb
         while len(self._origins) > _ORIGIN_CACHE:
             self._origins.popitem(last=False)
@@ -427,6 +434,9 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             event.channel_context = await group_context(self._cli, inb, chat.context) or None
         logger.info("lark_user: turn for %s chat=%s (%d chars, %d attachment(s))", inb.message_id,
                     hash_for_log(inb.chat_id), len(inb.text), len(attachments))
+        return event
+
+    async def _hand_off(self, event: MessageEvent) -> None:
         if self._text_batch_delay_seconds > 0:
             self._enqueue_text_event(event)
         else:
