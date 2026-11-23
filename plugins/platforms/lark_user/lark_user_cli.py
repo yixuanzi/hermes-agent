@@ -21,8 +21,9 @@ from hermes_platform.resolver import locate_command
 
 logger = logging.getLogger(__name__)
 
-# argv, stdin bytes, timeout, env (None = inherit) -> (returncode, stdout, stderr)
-Runner = Callable[[Sequence[str], Optional[bytes], float, Optional[dict[str, str]]], Awaitable[tuple[int, bytes, bytes]]]
+# argv, stdin bytes, timeout, env (None = inherit), cwd (None = private temp dir) -> (returncode, stdout, stderr)
+Runner = Callable[[Sequence[str], Optional[bytes], float, Optional[dict[str, str]], Optional[str]],
+                  Awaitable[tuple[int, bytes, bytes]]]
 
 _AUTH_HINTS = ("token", "login", "unauthor", "authenticat", "expired", "scope", "permission")
 _RATE_HINTS = ("99991400", "rate limit", "frequency", "too many")
@@ -47,20 +48,22 @@ def classify_error(error: dict[str, Any]) -> str:
 
 
 async def _run_subprocess(argv: Sequence[str], stdin: Optional[bytes], timeout: float,
-                          env: Optional[dict[str, str]] = None) -> tuple[int, bytes, bytes]:
-    # cwd is a private temp dir: the CLI resolves relative media paths against it, never ours.
-    with tempfile.TemporaryDirectory(prefix="lark_user_") as cwd:
-        proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=cwd, env=env,
-            stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(stdin), timeout=timeout)
-        except TimeoutError:
-            proc.kill()
-            with contextlib.suppress(TimeoutError):  # a grandchild holding the pipe must not hang us
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            raise
+                          env: Optional[dict[str, str]] = None, cwd: Optional[str] = None) -> tuple[int, bytes, bytes]:
+    if cwd is None:
+        # A private temp dir: the CLI resolves relative media paths against it, never ours.
+        with tempfile.TemporaryDirectory(prefix="lark_user_") as private:
+            return await _run_subprocess(argv, stdin, timeout, env, private)
+    proc = await asyncio.create_subprocess_exec(
+        *argv, cwd=cwd, env=env,
+        stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(stdin), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        with contextlib.suppress(TimeoutError):  # a grandchild holding the pipe must not hang us
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        raise
     return int(proc.returncode or 0), stdout, stderr
 
 
@@ -85,13 +88,14 @@ class LarkCli:
         return found[0] if found else None
 
     async def call(self, args: Sequence[str], *, stdin: Optional[str] = None,
-                   env: Optional[dict[str, str]] = None) -> dict[str, Any]:
+                   env: Optional[dict[str, str]] = None, cwd: Optional[str] = None) -> dict[str, Any]:
         binary = self.resolve_binary()
         if not binary:
             raise LarkCliError("missing", f"{self._binary} not found on PATH")
         argv = [binary, *(["--profile", self._profile] if self._profile else []), *args]
         try:
-            code, out, err = await self._runner(argv, stdin.encode() if stdin is not None else None, self._timeout, env)
+            code, out, err = await self._runner(argv, stdin.encode() if stdin is not None else None, self._timeout,
+                                                env, cwd)
         except TimeoutError:
             raise LarkCliError("timeout", f"lark-cli {args[0]} {args[1] if len(args) > 1 else ''} timed out") from None
         try:
@@ -121,6 +125,14 @@ class LarkCli:
             args.append("--is-at-me")
         data = await self.call(args)
         return list(data.get("messages") or [])
+
+    async def download_resource(self, message_id: str, key: str, *, kind: str, output: str, cwd: str) -> str:
+        """Save one image (``kind="image"``) or file of a message as ``cwd``/``output``; returns the
+        saved path. lark-cli only writes under its cwd, /tmp or ~/files, and appends the extension
+        it infers when ``output`` has none."""
+        data = await self.call(["im", "+messages-resources-download", "--as", "user", "--message-id", message_id,
+                                "--file-key", key, "--type", kind, "--output", output], cwd=cwd)
+        return str(data.get("saved_path") or "")
 
     # ── writes ──────────────────────────────────────────────────────────────
 

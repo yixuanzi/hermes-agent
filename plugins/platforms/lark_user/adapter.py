@@ -38,6 +38,7 @@ from .lark_user_context import group_context
 from .lark_user_control import conversation_list, lark_user_command, register_live, unregister_live
 from .lark_user_cursor import CursorStore
 from .lark_user_intake import ChatRateLimit, Identity, drop_reason
+from .lark_user_media import fetch_attachments
 from .lark_user_normalize import Inbound, to_inbound
 from .lark_user_poll import PollSchedule
 from .lark_user_render import render
@@ -410,18 +411,22 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         self._last_by_chat[inb.chat_id] = inb.message_id
         chat = self.settings.for_chat(inb.chat_id)
         source = shape_source(self.build_source, inb, chat, thread_root=await self._thread_roots.root_for(inb, chat))
+        attachments = await fetch_attachments(self._cli, inb.message_id, inb.text)
         event = MessageEvent(
             text=inb.text, message_type=MessageType.TEXT, source=source, message_id=inb.message_id,
             user_id=inb.sender_id, user_name=inb.sender_name or None,
             timestamp=dt.datetime.fromtimestamp(inb.created_at or time.time()),
+            media_urls=[a.path for a in attachments], media_types=[a.media_type for a in attachments],
+            media_filenames=[a.name for a in attachments], media_text_inlined=[False] * len(attachments),
+            channel_prompt=chat.instructions or None,
             # Senders are third parties writing to the user, never operators of this gateway.
             allow_gateway_control=False,
         )
         fresh = await self._open_conversation(event, chat)
         if inb.chat_type == "group" and chat.context.enabled and (fresh or chat.context.when == "always"):
             event.channel_context = await group_context(self._cli, inb, chat.context) or None
-        logger.info("lark_user: turn for %s chat=%s (%d chars)", inb.message_id, hash_for_log(inb.chat_id),
-                    len(inb.text))
+        logger.info("lark_user: turn for %s chat=%s (%d chars, %d attachment(s))", inb.message_id,
+                    hash_for_log(inb.chat_id), len(inb.text), len(attachments))
         if self._text_batch_delay_seconds > 0:
             self._enqueue_text_event(event)
         else:
@@ -516,6 +521,8 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             text=_REVISION_PROMPT.format(user_name=self._me.name, notes=notes, content=draft.get("content", "")),
             message_type=MessageType.TEXT, source=source,
             message_id=f"{anchor}#rev{revision}", reply_anchor_override=anchor or None,
+            # The same system prompt as the conversation's other turns: a change would break its cache.
+            channel_prompt=chat.instructions or None,
             user_id=inb.sender_id, user_name=inb.sender_name or None, allow_gateway_control=False)
         logger.info("lark_user: revision %d for %s chat=%s", revision, anchor, hash_for_log(inb.chat_id))
         await self.handle_message(event)

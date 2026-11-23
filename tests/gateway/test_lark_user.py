@@ -80,6 +80,16 @@ if args[:2] == ["im", "+threads-messages-list"]:
         root = state.get("thread_roots", {{}}).get(args[args.index("--thread") + 1])
         out({{"messages": [{{"message_id": root}}] if root else []}})
     out({{"messages": state.get("thread_history", [])}})
+if args[:2] == ["im", "+messages-resources-download"]:
+    if "download" in fail:
+        out(error=fail["download"])
+    name = args[args.index("--output") + 1]
+    if args[args.index("--type") + 1] == "image" and "." not in name:
+        name += ".png"  # like lark-cli: the extension comes from the Content-Type
+    path = os.path.join(os.getcwd(), name)  # lark-cli writes relative outputs under its cwd
+    with open(path, "wb") as fh:
+        fh.write(("bytes of " + args[args.index("--file-key") + 1]).encode())
+    out({{"saved_path": path, "size_bytes": os.path.getsize(path)}})
 if args[:2] in (["im", "+messages-reply"], ["im", "+messages-send"]):
     if "reply" in fail:
         out(error=fail["reply"])
@@ -615,6 +625,97 @@ async def test_group_context_is_off_by_default_and_per_chat_switchable(lark):
     lark.write(search_group=[{**mention, "message_id": "om_m2"}])
     await adapter2.poll_once("mention")
     assert events2[0].channel_context is None
+
+
+# ── images and files ───────────────────────────────────────────────────────
+
+def _downloads(lark):
+    return [c for c in lark.read().get("calls", []) if c["args"][1:2] == ["+messages-resources-download"]]
+
+
+@pytest.mark.asyncio
+async def test_images_and_files_reach_the_agent_as_cached_local_files(lark):
+    from gateway.platforms.base import get_document_cache_dir, get_image_cache_dir
+    adapter, events = await opened(lark)
+    text = ('看下这个 [Image: img_v3_a]\n![Image](img_v3_b)\n<file key="file_v3_c" name="周报 &amp; 计划.pdf"/>\n'
+            '<audio key="file_v3_d" duration="3s"/>')
+    lark.write(search_p2p=[msg("om_media", text=text)])
+    await adapter.poll_once("dm")
+
+    (event,) = events
+    image_a, image_b, report = event.media_urls
+    assert Path(image_a).parent == get_image_cache_dir() and Path(report).parent == get_document_cache_dir()
+    assert Path(image_a).read_bytes() == b"bytes of img_v3_a" and Path(report).read_bytes() == b"bytes of file_v3_c"
+    assert event.media_types == ["image/png", "image/png", "application/pdf"]
+    assert event.media_filenames == ["", "", "周报 & 计划.pdf"]
+    assert event.media_text_inlined == [False, False, False]
+    # The paths reach the agent through the gateway's attachment notes only: the text is untouched,
+    # and audio is not downloaded.
+    assert event.text == text
+    assert {c["args"][c["args"].index("--message-id") + 1] for c in _downloads(lark)} == {"om_media"}
+    assert {c["args"][c["args"].index("--file-key") + 1] for c in _downloads(lark)} == {
+        "img_v3_a", "img_v3_b", "file_v3_c"}
+    from gateway.run import GatewayRunner
+    prompt = GatewayRunner._prepend_inbound_document_notes(event, event.text)
+    assert prompt.count(report) == 1 and "周报 & 计划.pdf" in prompt
+
+
+@pytest.mark.asyncio
+async def test_a_resource_already_in_the_cache_is_not_downloaded_again(lark):
+    adapter, events = await opened(lark)
+    lark.write(search_p2p=[msg("om_1", text="[Image: img_v3_same]")])
+    await adapter.poll_once("dm")
+    lark.write(search_p2p=[msg("om_2", text="again ![Image](img_v3_same)", sender="ou_bob", chat="oc_dm2")])
+    await adapter.poll_once("dm")
+
+    assert len(_downloads(lark)) == 1
+    assert events[1].media_urls == events[0].media_urls and events[1].text == "again ![Image](img_v3_same)"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_download_keeps_the_marker_and_still_starts_the_turn(lark):
+    adapter, events = await opened(lark)
+    lark.write(fail={"download": {"type": "api", "message": "File not in msg"}},
+               search_p2p=[msg("om_x", text='<file key="file_v3_gone" name="a.docx"/> 帮我看看')])
+    await adapter.poll_once("dm")
+    (event,) = events
+    assert event.text == '<file key="file_v3_gone" name="a.docx"/> 帮我看看' and event.media_urls == []
+
+
+def test_a_senders_file_name_cannot_leave_the_cache_directory():
+    from plugins.platforms.lark_user.lark_user_media import find_resources, safe_name
+    assert safe_name("../../.ssh/authorized_keys") == "authorized_keys"
+    assert safe_name("..\\..\\evil.exe") == "evil.exe"
+    assert safe_name("..") == "file" and safe_name("a\x00b|c.txt") == "abc.txt"
+    assert len(safe_name("x" * 500 + ".pdf")) == 120 and safe_name("x" * 500 + ".pdf").endswith(".pdf")
+    # A key is a file-name part: anything but key characters is not a marker at all.
+    assert find_resources("[Image: ../../x] [Image: img_ok]")[0].key == "img_ok"
+
+
+# ── instructions ───────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_instructions_ride_every_turn_of_a_chat_as_its_system_prompt(lark):
+    adapter, events = await opened(lark, instructions="  只确认收到，不做任何承诺。\n",
+                                   chats={"oc_dm2": {"instructions": "这是我老板，语气正式。"},
+                                          "oc_dm3": {"instructions": ""}})
+    lark.write(search_p2p=[msg("om_a"), msg("om_b", chat="oc_dm2", sender="ou_bob"),
+                           msg("om_c", chat="oc_dm3", sender="ou_bob")])
+    await adapter.poll_once("dm")
+    assert [e.channel_prompt for e in events] == ["只确认收到，不做任何承诺。", "这是我老板，语气正式。", None]
+
+    # A revision is a turn of the same conversation: same system prompt, so its cached prefix holds.
+    assert (await adapter.send("oc_dm1", "收到", reply_to="om_a")).success
+    lark.write(search_p2p=[msg("om_cmd", chat="oc_self", sender="ou_me", text="/revise 1 再短一点")])
+    await adapter.poll_once("dm")
+    assert events[-1].message_id == "om_a#rev1" and events[-1].channel_prompt == events[0].channel_prompt
+
+
+def test_instructions_must_be_text():
+    from plugins.platforms.lark_user.lark_user_config import SettingsError, load_settings
+    with pytest.raises(SettingsError):
+        load_settings({"instructions": ["a", "b"]})
+    assert load_settings({}).for_chat("oc_any").instructions == ""
 
 
 # ── review cards (separate review app) ─────────────────────────────────────

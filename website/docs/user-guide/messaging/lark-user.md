@@ -135,6 +135,7 @@ platforms:
     max_message_age: 10m         # older messages are never answered
     text_batch_delay_seconds: 2  # a sender's burst of messages becomes one turn
     rate_limit: { per_chat: 5 }  # replies per chat per minute (0 = unlimited)
+    instructions: ""             # your standing guidance for the agent, added to every turn's system prompt
 
     session:
       dm_scope: per_chat         # per_chat | per_message
@@ -165,7 +166,7 @@ platforms:
       msg_max_chars: 1000
       when: new_session          # new_session | always
 
-    chats:                       # per-chat overrides (enabled, session.*, reply.*, context.*), keyed by chat_id
+    chats:                       # per-chat overrides (enabled, session.*, instructions, reply.*, context.*), keyed by chat_id
       oc_team: { group_scope: per_thread, reply: { delivery: auto }, context: { enabled: true } }
       oc_noisy: { enabled: false }
 ```
@@ -200,6 +201,34 @@ With `context.enabled`, an @mention reaches the agent with the group's recent me
 message. They are read as you, so any group you are in works. Each line is flattened and stripped
 of `<`/`>`, so a message cannot close or forge a block.
 
+### Images and files
+
+Images (`[Image: img_…]`, `![Image](img_…)` in rich text) and files (`<file key="file_…" name="…"/>`)
+in a message that starts a turn are downloaded through `lark-cli` into the gateway's media cache:
+images to `cache/images/`, files to `cache/documents/`, each named `lark_<key>.…`. They are attached
+to the turn the way other platforms attach theirs: images go to the model or to vision analysis,
+files get a note with their path telling the agent to read them. The message text is left as it is,
+so each path appears once, in the gateway's note. A key already in the cache is reused without a
+download. Audio, video and stickers are not downloaded; a failed download leaves that resource
+without an attachment and the turn runs anyway.
+
+### Instructions
+
+`instructions` is your standing guidance for the agent (who you are, tone, what it must not promise,
+how to handle certain requests). It is added to the system prompt of every turn, revisions
+included, and never written to the transcript; it stays the same for the whole conversation, so
+prompt caching is unaffected. `chats.<chat_id>.instructions` replaces the global text for that chat
+(`""` turns it off there). Changes apply after a gateway restart.
+
+```yaml
+platforms:
+  lark_user:
+    instructions: |
+      You answer for me while I am away. Acknowledge and explain; never commit me to a date or approval.
+    chats:
+      oc_boss_dm: { instructions: "This is my manager: formal tone, say I will reply in person soon." }
+```
+
 ### Open access
 
 `dm_policy: open` or `group_policy: open` lets anyone who can message you get a reply under your
@@ -224,6 +253,7 @@ name. The gateway refuses to start with either unless `LARK_USER_ALLOW_ALL_USERS
   interval a reply starts 15–30 seconds after a message arrives.
 - Replies are sent once the turn finishes; there is no streamed or in-progress output. Do not
   enable `display.platforms.lark_user.streaming`: streamed text is not the final answer and is dropped.
-- Only text is read; images and files in incoming messages are not downloaded.
+- Audio, video and stickers in incoming messages are not downloaded, nor are attachments of the
+  messages shown as group context.
 
 The plugin's own README (`plugins/platforms/lark_user/README.md`) explains every option in detail.

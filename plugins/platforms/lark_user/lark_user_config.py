@@ -145,6 +145,9 @@ class ChatSettings:
     # A conversation nobody can /new (senders have no gateway control) would otherwise grow forever.
     idle_reset: float = 4 * 3600.0         # seconds of silence after which the next message starts afresh; 0 = never
     daily_reset_at: Optional[int] = None   # minute of the day (local) after which the next message starts afresh
+    # The user's own guidance for answering in this chat (tone, what to promise, how to work), added
+    # to the system prompt of every turn; "" = none.
+    instructions: str = ""
     reply: ReplySettings = ReplySettings()
     context: ContextSettings = ContextSettings()
 
@@ -229,6 +232,14 @@ def _reply(raw: Mapping[str, Any], base: ReplySettings, where: str) -> ReplySett
     )
 
 
+def _text(value: Any, key: str) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise SettingsError(f"{key} must be text (got {type(value).__name__})")
+    return value.strip()
+
+
 def _idle_reset(value: Any, default: float, key: str) -> float:
     seconds = parse_duration(value, default)
     if 0 < seconds < 60:
@@ -246,6 +257,7 @@ def _chat(raw: Mapping[str, Any], base: ChatSettings, where: str) -> ChatSetting
         idle_reset=_idle_reset(session.get("idle_reset"), base.idle_reset, f"{where}session.idle_reset"),
         daily_reset_at=(parse_clock(session["daily_reset_at"], f"{where}session.daily_reset_at")
                         if "daily_reset_at" in session else base.daily_reset_at),
+        instructions=_text(raw.get("instructions", base.instructions), f"{where}instructions"),
         reply=_reply(_section(raw, "reply"), base.reply, where),
         context=_context(_section(raw, "context"), base.context, where),
     )
