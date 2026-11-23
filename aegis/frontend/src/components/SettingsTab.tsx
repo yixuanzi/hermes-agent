@@ -217,6 +217,14 @@ export default function SettingsTab({
         onAuthExpired?.();
         return;
       }
+      if (error instanceof ApiError && error.status === 409) {
+        // A refused restart says why (e.g. the frontend build failed); retrying cannot help
+        // until that is fixed, so close the dialog and show the reason.
+        setConfirmationStage(null);
+        setConfirmationPhrase('');
+        setRestartError(error.message);
+        return;
+      }
       setRestartError('Restart request failed. Aegis is still running.');
     } finally {
       if (restartAbortControllerRef.current === controller) {
@@ -423,7 +431,7 @@ export default function SettingsTab({
                   <p className="mt-2 max-w-2xl text-sm text-slate-400">
                     Restarting temporarily disconnects this console and interrupts active operations.
                   </p>
-                  {restartError ? <p className="aegis-status-text--danger mt-3 text-sm" role="alert">{restartError}</p> : null}
+                  {restartError ? <p className="aegis-status-text--danger mt-3 max-h-80 overflow-auto whitespace-pre-wrap break-words text-sm" role="alert">{restartError}</p> : null}
                   {restarting ? <p className="aegis-status-text--warning mt-3 font-mono text-xs" role="status">Restarting Aegis. Waiting for the replacement process…</p> : null}
                 </div>
                 <button ref={restartButtonRef} type="button" onClick={() => setConfirmationStage('warning')} disabled={restartSubmitting || restarting} className="aegis-btn aegis-btn--danger shrink-0 px-5 py-3 text-sm">

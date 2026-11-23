@@ -264,6 +264,37 @@ describe('Aegis Settings restart controls', () => {
     expect(screen.queryByText(/restart request failed/i)).not.toBeInTheDocument();
   });
 
+  it('shows why a refused restart was cancelled and keeps the current process', async () => {
+    const detail = 'Restart cancelled; Aegis is still running. Aegis web UI build failed: `npm ci --silent` exited with 1\n\nnpm ERR! lock out of sync';
+    const requests: string[] = [];
+    global.fetch = vi.fn(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      requests.push(`${init?.method ?? 'GET'} ${url}`);
+      if (url === '/health') {
+        return jsonResponse({ status: 'ok', pid: 123 });
+      }
+      if (url === '/api/system/restart' && init?.method === 'POST') {
+        return jsonResponse({ detail }, 409);
+      }
+      throw new Error(`Unhandled request: ${url}`);
+    }) as typeof global.fetch;
+
+    render(<SettingsTab />);
+    fireEvent.click(screen.getByRole('button', { name: /restart aegis/i }));
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }));
+    fireEvent.change(screen.getByLabelText(/restart confirmation phrase/i), {
+      target: { value: 'RESTART AEGIS' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /confirm restart/i }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe(detail);
+    expect(screen.queryByLabelText(/restart confirmation phrase/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /restart aegis/i })).toBeEnabled();
+    const healthChecksAfterRefusal = requests.filter((request) => request === 'GET /health').length;
+    expect(healthChecksAfterRefusal).toBeLessThanOrEqual(1);
+  });
+
   it('keeps a dispatched restart modal busy and contained until the response starts polling', async () => {
     const reloadPage = vi.fn();
     let healthCalls = 0;

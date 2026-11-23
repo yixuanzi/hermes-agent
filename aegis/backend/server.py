@@ -48,6 +48,7 @@ from aegis.backend.services.system_instruct_service import SystemInstructService
 from aegis.backend.services.system_instruct_store import SystemInstructStore
 from aegis.backend.services.user_role_service import UserRoleService
 from aegis.backend.services.user_role_store import UserRoleStore
+from aegis_common.self_restart import remember_launch_state
 
 
 PUBLIC_API_PATHS = frozenset(
@@ -69,6 +70,8 @@ PUBLIC_API_PATHS = frozenset(
 
 def prepare_hermes_home() -> None:
     """Bind Aegis to the Hermes home of the agent that launched it."""
+    # A restart replays the launch state, not the rewrite below.
+    remember_launch_state()
     try:
         from hermes_constants import get_hermes_home
 

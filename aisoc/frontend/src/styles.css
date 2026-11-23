@@ -475,6 +475,13 @@ select:focus {
   margin: 7px 0 0;
 }
 
+.settings-restart-error {
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .settings-restart-state {
   margin: 10px 0 0;
   color: var(--aisoc-accent-strong);

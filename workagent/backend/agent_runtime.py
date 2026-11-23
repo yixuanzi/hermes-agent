@@ -6,6 +6,7 @@ import logging
 import os
 import time
 
+from aegis_common.self_restart import remember_launch_state
 from hermes_state import SessionDB
 from hermes_constants import get_config_path
 from hermes_cli import config as hermes_config
@@ -52,6 +53,8 @@ class EchoAgent:
 
 def prepare_hermes_home() -> None:
     """Point WORKAGENT child operations at the active Hermes profile directory."""
+    # A restart replays the launch state, not the rewrite below.
+    remember_launch_state()
     try:
         from hermes_constants import get_hermes_home
 

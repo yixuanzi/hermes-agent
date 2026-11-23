@@ -12,11 +12,10 @@ import argparse
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 
+from aegis_common.web_build import WebBuildError, build_web_ui, web_ui_build_needed
 from hermes_cli._startup_fast import project_root_str
-from hermes_constants import find_node_executable
 
 
 REPO_ROOT = Path(project_root_str())
@@ -138,81 +137,17 @@ def _apply_direct_profile_override(argv: list[str] | None = None) -> list[str]:
     return effective_argv[:consume_at] + effective_argv[consume_at + consume :]
 
 
-def _collect_latest_mtime(root: Path) -> float:
-    latest = 0.0
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        try:
-            latest = max(latest, path.stat().st_mtime)
-        except OSError:
-            continue
-    return latest
-
-
-def _web_ui_build_needed(web_dir: Path, dist_dir: Path) -> bool:
-    """Return True when the WORKAGENT frontend should be rebuilt."""
-    index_html = dist_dir / "index.html"
-    if not index_html.exists():
-        return True
-
-    latest_source = 0.0
-    for name in ("src", "public"):
-        source_dir = web_dir / name
-        if source_dir.exists():
-            latest_source = max(latest_source, _collect_latest_mtime(source_dir))
-
-    for name in ("package.json", "package-lock.json", "vite.config.ts", "vite.config.js", "tsconfig.json"):
-        candidate = web_dir / name
-        if candidate.exists():
-            latest_source = max(latest_source, candidate.stat().st_mtime)
-
-    try:
-        latest_dist = max(index_html.stat().st_mtime, _collect_latest_mtime(dist_dir / "assets"))
-    except OSError:
-        latest_dist = index_html.stat().st_mtime
-
-    return latest_source > latest_dist
-
-
-def _run_build_step(cmd: list[str], cwd: Path) -> None:
-    result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-    if result.returncode == 0:
-        return
-
-    for blob in (result.stdout, result.stderr):
-        text = (blob or "").rstrip()
-        if text:
-            print(text)
-    raise SystemExit(result.returncode)
-
-
 def _build_web_ui(web_dir: Path = WORKAGENT_FRONTEND_DIR, dist_dir: Path = WORKAGENT_DIST_DIR) -> None:
     """Build the WORKAGENT web UI when sources are newer than the current dist."""
-    if not (web_dir / "package.json").exists():
+    if not web_ui_build_needed(web_dir, dist_dir):
         return
-    if not _web_ui_build_needed(web_dir, dist_dir):
-        return
-
-    npm = find_node_executable("npm")
-    if not npm:
-        raise SystemExit(
-            "WORKAGENT web UI is not built and npm is not available. "
-            "Install Node.js, then run `cd workagent/frontend && npm install && npm run build`."
-        )
-
     print("→ Building workagent web UI...")
-    install_cmd = [npm, "ci", "--silent"] if (web_dir / "package-lock.json").exists() else [npm, "install", "--silent"]
-    _run_build_step(install_cmd, web_dir)
-    _run_build_step([npm, "run", "build"], web_dir)
+    try:
+        build_web_ui(web_dir, dist_dir, label="WORKAGENT")
+    except WebBuildError as exc:
+        if exc.output:
+            print(exc.output)
+        raise SystemExit(str(exc)) from exc
 
 
 def _ensure_server_dist_available(skip_build: bool) -> None:

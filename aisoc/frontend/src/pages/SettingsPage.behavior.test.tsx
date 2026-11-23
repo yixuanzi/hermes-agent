@@ -7,13 +7,14 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fetchJSON } from "../lib/api";
+import { ApiError, fetchJSON } from "../lib/api";
 import { setStoredAuth } from "../lib/auth";
 import { CurrentUserProvider } from "../lib/authContext";
 import type { AuthenticatedUser } from "../types";
 import { SettingsPage } from "./SettingsPage";
 
-vi.mock("../lib/api", () => ({
+vi.mock("../lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/api")>()),
   fetchJSON: vi.fn(),
 }));
 
@@ -188,6 +189,35 @@ describe("Settings restart flow", () => {
 
     await enterPhrase(container, "RESTART AISOC");
     expect(confirm.disabled).toBe(false);
+  });
+
+  it("shows why a refused restart was cancelled and keeps the current process", async () => {
+    const reloadPage = vi.fn();
+    const detail = "Restart cancelled; AISOC is still running. AISOC web UI build failed: `npm run build` exited with 2\n\nsrc/App.tsx(3,7): error TS2322";
+    fetchJSONMock.mockImplementation((path: string) => {
+      if (path === "/api/overview/status") return Promise.resolve(RUNTIME_STATUS) as Promise<unknown>;
+      if (path === "/api/system/restart") {
+        return Promise.reject(new ApiError(JSON.stringify({ detail }), 409)) as Promise<unknown>;
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const container = await mountWithAdmin(
+      <MemoryRouter>
+        <SettingsPage reloadPage={reloadPage} recoveryPollMs={100} />
+      </MemoryRouter>,
+    );
+    await openPhraseStage(container);
+    await enterPhrase(container, "RESTART AISOC");
+    await click(findButton(container, "Confirm restart"));
+
+    await waitForAssert(() => {
+      const alert = container.querySelector('[role="alert"]');
+      expect(alert?.textContent).toBe(detail);
+    });
+    expect(container.querySelector('input[aria-label="Restart confirmation phrase"]')).toBeNull();
+    expect(findButton(container, "Restart AISOC").disabled).toBe(false);
+    expect(fetchJSONMock).not.toHaveBeenCalledWith("/health", {}, false);
+    expect(reloadPage).not.toHaveBeenCalled();
   });
 
   it("reloads when an all-success health sequence reports a new process pid", async () => {

@@ -7,6 +7,7 @@ from datetime import datetime, timezone, UTC
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
@@ -14,6 +15,7 @@ import time
 from collections.abc import Callable
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from typing import TextIO
 
 import psutil
 
@@ -21,6 +23,9 @@ from hermes_constants import get_hermes_home
 
 
 DEFAULT_RESTART_WATCH_TIMEOUT = 60.0
+# How long the watcher stays to record whether the replacement died during startup.
+REPLACEMENT_STARTUP_WATCH_SECONDS = 120.0
+_SERVICE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,7 @@ class RestartResult:
 
 @dataclass(frozen=True)
 class _RestartSpec:
+    service: str
     argv: tuple[str, ...]
     cwd: str
     env: dict[str, str]
@@ -47,6 +53,25 @@ class _RestartSpec:
 
 _restart_lock = threading.Lock()
 _restart_requested = False
+_launch_state: tuple[dict[str, str], str] | None = None
+
+
+def remember_launch_state() -> None:
+    """Snapshot this process's environment and cwd before the service rewrites them.
+
+    The consoles' ``prepare_hermes_home`` points ``HOME`` at ``<HERMES_HOME>/home`` and
+    ``chdir``s into HERMES_HOME. A replacement started from that rewritten state runs npm
+    against another config and cache and resolves profiles from the wrong root, so it must
+    start the way this process was started. The first call wins.
+    """
+    global _launch_state
+    if _launch_state is None:
+        _launch_state = (dict(os.environ), os.getcwd())
+
+
+def launch_environment() -> dict[str, str]:
+    """The environment this process was launched with (the current one if never remembered)."""
+    return dict(_launch_state[0] if _launch_state is not None else os.environ)
 
 
 def reconstruct_startup_argv(
@@ -65,12 +90,13 @@ def reconstruct_startup_argv(
     return command
 
 
-def _capture_restart_spec() -> _RestartSpec:
+def _capture_restart_spec(service: str) -> _RestartSpec:
     pid = os.getpid()
     return _RestartSpec(
+        service=service,
         argv=tuple(reconstruct_startup_argv()),
-        cwd=os.getcwd(),
-        env=dict(os.environ),
+        cwd=_launch_state[1] if _launch_state is not None else os.getcwd(),
+        env=launch_environment(),
         old_pid=pid,
         old_create_time=psutil.Process(pid).create_time(),
     )
@@ -102,6 +128,7 @@ def _start_detached_watcher(spec: _RestartSpec) -> None:
 
 def _encode_watcher_payload(spec: _RestartSpec) -> str:
     payload = {
+        "service": spec.service,
         "argv": list(spec.argv),
         "cwd": spec.cwd,
         "old_pid": spec.old_pid,
@@ -121,7 +148,11 @@ def _decode_watcher_payload(payload: str) -> _RestartSpec:
     cwd = data.get("cwd")
     if not isinstance(cwd, str) or not cwd:
         raise ValueError("Restart watcher payload has invalid cwd")
+    service = data.get("service")
+    if not isinstance(service, str) or not _SERVICE_NAME_RE.fullmatch(service):
+        raise ValueError("Restart watcher payload has invalid service")
     return _RestartSpec(
+        service=service,
         argv=tuple(argv),
         cwd=cwd,
         env=dict(os.environ),
@@ -166,6 +197,7 @@ def _run_watcher(
     spec: _RestartSpec,
     *,
     wait_timeout: float = DEFAULT_RESTART_WATCH_TIMEOUT,
+    startup_watch: float = REPLACEMENT_STARTUP_WATCH_SECONDS,
 ) -> None:
     exited = _wait_for_old_process(
         old_pid=spec.old_pid,
@@ -175,18 +207,57 @@ def _run_watcher(
     if not exited:
         _write_restart_timeout_diagnostic(spec, wait_timeout)
         return
+    service = spec.service
     try:
-        subprocess.Popen(
+        output = _open_replacement_log(service)
+    except OSError:
+        output = None  # Losing the record must not cost the restart itself.
+    try:
+        replacement = subprocess.Popen(
             list(spec.argv),
             cwd=spec.cwd,
             env=spec.env,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=output if output is not None else subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if output is not None else subprocess.DEVNULL,
             close_fds=True,
         )
     except Exception as exc:
         _write_restart_diagnostic(spec, exc)
+        return
+    finally:
+        if output is not None:
+            output.close()
+    try:
+        code = replacement.wait(timeout=startup_watch)
+    except subprocess.TimeoutExpired:
+        _append_restart_diagnostic(
+            f"event=replacement_running service={service} pid={replacement.pid}"
+        )
+        return
+    _append_restart_diagnostic(
+        f"event=replacement_exited service={service} pid={replacement.pid} returncode={code} "
+        f"output={_replacement_log_path(service)}"
+    )
+
+
+def _replacement_log_path(service: str) -> Path:
+    return get_hermes_home() / "logs" / f"{service}-restart.log"
+
+
+def _open_replacement_log(service: str) -> TextIO:
+    """The replacement's stdout/stderr: the restart's only record of why startup failed.
+
+    Truncated per restart, so it holds the current replacement's output (its build, then its
+    server log) and never grows across restarts. Owner-only: the output can name paths and
+    settings.
+    """
+    path = _replacement_log_path(service)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8")
+    handle.write(f"{datetime.now(UTC).isoformat()} {service} replacement starting\n")
+    handle.flush()
+    return handle
 
 
 def _write_restart_diagnostic(spec: _RestartSpec, exc: Exception) -> None:
@@ -252,7 +323,7 @@ def request_self_restart(
 
         _restart_requested = True
         try:
-            _start_detached_watcher(_capture_restart_spec())
+            _start_detached_watcher(_capture_restart_spec(service))
         except BaseException:
             _restart_requested = False
             raise
@@ -266,7 +337,13 @@ def request_self_restart(
     )
 
 
-__all__ = ["RestartResult", "reconstruct_startup_argv", "request_self_restart"]
+__all__ = [
+    "RestartResult",
+    "launch_environment",
+    "reconstruct_startup_argv",
+    "remember_launch_state",
+    "request_self_restart",
+]
 
 
 if __name__ == "__main__":

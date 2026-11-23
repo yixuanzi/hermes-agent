@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 
+from aegis_common.self_restart import remember_launch_state
 from hermes_state import SessionDB
 from hermes_constants import get_config_path
 from hermes_cli import config as hermes_config
@@ -18,6 +19,8 @@ _AISOC_MCP_WAIT_TIMEOUT_SECONDS = 0.75
 
 def prepare_hermes_home() -> None:
     """Point AISOC child operations at the active Hermes profile directory."""
+    # A restart replays the launch state, not the rewrite below.
+    remember_launch_state()
     try:
         from hermes_constants import get_hermes_home
 

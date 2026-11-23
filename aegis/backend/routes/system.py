@@ -5,15 +5,22 @@ from __future__ import annotations
 from _thread import interrupt_main as _interrupt_main
 import os
 
-from fastapi import APIRouter, BackgroundTasks, Request, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
+from starlette.concurrency import run_in_threadpool
 
 from aegis.backend.auth import require_admin_user, require_authenticated_user
 from aegis.backend.config import AegisSettings
+from aegis.backend.main import build_web_ui_before_restart
 from aegis.backend.models import HealthResponse, SystemBootstrapResponse, SystemRestartResponse
 from aegis.backend.services.lark_service import lark_is_configured
 from aegis.backend.services.oidc_service import oidc_is_configured
 from aegis.backend.services.user_service import UserService
-from aegis_common.self_restart import request_self_restart
+from aegis_common.self_restart import launch_environment, request_self_restart
+from aegis_common.web_build import WebBuildError
+
+
+# The tail of a failed build's output returned to the admin; the full output can be long.
+_BUILD_OUTPUT_TAIL_CHARS = 4000
 
 
 def _graceful_shutdown() -> None:
@@ -55,6 +62,17 @@ def build_system_router(
     ) -> SystemRestartResponse:
         user, _payload = require_authenticated_user(request, settings, user_service)
         require_admin_user(user)
+        # Build before stopping: a replacement whose startup build fails exits with nothing
+        # serving, while a failure here leaves this process up and says why.
+        try:
+            await run_in_threadpool(build_web_ui_before_restart, launch_environment())
+        except WebBuildError as exc:
+            output = exc.output[-_BUILD_OUTPUT_TAIL_CHARS:]
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Restart cancelled; Aegis is still running. {exc}"
+                + (f"\n\n{output}" if output else ""),
+            ) from exc
         result = request_self_restart(
             "aegis",
             lambda: background_tasks.add_task(_graceful_shutdown),

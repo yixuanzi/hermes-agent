@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import { PageMissionHeader } from "../components/PageMissionHeader";
-import { fetchJSON } from "../lib/api";
+import { ApiError, fetchJSON } from "../lib/api";
 import { setStoredUser } from "../lib/auth";
 import { useCurrentUser, useSetCurrentUser } from "../lib/authContext";
 import type { AuthenticatedUser } from "../types";
@@ -22,6 +22,19 @@ interface RestartResponse {
   already_requested: boolean;
   service: string;
   pid: number;
+}
+
+/** A refused restart (409) says why, e.g. the frontend build failed; anything else is generic. */
+function restartFailureMessage(error: unknown): string {
+  if (error instanceof ApiError && error.status === 409) {
+    try {
+      const detail = (JSON.parse(error.message) as { detail?: unknown }).detail;
+      if (typeof detail === "string" && detail) return detail;
+    } catch {
+      // Not a FastAPI error body: fall through to the generic message.
+    }
+  }
+  return "Restart request failed. AISOC is still running.";
 }
 
 interface SettingsPageProps {
@@ -170,8 +183,13 @@ export function SettingsPage({
       setRestarting(true);
       setConfirmationStage(null);
       setConfirmationPhrase("");
-    } catch {
-      setRestartError("Restart request failed. AISOC is still running.");
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        // Retrying cannot help until the cause is fixed; close the dialog so the reason shows.
+        setConfirmationStage(null);
+        setConfirmationPhrase("");
+      }
+      setRestartError(restartFailureMessage(error));
       setRestartSubmitting(false);
     }
   }
@@ -316,7 +334,7 @@ export function SettingsPage({
             <p className="subtle-copy">
               Restarting temporarily disconnects this workbench and interrupts active operations.
             </p>
-            {restartError ? <p className="error-text" role="alert">{restartError}</p> : null}
+            {restartError ? <p className="error-text settings-restart-error" role="alert">{restartError}</p> : null}
             {restarting ? (
               <p className="settings-restart-state" role="status">
                 Restarting AISOC. Waiting for the public health check to recover…

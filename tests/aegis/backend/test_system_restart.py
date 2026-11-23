@@ -160,3 +160,31 @@ def test_duplicate_restart_returns_202_without_second_watcher(
     }
     assert len(launched) == 1
     assert shutdowns == ["aegis"]
+
+
+def test_failed_frontend_build_refuses_the_restart_and_keeps_serving(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aegis.backend.routes import system
+    from aegis_common.web_build import WebBuildError
+
+    launched: list[object] = []
+    shutdowns: list[str] = []
+    monkeypatch.setattr(self_restart, "_start_detached_watcher", lambda spec: launched.append(spec))
+    monkeypatch.setattr(system, "_graceful_shutdown", lambda: shutdowns.append("aegis"))
+
+    def failing_build(_env):
+        raise WebBuildError("Aegis web UI build failed: `npm ci --silent` exited with 1", "npm ERR! lock out of sync")
+
+    monkeypatch.setattr(system, "build_web_ui_before_restart", failing_build)
+
+    response = client.post("/api/system/restart", headers=auth_headers)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail.startswith("Restart cancelled; Aegis is still running.")
+    assert "npm ERR! lock out of sync" in detail
+    assert launched == []
+    assert shutdowns == []

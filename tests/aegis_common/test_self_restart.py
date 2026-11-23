@@ -85,6 +85,7 @@ def test_detached_watcher_receives_startup_state_and_normal_environment(
         lambda command, **kwargs: popen_calls.append((command, kwargs)),
     )
     spec = self_restart._RestartSpec(
+        service="smoke",
         argv=(sys.executable, "service.py", "--flag"),
         cwd=str(tmp_path),
         env={"PATH": "/test/bin", "NORMAL_SETTING": "present"},
@@ -99,6 +100,7 @@ def test_detached_watcher_receives_startup_state_and_normal_environment(
     assert command[:2] == [sys.executable, str(Path(self_restart.__file__).resolve())]
     assert command[2] == "--watch"
     decoded = self_restart._decode_watcher_payload(command[3])
+    assert decoded.service == spec.service
     assert decoded.argv == spec.argv
     assert decoded.cwd == spec.cwd
     assert decoded.old_pid == spec.old_pid
@@ -159,6 +161,7 @@ def test_watcher_timeout_does_not_launch_replacement(monkeypatch, tmp_path: Path
         lambda command, **kwargs: launched.append((command, kwargs)),
     )
     spec = self_restart._RestartSpec(
+        service="smoke",
         argv=(sys.executable, "service.py", "--token", "do-not-log-this"),
         cwd=str(tmp_path),
         env={"PATH": "/test/bin", "SECRET_TOKEN": "do-not-log-this"},
@@ -193,6 +196,7 @@ def test_replacement_launch_failure_writes_durable_diagnostic(
         ),
     )
     spec = self_restart._RestartSpec(
+        service="smoke",
         argv=("missing-service", "--token", "do-not-log-this"),
         cwd=str(tmp_path),
         env={"SECRET_TOKEN": "do-not-log-this"},
@@ -271,3 +275,101 @@ state_path.write_text(json.dumps(record), encoding="utf-8")
     assert restarted["cwd"] == str(tmp_path)
     assert restarted["normal_setting"] == "preserved"
     assert restarted["pid"] != old_process.pid
+
+
+@pytest.fixture
+def fresh_launch_state(monkeypatch):
+    from aegis_common import self_restart
+
+    monkeypatch.setattr(self_restart, "_launch_state", None)
+    return self_restart
+
+
+def test_restart_replays_the_launch_environment_not_the_rewritten_one(
+    fresh_launch_state, monkeypatch, tmp_path: Path
+) -> None:
+    """The consoles rewrite HOME and cwd at startup; the replacement must start as launched."""
+    self_restart = fresh_launch_state
+    launch_dir = tmp_path / "launch"
+    rewritten_dir = tmp_path / "rewritten"
+    launch_dir.mkdir()
+    rewritten_dir.mkdir()
+    monkeypatch.chdir(launch_dir)
+    monkeypatch.setenv("HOME", str(tmp_path / "user-home"))
+
+    self_restart.remember_launch_state()
+    monkeypatch.chdir(rewritten_dir)
+    monkeypatch.setenv("HOME", str(tmp_path / "hermes-home" / "home"))
+    self_restart.remember_launch_state()  # a later call must not move the snapshot
+
+    spec = self_restart._capture_restart_spec("aisoc")
+
+    assert spec.service == "aisoc"
+    assert spec.cwd == str(launch_dir)
+    assert spec.env["HOME"] == str(tmp_path / "user-home")
+    assert self_restart.launch_environment()["HOME"] == str(tmp_path / "user-home")
+
+
+def test_replacement_that_dies_at_startup_leaves_its_output_and_exit_code(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from aegis_common import self_restart
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(self_restart, "_wait_for_old_process", lambda **_kwargs: True)
+    spec = self_restart._RestartSpec(
+        service="aisoc",
+        argv=(
+            sys.executable,
+            "-c",
+            "import sys; print('web UI build failed: TS2322'); sys.exit(3)",
+            "--token",
+            "do-not-log-this",
+        ),
+        cwd=str(tmp_path),
+        env=dict(os.environ),
+        old_pid=321,
+        old_create_time=100.0,
+    )
+
+    self_restart._run_watcher(spec, wait_timeout=0.1, startup_watch=30.0)
+
+    output = (tmp_path / "logs" / "aisoc-restart.log").read_text("utf-8")
+    assert "web UI build failed: TS2322" in output
+    diagnostic = (tmp_path / "logs" / "self-restart.log").read_text("utf-8")
+    assert "event=replacement_exited service=aisoc" in diagnostic
+    assert "returncode=3" in diagnostic
+    assert "do-not-log-this" not in diagnostic
+
+
+def test_replacement_still_running_after_the_startup_watch_is_recorded(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from aegis_common import self_restart
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(self_restart, "_wait_for_old_process", lambda **_kwargs: True)
+    spec = self_restart._RestartSpec(
+        service="aegis",
+        argv=(sys.executable, "-c", "import time; time.sleep(30)"),
+        cwd=str(tmp_path),
+        env=dict(os.environ),
+        old_pid=321,
+        old_create_time=100.0,
+    )
+    launched = []
+    real_popen = subprocess.Popen
+    monkeypatch.setattr(
+        self_restart.subprocess,
+        "Popen",
+        lambda *args, **kwargs: launched.append(real_popen(*args, **kwargs)) or launched[-1],
+    )
+
+    try:
+        self_restart._run_watcher(spec, wait_timeout=0.1, startup_watch=0.2)
+        diagnostic = (tmp_path / "logs" / "self-restart.log").read_text("utf-8")
+        assert f"event=replacement_running service=aegis pid={launched[0].pid}" in diagnostic
+    finally:
+        for process in launched:
+            process.kill()
+            process.wait(timeout=5)
