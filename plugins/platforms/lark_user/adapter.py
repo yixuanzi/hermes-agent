@@ -40,6 +40,7 @@ from .lark_user_cursor import CursorStore
 from .lark_user_intake import ChatRateLimit, Identity, drop_reason
 from .lark_user_media import fetch_attachments
 from .lark_user_normalize import Inbound, to_inbound
+from . import lark_user_overrides as overrides
 from .lark_user_poll import PollSchedule
 from .lark_user_render import render
 from .lark_user_review import CardPresenter, ReviewDesk, TextPresenter, parse_command
@@ -77,6 +78,9 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
 
     def __init__(self, config, **kwargs):
         super().__init__(config=config, platform=Platform("lark_user"))
+        self._config_extra: dict[str, Any] = dict(config.extra or {})  # as config.yaml has it; overrides go on top
+        self._review_creds: tuple[str, str] = ("", "")
+        self._cli_config: dict[str, Any] = {}
         try:
             self.settings, self._settings_error = load_settings(config.extra or {}), ""
         except SettingsError as exc:
@@ -134,6 +138,7 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         """Resolve the Lark identity, take the account lock, load durable state; no polling yet."""
         if self._settings_error:
             return self._fail("config_invalid", f"platforms.lark_user: {self._settings_error}", retryable=False)
+        self._apply_overrides()
         if not self._cli.resolve_binary():
             return self._fail("cli_missing", f"{self.settings.cli_bin} not found; install lark-cli", retryable=False)
         try:
@@ -164,37 +169,46 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             self._store.close()
         self._store = CursorStore.open(me.open_id, seen_ttl=max(86400.0, 4 * (s.poll.lookback + s.max_message_age)))
         self._union_id = str(info.get("union_id") or "")
-        return await self._open_review(self._union_id, cli_config)
+        self._cli_config = cli_config
+        # Read once, in the profile scope connect runs in: a later /lark-user reply.delivery review may
+        # need them from a command handler.
+        self._review_creds = (_get_secret(APP_ID_ENV, ""), _get_secret(APP_SECRET_ENV, ""))
+        failure = await self._open_review()
+        return self._fail(*failure[:2], retryable=failure[2]) if failure else True
 
-    async def _open_review(self, union_id: str, cli_config: dict[str, Any]) -> bool:
-        """Pick the review presentation: cards from the review app when it is configured (or
-        ``review.interactive: card`` demands it), else text commands in the user's own chat."""
+    def _review_mode(self) -> str:
         s = self.settings
-        app_id, secret = _get_secret(APP_ID_ENV, ""), _get_secret(APP_SECRET_ENV, "")
-        mode = s.review_interactive or ("card" if app_id and secret and s.uses_review else "text")
+        return s.review_interactive or ("card" if all(self._review_creds) and s.uses_review else "text")
+
+    async def _open_review(self) -> Optional[tuple[str, str, bool]]:
+        """Pick the review presentation: cards from the review app when it is configured (or
+        ``review.interactive: card`` demands it), else text commands in the user's own chat. Returns
+        (code, message, retryable) when the cards cannot be had; the review desk is then left as it was."""
+        s = self.settings
+        (app_id, secret), cli_config, union_id = self._review_creds, self._cli_config, self._union_id
         presenter: Any = TextPresenter(self._cli, self._store, my_open_id=self._me.open_id, review_chat=s.review_chat)
-        if mode == "card":
+        if self._review_mode() == "card":
             if not (app_id and secret):
-                return self._fail("config_invalid", f"review.interactive: card needs {APP_ID_ENV} and {APP_SECRET_ENV} "
-                                  "in .env (a Lark app used only for review cards)", retryable=False)
+                return ("config_invalid", f"review.interactive: card needs {APP_ID_ENV} and {APP_SECRET_ENV} "
+                        "in .env (a Lark app used only for review cards)", False)
             try:
                 if app_id in {_get_secret("FEISHU_APP_ID", ""), str(cli_config.get("appId") or "")}:
-                    return self._fail("config_invalid", f"{APP_ID_ENV} is an app another connection already uses "
-                                      "(the Feishu platform or lark-cli's user login); card clicks would be split "
-                                      "between them. Use an app reserved for review cards.", retryable=False)
+                    return ("config_invalid", f"{APP_ID_ENV} is an app another connection already uses "
+                            "(the Feishu platform or lark-cli's user login); card clicks would be split "
+                            "between them. Use an app reserved for review cards.", False)
                 bot = ReviewBot(cli=LarkCli(s.cli_bin, timeout=s.cli_timeout), app_id=app_id, app_secret=secret,
                                 brand=str(cli_config.get("brand") or "feishu"))
                 await bot.check()
             except LarkCliError as exc:
-                return self._fail("review_app_error", f"review app unavailable: {exc}", retryable=exc.kind != "auth")
+                return "review_app_error", f"review app unavailable: {exc}", exc.kind != "auth"
             if not union_id:
-                return self._fail("review_app_error", "lark-cli user_info returned no union_id to reach the user "
-                                  "from the review app", retryable=False)
+                return ("review_app_error", "lark-cli user_info returned no union_id to reach the user "
+                        "from the review app", False)
             self._review_bot, presenter = bot, CardPresenter(bot, union_id)
         self._desk = ReviewDesk(store=self._store, presenter=presenter, ttl=s.review_ttl,
                                 deliver=self._deliver_for_review, revise=self._start_revision,
                                 revising_allowed=lambda: self._active)
-        return True
+        return None
 
     async def disconnect(self) -> None:
         self._mark_disconnected()
@@ -232,7 +246,7 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             return "lark_user 自动回复已经在运行。\n" + self.auto_reply_status()
         self._active, self._active_since = True, time.time()
         self._reprime = set(self._sources())  # what arrived while it was off is history
-        self._poll_tasks = [asyncio.create_task(self._source_loop(name)) for name in self._sources()]
+        self._poll_tasks = [self._poll_task(name) for name in self._sources()]
         logger.info("lark_user: auto-reply ON, polling %s", ",".join(self._sources()))
         return "✅ lark_user 自动回复已开启（关闭期间收到的消息不会补回复）。\n" + self.auto_reply_status()
 
@@ -310,9 +324,86 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                  f"轮询来源：{', '.join(self._sources()) or '无'}",
                  f"默认回复方式：{'审核后发送' if delivery == 'review' else '直接发送'}（审核呈现：{review}）",
                  f"待审核草稿：{len(self._store.drafts) if self._store else 0} 条"]
+        if changed := self._overrides():
+            lines.append(f"运行时修改的回复设置：{len(changed)} 项（/lark-user reply 查看，重启后恢复配置文件）")
         if not self._active:
             lines.append("发送 /lark-user start 开启。")
         return "\n".join(lines)
+
+    # ── in-memory reply settings (/lark-user reply.<key>) ──────────────────
+
+    def _overrides(self) -> dict[overrides.Path, Any]:
+        return overrides.for_profile(getattr(self, "_owner_profile", None))
+
+    def _apply_overrides(self) -> None:
+        """Lay this process's ``/lark-user reply…`` changes over config.yaml (a reconnect retry builds
+        a new adapter: the changes outlive it, never the process)."""
+        changed = self._overrides()
+        if not changed:
+            return
+        try:
+            self.settings = load_settings(overrides.layered(self._config_extra, changed))
+        except SettingsError as exc:  # config.yaml changed under them: the file wins
+            logger.warning("lark_user: in-memory reply settings dropped, they no longer fit the config (%s)", exc)
+            changed.clear()
+
+    async def reply_option(self, path: str, value: str) -> str:
+        """``/lark-user reply[.<key>] [value | --reset]``: show, change or restore reply settings, in
+        memory only. A value is validated by ``load_settings`` exactly as if config.yaml held it."""
+        changed, value = self._overrides(), value.strip()
+        configured = load_settings(self._config_extra)
+        if path.lower() == "reply":
+            if value == overrides.RESET:
+                changed.clear()
+                return await self._adopt(configured, "↩️ 已全部恢复为配置文件里的回复设置。")
+            if value:
+                return "❌ 未修改：要改哪一项？例如 /lark-user reply.format card；全部恢复：/lark-user reply --reset"
+            return overrides.describe(self.settings, configured, changed)
+        try:
+            target = overrides.parse_path(path)
+            if not value:
+                return overrides.describe(self.settings, configured, changed, target)
+            candidate = {k: v for k, v in changed.items() if k != target}
+            if value != overrides.RESET:
+                candidate[target] = overrides.parse_value(target[1], value)
+            settings = load_settings(overrides.layered(self._config_extra, candidate))
+        except (overrides.OverrideError, SettingsError) as exc:
+            return f"❌ 未修改：{exc}"
+        changed.clear()
+        changed.update(candidate)
+        logger.info("lark_user: %s %s in memory", overrides.label(target),
+                    "restored" if value == overrides.RESET else "changed")
+        verb = "已恢复" if value == overrides.RESET else "已修改（仅本进程有效，重启后恢复配置文件）"
+        return await self._adopt(settings, f"✅ {verb}：{overrides.describe(settings, configured, changed, target)}")
+
+    async def _adopt(self, settings: LarkUserSettings, message: str) -> str:
+        """Switch to ``settings``: the next reply uses them. Turning review on where nothing reviewed
+        before also brings up what review needs (the review app's cards, the dm poll that carries the
+        user's text review commands)."""
+        was_review, self.settings = self.settings.uses_review, settings
+        if was_review or not settings.uses_review or self._me is None:
+            return message
+        if self._review_bot is None and self._review_mode() == "card":
+            failure = await self._open_review()
+            if failure:
+                message += f"\n⚠️ 审核卡片不可用（{failure[1]}），草稿改用文本审核。"
+                logger.warning("lark_user: review cards unavailable on switching to review (%s)", failure[0])
+            else:
+                self._tasks.append(asyncio.create_task(self._review_bot.consume(self._on_review_click)))
+        if self._active:
+            polled = {task.get_name() for task in self._poll_tasks if not task.done()}
+            for source in self._sources():
+                if self._poll_task_name(source) not in polled:
+                    self._reprime.add(source)  # what is already there is history
+                    self._poll_tasks.append(self._poll_task(source))
+        return message
+
+    @staticmethod
+    def _poll_task_name(source: str) -> str:
+        return f"lark_user-poll-{source}"
+
+    def _poll_task(self, source: str) -> asyncio.Task:
+        return asyncio.create_task(self._source_loop(source), name=self._poll_task_name(source))
 
     def _sources(self) -> list[str]:
         poll = self.settings.poll
@@ -629,8 +720,9 @@ def register(ctx):
     ctx.register_command(
         "lark-user", lark_user_command,
         description="Lark personal auto-reply: start / stop / status (in memory; off after every gateway start), "
-                    "reset <chat_id> to end a chat's conversations",
-        args_hint="start|stop|status|reset [chat_id]")
+                    "reset <chat_id> to end a chat's conversations, reply.<key> <value> to change a reply "
+                    "setting in memory until the next restart",
+        args_hint="start|stop|status|reset [chat_id]|reply[.<key> <value>|--reset]")
     ctx.register_platform(
         name="lark_user",
         label="Lark (personal)",

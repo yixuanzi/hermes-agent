@@ -59,7 +59,7 @@ platform is connected but idle.
 |---|---|
 | `/lark-user start` | Starts polling. Whatever is already there, including messages that came in while it was off, is history: only messages that arrive afterwards are answered |
 | `/lark-user stop` | Stops polling, interrupts every turn in flight and drops queued input. While off nothing runs and nothing is produced: no reply, no review draft |
-| `/lark-user status` | Shows on/off, since when, the polled sources, the reply mode and pending drafts |
+| `/lark-user status` | Shows on/off, since when, the polled sources, the reply mode, pending drafts and how many reply settings were changed in memory |
 | `/lark-user reset` | Lists the DMs and groups with live conversations: name, chat id (`oc_…`), how many, last activity |
 | `/lark-user reset <chat_id>` | Ends every live conversation of that DM or group, whatever scope cut it (per user, per topic, shared, or left over from an earlier scope). A turn still running in one is interrupted, and its stop notice is not sent to Lark. The chat's next message starts a fresh session, exactly as after an idle reset. Chat ids are case-sensitive |
 
@@ -71,6 +71,28 @@ Pending review drafts survive a stop and can still be approved or rejected; revi
 agent, so it waits until auto-reply is on again.
 A reset leaves pending drafts alone; revising one afterwards runs in the new session, with the
 previous draft and your notes but not the conversation before the reset.
+
+### Changing reply settings without a restart
+
+`/lark-user reply.<key> <value>` changes one of the [`reply.*` settings](#configuration-reference)
+for this gateway process only: nothing is written to `config.yaml`, and the next gateway start
+uses the file again. The next reply (or a review draft approved from now on) uses the new value.
+
+| Command | Effect |
+|---|---|
+| `/lark-user reply` | Lists the effective reply settings, marking the ones changed in memory and their config value |
+| `/lark-user reply.<key>` | Shows one setting |
+| `/lark-user reply.<key> <value>` | Sets it. Keys: `delivery`, `format`, `target`, `at_sender`, `prefix`, `suffix`, `card.title` |
+| `/lark-user chats.<chat_id>.reply.<key> <value>` | Sets it for one chat only |
+| `/lark-user reply.<key> --reset` | Restores that setting from `config.yaml`; `/lark-user reply --reset` restores all of them |
+
+A value is checked exactly as `config.yaml` would be: an empty `prefix` or an unknown `format` is
+refused and nothing changes. Quote a value to keep its edge spaces or write escapes: `"…"` is read
+like a JSON string (`"\n—— 转人工"`), `'…'` literally. A chat that sets its own `reply.<key>` under
+`chats.<chat_id>` keeps it when the global value changes; the answer names such chats. Turning
+`delivery` to `review` where nothing was reviewed before brings up the review cards (when the
+review app is configured) or the dm poll that carries text review commands. The changes survive
+a platform reconnect but not a gateway restart; the same owner check and profile rule apply.
 
 ## How replies are released (review mode)
 

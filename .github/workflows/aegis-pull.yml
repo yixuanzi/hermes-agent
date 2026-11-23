@@ -7,7 +7,7 @@ on:
 
 jobs:
   pull:
-    runs-on: [self-hosted, aiapagent]
+    runs-on: [self-hosted, Linux]
     steps:
       - name: Pull latest aegis_v0.4
         run: cd "$HOME/.hermes/hermes-agent" && git pull origin aegis_v0.4

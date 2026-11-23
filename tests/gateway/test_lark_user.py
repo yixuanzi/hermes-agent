@@ -1259,6 +1259,125 @@ def test_open_policy_needs_allow_all_opt_in(monkeypatch):
     assert not _own_policy_open_startup_violation(config)
 
 
+# ── /lark-user reply.<key>: reply settings changed in memory ────────────────
+
+@pytest.fixture(autouse=True)
+def _no_reply_overrides():
+    from plugins.platforms.lark_user import lark_user_overrides
+    lark_user_overrides._BY_PROFILE.clear()
+    yield
+    lark_user_overrides._BY_PROFILE.clear()
+
+
+def _config_file():
+    from hermes_constants import get_hermes_home
+    path = get_hermes_home() / "config.yaml"
+    return path.read_bytes() if path.exists() else None
+
+
+async def _auto(lark, **extra):
+    adapter, events = await opened(lark, reply={"delivery": "auto", "format": "text"}, **extra)
+    lark.write(search_p2p=[msg("om_q"), msg("om_q2", chat="oc_dm2", sender="ou_bob")])
+    await adapter.poll_once("dm")
+    return adapter, events
+
+
+@pytest.mark.asyncio
+async def test_a_reply_setting_changed_in_memory_shapes_the_next_reply_and_touches_no_file(lark):
+    adapter, _ = await _auto(lark)
+    before, extra = _config_file(), json.dumps(adapter._config_extra, sort_keys=True)
+    assert (await adapter.reply_option("reply.prefix", '"[AI] "')).startswith("✅")
+    assert (await adapter.reply_option("reply.suffix", r'"\n—— 转人工"')).startswith("✅")
+    assert (await adapter.reply_option("reply.format", "post")).startswith("✅")
+    await adapter.send("oc_dm1", "Friday", reply_to="om_q")
+    (reply,) = lark.sends()
+    assert "--markdown" in reply["args"] and reply["stdin"] == "[AI] Friday\n—— 转人工"
+    assert _config_file() == before and json.dumps(adapter._config_extra, sort_keys=True) == extra
+    listing = await adapter.reply_option("reply", "")
+    assert 'reply.format = "post"   ← 运行时修改（配置文件："text"）' in listing
+
+
+@pytest.mark.asyncio
+async def test_a_value_the_config_would_refuse_changes_nothing(lark):
+    adapter, _ = await _auto(lark)
+    for path, value in [("reply.prefix", '""'), ("reply.prefix", "'   '"), ("reply.format", "html"),
+                        ("reply.at_sender", "maybe"), ("reply.colour", "red"), ("reply", "card")]:
+        assert (await adapter.reply_option(path, value)).startswith("❌"), (path, value)
+    await adapter.send("oc_dm1", "Friday", reply_to="om_q")
+    (reply,) = lark.sends()
+    assert "--text" in reply["args"] and reply["stdin"] == "[🤖 AI 代答] Friday"
+
+
+@pytest.mark.asyncio
+async def test_changes_outlive_a_rebuilt_adapter_until_reset(lark):
+    first, _ = await _auto(lark)
+    await first.reply_option("reply.prefix", '"[AI] "')
+    rebuilt, _ = await _auto(lark)  # a reconnect retry builds a new adapter in the same process
+    await rebuilt.send("oc_dm1", "one", reply_to="om_q")
+    assert (await rebuilt.reply_option("reply.prefix", "--reset")).startswith("✅")
+    await rebuilt.send("oc_dm1", "two", reply_to="om_q")
+    await rebuilt.reply_option("reply.target", "send")
+    assert (await rebuilt.reply_option("reply", "--reset")).startswith("↩️")
+    await rebuilt.send("oc_dm1", "three", reply_to="om_q")
+    assert [c["stdin"] for c in lark.sends()] == ["[AI] one", "[🤖 AI 代答] two", "[🤖 AI 代答] three"]
+    assert all(c["args"][1] == "+messages-reply" for c in lark.sends())
+
+
+@pytest.mark.asyncio
+async def test_a_chat_keeps_its_own_setting_and_can_be_changed_alone(lark):
+    adapter, _ = await _auto(lark, chats={"oc_dm2": {"reply": {"prefix": "[Bob only] "}}})
+    answer = await adapter.reply_option("reply.prefix", '"[AI] "')
+    assert "chats.oc_dm2" in answer  # the global value does not reach a chat with its own
+    assert (await adapter.reply_option("chats.oc_dm1.reply.delivery", "review")).startswith("✅")
+    await adapter.send("oc_dm1", "held", reply_to="om_q")
+    await adapter.send("oc_dm2", "sent", reply_to="om_q2")
+    replies = [c for c in lark.sends() if c["args"][1] == "+messages-reply"]
+    assert [r["stdin"] for r in replies] == ["[Bob only] sent"]
+    assert "1" in adapter._store.drafts
+
+
+@pytest.mark.asyncio
+async def test_switching_to_review_brings_up_the_review_cards(lark, review_app):
+    adapter, _ = await _auto(lark)
+    assert adapter._review_bot is None  # nothing reviewed, so no review app was started
+    try:
+        assert (await adapter.reply_option("reply.delivery", "review")).startswith("✅")
+        await adapter.send("oc_dm1", "Friday", reply_to="om_q")
+        assert lark.sends() == [] and "Friday" in _text(_cards(lark)[0])
+    finally:
+        for task in adapter._tasks:
+            task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_switching_to_text_review_starts_the_dm_poll_that_carries_its_commands(lark, fast_polls):
+    from plugins.platforms.lark_user.lark_user_control import lark_user_command
+    adapter, _ = make_adapter(lark, reply={"delivery": "auto"}, poll={"sources": {"dm": {"enabled": False}}})
+    assert await adapter.connect()
+    try:
+        await lark_user_command("start", source=_source())
+        assert {t.get_name() for t in adapter._poll_tasks} == {"lark_user-poll-mention"}
+        assert (await lark_user_command("reply.delivery review", source=_source())).startswith("✅")
+        assert {t.get_name() for t in adapter._poll_tasks} == {"lark_user-poll-mention", "lark_user-poll-dm"}
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_only_the_user_it_speaks_for_can_change_reply_settings(lark):
+    from plugins.platforms.lark_user.lark_user_control import lark_user_command
+    adapter, _ = make_adapter(lark)
+    assert await adapter.connect()
+    try:
+        stranger = _source("feishu", user_id="ou_colleague", user_id_alt="on_colleague")
+        assert "只有" in await lark_user_command("reply.prefix [x]", source=stranger)
+        assert (await lark_user_command('reply.card.title "{user_name} 的小助手"', source=_source())).startswith("✅")
+        assert adapter.settings.defaults.reply.card_title == "{user_name} 的小助手"
+        assert "运行时修改的回复设置：1 项" in await lark_user_command("status", source=_source())
+    finally:
+        await adapter.disconnect()
+
+
 # ── poll cadence ────────────────────────────────────────────────────────────
 
 def test_active_hours_window_wraps_midnight():
