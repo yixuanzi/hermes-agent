@@ -1,4 +1,4 @@
-"""The aegis_source plugin's ``<source>`` header on agent-bound Slack/Feishu turns.
+"""The aegis_source plugin's ``<source>`` header on agent-bound Slack/Feishu/lark_user turns.
 
 The header is ``pre_llm_call`` context built from the turn's gateway session: the trusted actor of THIS
 turn (set even in a shared chat whose route has no user), its channel and display name.
@@ -31,7 +31,7 @@ def turn():
         clear_session_vars(token)
 
 
-@pytest.mark.parametrize("platform", ["slack", "feishu"])
+@pytest.mark.parametrize("platform", ["slack", "feishu", "lark_user"])
 @pytest.mark.parametrize("chat_type", ["dm", "group"])
 def test_a_messaging_turn_with_a_trusted_sender_gets_the_header(turn, platform, chat_type):
     turn(platform=platform, chat_id="C123", chat_type=chat_type, user_id="U456", user_name="Alice")

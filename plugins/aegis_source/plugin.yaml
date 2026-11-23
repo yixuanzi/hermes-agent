@@ -1,6 +1,6 @@
 name: aegis_source
 version: "1.0.0"
-description: "Aegis fork: append a `<source>` sender-identity header (platform, channel, uid, uname) to each agent-bound Slack/Feishu turn through `pre_llm_call`."
+description: "Aegis fork: append a `<source>` sender-identity header (platform, channel, uid, uname) to each agent-bound Slack/Feishu/lark_user turn through `pre_llm_call`."
 author: "aegis"
 # Bundled fork plugins auto-load like a backend: every Slack/Feishu turn carried this header when it
 # was built into the gateway, so it keeps doing so without a `plugins.enabled` entry.

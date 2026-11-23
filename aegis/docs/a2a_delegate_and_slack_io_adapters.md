@@ -44,7 +44,7 @@ Slack 与 Feishu 的来源信息有两个彼此独立的注入点，二者都使
 
 | 位置 | 触发条件 | 内容 | 接收方 |
 | --- | --- | --- | --- |
-| `aegis_source` 插件的 `pre_llm_call` hook（`plugins/aegis_source/`） | Slack 或 Feishu 的 gateway turn 进入主 Agent，且该 turn 有可信发送者（`HERMES_SESSION_ACTOR_ID`，缺省回退 `HERMES_SESSION_USER_ID`） | `{"platform":"slack"\|"feishu","channel":"…","uid":"…","uname":"…"}`；Feishu 的 `chat_id` 映射到 `channel`；`channel` 仅在值存在时写入，`uname` 总是存在（可能为空） | 主 Agent 的当前 user turn（追加在 user message 之后，随 `api_content` 持久化） |
+| `aegis_source` 插件的 `pre_llm_call` hook（`plugins/aegis_source/`） | Slack、Feishu 或 lark_user 的 gateway turn 进入主 Agent，且该 turn 有可信发送者（`HERMES_SESSION_ACTOR_ID`，缺省回退 `HERMES_SESSION_USER_ID`） | `{"platform":"slack"\|"feishu"\|"lark_user","channel":"…","uid":"…","uname":"…"}`；Feishu / lark_user 的 `chat_id` 映射到 `channel`；lark_user 的 `uid` 是提问同事在 lark-cli 应用下的 open_id，与 Feishu 机器人应用看到的 open_id 不同，因此 platform 保持 `lark_user`，不冒充 `feishu`；`channel` 仅在值存在时写入，`uname` 总是存在（可能为空） | 主 Agent 的当前 user turn（追加在 user message 之后，随 `api_content` 持久化） |
 | `plugins.aegis_a2a.delegate_tool._decorate_a2a_user_message(...)` | 调用 `aegis_a2a_delegate` 时父 Agent 有用户 ID 或用户名 | `{"platform":"slack"\|"feishu","uid":"…","uname":"…"}`；由父 Agent 的 `platform`、`_user_id`、`_user_name` 重建 | 每一轮发给远端 A2A Agent 的 user message |
 
 主 Agent 信封作为 `pre_llm_call` 上下文追加在当前 user message 之后（发送给模型的内容与持久化的 `api_content` 一致，prompt cache 安全），可见 transcript、slash command 解析和 `/codex` 原文直通都只看到用户原文，也不为 history backfill 单独增加来源标签。每个 agent turn 一个信封：运行中 turn 吸收的 steer/追问不单独带信封（共享会话的 `[user]` 前缀仍标识发言人）。该信封适用于 DM、channel 和 Feishu 群聊；其他平台仍沿用既有的共享会话 `[user]` 前缀逻辑。

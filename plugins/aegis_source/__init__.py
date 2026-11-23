@@ -1,6 +1,6 @@
-"""``<source>`` sender-identity header for agent-bound Slack/Feishu turns (Aegis fork).
+"""``<source>`` sender-identity header for agent-bound Slack/Feishu/lark_user turns (Aegis fork).
 
-Each Slack/Feishu turn with a trusted sender carries one compact JSON header the model reads to
+Each Slack/Feishu/lark_user turn with a trusted sender carries one compact JSON header the model reads to
 tell who is asking (platform, channel, user id, display name)::
 
     <source>{"platform":"feishu","channel":"oc_…","uid":"ou_…","uname":"Ada"}</source>
@@ -12,17 +12,21 @@ gateway session (``HERMES_SESSION_*``): the actor is the trusted sender of THIS 
 shared chat whose route carries no user. ``uname`` is always present (possibly ``""``). This header
 is separate from the remote A2A envelope (``plugins.aegis_a2a``), which carries parent identity only;
 both are written by ``aegis_common.source_header.format_source_header``.
+
+``lark_user`` (the user's own Lark account answering for them) names the colleague who asked, under
+its own platform name: its ``uid`` is an open_id of lark-cli's app, which differs from the open_id
+the Feishu bot's app sees for the same person, so it must never pass for a ``feishu`` id.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-_SOURCE_HEADER_PLATFORMS = frozenset({"slack", "feishu"})
+_SOURCE_HEADER_PLATFORMS = frozenset({"slack", "feishu", "lark_user"})
 
 
 def source_header(platform: str, channel: str, user_id: str, user_name: str) -> Optional[str]:
-    """``<source>{...}</source>`` for a Slack/Feishu sender with a trusted user id, else None."""
+    """``<source>{...}</source>`` for a Slack/Feishu/lark_user sender with a trusted user id, else None."""
     if platform not in _SOURCE_HEADER_PLATFORMS or not user_id:
         return None
     from aegis_common.source_header import format_source_header
@@ -34,7 +38,7 @@ def source_header(platform: str, channel: str, user_id: str, user_name: str) -> 
 
 
 def turn_source_header(platform: str = "") -> Optional[str]:
-    """The header for the gateway turn bound on this thread (None outside a Slack/Feishu turn)."""
+    """The header for the gateway turn bound on this thread (None outside a Slack/Feishu/lark_user turn)."""
     from gateway.session_context import get_session_env
 
     return source_header(
