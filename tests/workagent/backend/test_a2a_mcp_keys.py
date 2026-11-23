@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 
 from starlette.testclient import TestClient
@@ -156,7 +157,7 @@ def test_task_carries_the_key_identity_and_ignores_a_caller_written_one(tmp_path
     envelope = "<source>" + json.dumps(_IDENTITY, ensure_ascii=False, separators=(",", ":")) + "</source>"
     assert result["state"] == "completed"
     assert result["result"] == f"{envelope}\n\nhello"
-    assert result["session_id"].startswith(f"mk-{key['id']}-")
+    assert re.fullmatch(rf"mk-{key['id']}-\d{{8}}-\d{{6}}-\d{{2}}", result["session_id"])
 
 
 def test_one_key_cannot_see_or_continue_another_keys_work(tmp_path) -> None:

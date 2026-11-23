@@ -27,8 +27,9 @@ key, none of this applies, and the ``<source>`` it sends is used as given.
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from datetime import datetime
+import random
 import re
-import uuid
 
 from a2a.auth.user import User
 from a2a.server.agent_execution import RequestContext
@@ -112,6 +113,11 @@ def text_as_caller(text: str, context: ServerCallContext | None) -> str:
     return text if key is None else apply_key_identity(text, key)
 
 
+def new_key_session_id(key: McpKeyRecord) -> str:
+    """A new session id in ``key``'s namespace: ``mk-<key id>-YYYYMMDD-hhmmss-NN`` (local time)."""
+    return f"{key.session_prefix}{datetime.now():%Y%m%d-%H%M%S}-{random.randrange(100):02d}"
+
+
 class PersonalKeyCallContextBuilder(DefaultServerCallContextBuilder):
     """Call contexts for the A2A routes: a key caller is its own task owner."""
 
@@ -158,7 +164,7 @@ class KeyScopedRequestContextBuilder(SimpleRequestContextBuilder):
             existing = await self._task_store.get(task_id, context)
             context_id = existing.context_id if existing is not None else None
         if not context_id:
-            return f"{key.session_prefix}{uuid.uuid4().hex}"
+            return new_key_session_id(key)
         if not context_id.startswith(key.session_prefix):
             # "not found" rather than confirm another caller's session exists.
             raise InvalidParamsError(message=f"session {context_id} not found")
