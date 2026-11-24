@@ -1,5 +1,8 @@
 """Images and files in an inbound message -> cached local files, attached to the turn.
 
+With group context on, the sender's own earlier messages shown in that context count too: a file
+sent first and asked about in a later @mention reaches the agent with the mention.
+
 lark-cli renders a message's resources in ``content`` as markers: ``[Image: img_…]`` (an image
 message), ``![Image](img_…)`` (an image inside rich text) and ``<file key="file_…" name="…"/>`` (a
 file). Each one is downloaded with ``+messages-resources-download`` into the gateway's image or
@@ -24,7 +27,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from gateway.platforms.base import (
     SUPPORTED_DOCUMENT_TYPES, SUPPORTED_IMAGE_DOCUMENT_TYPES, get_document_cache_dir, get_image_cache_dir,
@@ -139,12 +142,16 @@ async def _fetch(cli: LarkCli, message_id: str, res: Resource, gate: asyncio.Sem
     return None
 
 
-async def fetch_attachments(cli: LarkCli, message_id: str, text: str) -> list[Attachment]:
-    """The cached files behind the image/file markers in ``text``, in marker order."""
-    resources = find_resources(text)
-    if not resources:
+async def fetch_attachments(cli: LarkCli, messages: Iterable[tuple[str, str]]) -> list[Attachment]:
+    """The cached files behind the image/file markers of ``(message_id, text)`` pairs, in message then
+    marker order. A key met in several messages is fetched once, through the first message naming it."""
+    wanted: dict[str, tuple[str, Resource]] = {}
+    for message_id, text in messages:
+        for res in find_resources(text):
+            wanted.setdefault(res.key, (message_id, res))
+    if not wanted:
         return []
     gate = asyncio.Semaphore(_PARALLEL_DOWNLOADS)
-    paths = await asyncio.gather(*(_fetch(cli, message_id, res, gate) for res in resources))
+    paths = await asyncio.gather(*(_fetch(cli, mid, res, gate) for mid, res in wanted.values()))
     return [Attachment(str(path), _media_type(path), res.name)
-            for res, path in zip(resources, paths) if path is not None]
+            for (_, res), path in zip(wanted.values(), paths) if path is not None]

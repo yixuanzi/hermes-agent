@@ -223,6 +223,10 @@ With `context.enabled`, an @mention reaches the agent with the group's recent me
 message. They are read as you, so any group you are in works. Each line is flattened and stripped
 of `<`/`>`, so a message cannot close or forge a block.
 
+Images and files the mention's sender posted among the shown messages are attached to the turn like
+the mention's own (see below), so "here is the report" followed by "@you take a look" works. Other
+people's attachments stay as markers in the context text.
+
 ### Images and files
 
 Images (`[Image: img_…]`, `![Image](img_…)` in rich text) and files (`<file key="file_…" name="…"/>`)
@@ -275,7 +279,7 @@ name. The gateway refuses to start with either unless `LARK_USER_ALLOW_ALL_USERS
   interval a reply starts 15–30 seconds after a message arrives.
 - Replies are sent once the turn finishes; there is no streamed or in-progress output. Do not
   enable `display.platforms.lark_user.streaming`: streamed text is not the final answer and is dropped.
-- Audio, video and stickers in incoming messages are not downloaded, nor are attachments of the
-  messages shown as group context.
+- Audio, video and stickers in incoming messages are not downloaded, nor are attachments other
+  people posted in the messages shown as group context.
 
 The plugin's own README (`plugins/platforms/lark_user/README.md`) explains every option in detail.

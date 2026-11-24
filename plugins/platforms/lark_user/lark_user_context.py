@@ -12,6 +12,9 @@ block rides ``MessageEvent.channel_context``, which the gateway puts before ``[N
 
 Message text is untrusted: each line is flattened and stripped of ``<``/``>`` so it cannot close
 the wrapper or forge another block. Any fetch failure yields no context, never a failed turn.
+
+The messages shown are returned with the text, so the caller can attach the images and files the
+mention's sender posted among them.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from .lark_user_cli import LarkCli, LarkCliError
@@ -26,6 +30,17 @@ from .lark_user_config import ContextSettings
 from .lark_user_normalize import Inbound
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class GroupContext:
+    text: str = ""
+    messages: list[dict[str, Any]] = field(default_factory=list)  # the shown ones, oldest first, per block
+
+    def sent_by(self, sender_id: str) -> list[tuple[str, str]]:
+        """``(message_id, content)`` of the shown messages ``sender_id`` sent."""
+        return [(str(m.get("message_id") or ""), str(m.get("content") or "")) for m in self.messages
+                if sender_id and (m.get("sender") or {}).get("id") == sender_id]
 
 
 def _clean(text: str, max_chars: int) -> str:
@@ -41,29 +56,32 @@ def _line(item: dict[str, Any], max_chars: int) -> str:
     return f"[{stamp}] {who}: {_clean(item.get('content', ''), max_chars)}"
 
 
-def _block(tag: str, items: Iterable[dict[str, Any]], *, skip: set[str], limit: int, max_chars: int) -> tuple[str, set[str]]:
-    """Newest-first ``items`` -> chronological ``<tag>`` block of up to ``limit`` usable messages."""
+def _block(tag: str, items: Iterable[dict[str, Any]], *, skip: set[str], limit: int,
+           max_chars: int) -> tuple[str, list[dict[str, Any]]]:
+    """Newest-first ``items`` -> chronological ``<tag>`` block of up to ``limit`` usable messages,
+    and those messages, oldest first."""
     picked = [m for m in items
               if not m.get("deleted") and str(m.get("content") or "").strip() and m.get("message_id") not in skip][:limit]
     if not picked:
-        return "", set()
-    lines = [_line(m, max_chars) for m in reversed(picked)]
-    return f"<{tag}>\n" + "\n".join(lines) + f"\n</{tag}>", {str(m.get("message_id")) for m in picked}
+        return "", []
+    picked.reverse()
+    return f"<{tag}>\n" + "\n".join(_line(m, max_chars) for m in picked) + f"\n</{tag}>", picked
 
 
-async def group_context(cli: LarkCli, inb: Inbound, settings: ContextSettings) -> str:
+async def group_context(cli: LarkCli, inb: Inbound, settings: ContextSettings) -> GroupContext:
     skip = {inb.message_id}
     since = dt.datetime.fromtimestamp(time.time() - settings.hours * 3600).astimezone().isoformat(timespec="seconds")
     try:
         chat_items = await cli.chat_messages(inb.chat_id, start=since, page_size=min(50, settings.limit + 1))
         group, shown = _block("group_messages", chat_items, skip=skip, limit=settings.limit,
                               max_chars=settings.msg_max_chars)
-        thread = ""
+        thread, in_thread = "", []
         if settings.scope == "thread" and settings.thread_limit and inb.thread_id.startswith("omt_"):
             thread_items = await cli.thread_messages(inb.thread_id, page_size=min(50, settings.thread_limit + 1))
-            thread, _ = _block("thread_messages", thread_items, skip=skip | shown, limit=settings.thread_limit,
-                               max_chars=settings.msg_max_chars)
+            thread, in_thread = _block("thread_messages", thread_items,
+                                       skip=skip | {str(m.get("message_id")) for m in shown},
+                                       limit=settings.thread_limit, max_chars=settings.msg_max_chars)
     except LarkCliError as exc:
         logger.warning("lark_user: group context unavailable (%s)", exc.kind)
-        return ""
-    return "\n\n".join(part for part in (group, thread) if part)
+        return GroupContext()
+    return GroupContext("\n\n".join(part for part in (group, thread) if part), shown + in_thread)

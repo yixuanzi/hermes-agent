@@ -696,6 +696,43 @@ async def test_a_burst_found_by_one_poll_is_one_turn_however_long_its_attachment
     assert event.text == "帮我看下这张图\n[Image: img_v3_slow]" and len(event.media_urls) == 1
 
 
+@pytest.mark.asyncio
+async def test_a_file_the_sender_posted_before_mentioning_reaches_the_agent_with_the_mention(lark):
+    adapter, events = await opened(lark, context={"enabled": True, "when": "always"})
+    mention = msg("om_m", chat="oc_g1", chat_type="group", mentions=[{"id": "ou_me"}],
+                  text="@Me Myself 帮我看下上面的报告 [Image: img_v3_again]")
+    lark.write(chat_history=[
+        mention,
+        _history("om_f", '<file key="file_v3_report" name="report.pdf"/>', sender="Alice", age=120),
+        _history("om_b", "[Image: img_v3_bob]", sender="Bob", age=180),
+        _history("om_i", "[Image: img_v3_again]", sender="Alice", age=240),
+    ], search_group=[mention])
+    await adapter.poll_once("mention")
+
+    (event,) = events
+    assert [Path(p).name for p in event.media_urls] == ["lark_img_v3_again.png", "lark_file_v3_report.report.pdf"]
+    assert event.media_filenames == ["", "report.pdf"]
+    # Each resource is fetched through the message that holds it, once; Bob's image is not the sender's.
+    assert sorted((c["args"][c["args"].index("--message-id") + 1], c["args"][c["args"].index("--file-key") + 1])
+                  for c in _downloads(lark)) == [("om_f", "file_v3_report"), ("om_i", "img_v3_again")]
+
+    # Already cached: the next mention references the same files without downloading them again.
+    again = {**mention, "message_id": "om_m2", "content": "@Me Myself 再看一次"}
+    lark.write(chat_history=[again, *lark.read()["chat_history"][1:]], search_group=[again])
+    await adapter.poll_once("mention")
+    assert events[1].media_urls == events[0].media_urls and len(_downloads(lark)) == 2
+
+
+@pytest.mark.asyncio
+async def test_without_group_context_earlier_files_are_not_attached(lark):
+    adapter, events = await opened(lark)
+    mention = msg("om_m", chat="oc_g1", chat_type="group", mentions=[{"id": "ou_me"}])
+    lark.write(chat_history=[_history("om_f", '<file key="file_v3_x" name="x.pdf"/>', sender="Alice")],
+               search_group=[mention])
+    await adapter.poll_once("mention")
+    assert events[0].media_urls == [] and _downloads(lark) == []
+
+
 def test_a_senders_file_name_cannot_leave_the_cache_directory():
     from plugins.platforms.lark_user.lark_user_media import find_resources, safe_name
     assert safe_name("../../.ssh/authorized_keys") == "authorized_keys"

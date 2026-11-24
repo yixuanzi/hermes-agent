@@ -34,7 +34,7 @@ from . import gateway_env
 from .adapter_hint import PLATFORM_HINT
 from .lark_user_cli import LarkCli, LarkCliError
 from .lark_user_config import ChatSettings, LarkUserSettings, SettingsError, load_settings
-from .lark_user_context import group_context
+from .lark_user_context import GroupContext, group_context
 from .lark_user_control import conversation_list, lark_user_command, register_live, unregister_live
 from .lark_user_cursor import CursorStore
 from .lark_user_intake import ChatRateLimit, Identity, drop_reason
@@ -509,22 +509,28 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         self._last_by_chat[inb.chat_id] = inb.message_id
         chat = self.settings.for_chat(inb.chat_id)
         source = shape_source(self.build_source, inb, chat, thread_root=await self._thread_roots.root_for(inb, chat))
-        attachments = await fetch_attachments(self._cli, inb.message_id, inb.text)
         event = MessageEvent(
             text=inb.text, message_type=MessageType.TEXT, source=source, message_id=inb.message_id,
             user_id=inb.sender_id, user_name=inb.sender_name or None,
             timestamp=dt.datetime.fromtimestamp(inb.created_at or time.time()),
-            media_urls=[a.path for a in attachments], media_types=[a.media_type for a in attachments],
-            media_filenames=[a.name for a in attachments], media_text_inlined=[False] * len(attachments),
             channel_prompt=chat.instructions or None,
             # Senders are third parties writing to the user, never operators of this gateway.
             allow_gateway_control=False,
         )
         fresh = await self._open_conversation(event, chat)
+        context = GroupContext()
         if inb.chat_type == "group" and chat.context.enabled and (fresh or chat.context.when == "always"):
-            event.channel_context = await group_context(self._cli, inb, chat.context) or None
-        logger.info("lark_user: turn for %s chat=%s (%d chars, %d attachment(s))", inb.message_id,
-                    hash_for_log(inb.chat_id), len(inb.text), len(attachments))
+            context = await group_context(self._cli, inb, chat.context)
+            event.channel_context = context.text or None
+        # The sender's files among the shown messages ride along: "here is the file", then "@you look".
+        earlier = context.sent_by(inb.sender_id)
+        attachments = await fetch_attachments(self._cli, [*earlier, (inb.message_id, inb.text)])
+        event.media_urls = [a.path for a in attachments]
+        event.media_types = [a.media_type for a in attachments]
+        event.media_filenames = [a.name for a in attachments]
+        event.media_text_inlined = [False] * len(attachments)
+        logger.info("lark_user: turn for %s chat=%s (%d chars, %d attachment(s), %d earlier message(s) of the sender)",
+                    inb.message_id, hash_for_log(inb.chat_id), len(inb.text), len(attachments), len(earlier))
         return event
 
     async def _hand_off(self, event: MessageEvent) -> None:
