@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextvars
+import dataclasses
 import datetime as dt
 import hashlib
 import logging
@@ -37,6 +38,7 @@ from .lark_user_config import ChatSettings, LarkUserSettings, SettingsError, loa
 from .lark_user_context import GroupContext, group_context
 from .lark_user_control import conversation_list, lark_user_command, register_live, unregister_live
 from .lark_user_cursor import CursorStore
+from .lark_user_ids import TenantIds
 from .lark_user_intake import ChatRateLimit, Identity, drop_reason
 from .lark_user_media import fetch_attachments
 from .lark_user_normalize import Inbound, to_inbound
@@ -45,7 +47,7 @@ from .lark_user_poll import PollSchedule
 from .lark_user_render import render
 from .lark_user_review import CardPresenter, ReviewDesk, TextPresenter, parse_command
 from .lark_user_review_bot import APP_ID_ENV, APP_SECRET_ENV, ReviewBot
-from .lark_user_session import ThreadRoots, expiry_reason, shape_source
+from .lark_user_session import ThreadRoots, expiry_reason, labels_speakers, shape_source
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +112,7 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         self._last_by_chat: dict[str, str] = {}
         self._turns: collections.Counter[str] = collections.Counter()  # chat_id -> turns in flight
         self._thread_roots = ThreadRoots(self._cli.thread_root)
+        self._tenant_ids = TenantIds(self._cli)
 
     @property
     def name(self) -> str:
@@ -148,7 +151,8 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                 return self._fail("auth_required", f"lark-cli user identity unavailable ({exc}); {_login_hint()}",
                                   retryable=False)
             return self._fail("cli_error", f"lark-cli user_info failed: {exc}", retryable=True)
-        me = Identity(str(info.get("open_id") or ""), str(info.get("name") or ""), str(info.get("tenant_key") or ""))
+        me = Identity(str(info.get("open_id") or ""), str(info.get("name") or ""), str(info.get("tenant_key") or ""),
+                      str(info.get("user_id") or ""))
         if not me.open_id:
             return self._fail("auth_required", f"lark-cli returned no user open_id; {_login_hint()}",
                               retryable=False)
@@ -476,6 +480,7 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         # Every turn is prepared before any is handed off: preparing one (attachments, topic root,
         # group context) can take longer than the text batch delay, which would otherwise flush a
         # sender's earlier message alone and turn one burst found by this poll into several turns.
+        await self._tenant_ids.learn(ready)
         events = [await self._prepare(inb) for inb in ready]
         for inb, event in zip(ready, events):
             await self._hand_off(event)
@@ -511,7 +516,7 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         source = shape_source(self.build_source, inb, chat, thread_root=await self._thread_roots.root_for(inb, chat))
         event = MessageEvent(
             text=inb.text, message_type=MessageType.TEXT, source=source, message_id=inb.message_id,
-            user_id=inb.sender_id, user_name=inb.sender_name or None,
+            user_id=self._tenant_ids.of(inb.sender_id), user_name=inb.sender_name or None,
             timestamp=dt.datetime.fromtimestamp(inb.created_at or time.time()),
             channel_prompt=chat.instructions or None,
             # Senders are third parties writing to the user, never operators of this gateway.
@@ -624,13 +629,18 @@ class LarkUserAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         self._last_by_chat[inb.chat_id] = anchor
         chat = self.settings.for_chat(inb.chat_id)
         source = shape_source(self.build_source, inb, chat, thread_root=await self._thread_roots.root_for(inb, chat))
+        # The notes are the user's words, not the sender's. The source keeps routing (session key,
+        # system prompt) to the conversation; who speaks this turn is the event's user (the <source>
+        # header, approvals) and, in a shared session, the [name] label the gateway puts on the text.
+        if labels_speakers(source, self.config.extra):
+            source = dataclasses.replace(source, user_name=self._me.name or None)
         event = MessageEvent(
             text=_REVISION_PROMPT.format(user_name=self._me.name, notes=notes, content=draft.get("content", "")),
             message_type=MessageType.TEXT, source=source,
             message_id=f"{anchor}#rev{revision}", reply_anchor_override=anchor or None,
             # The same system prompt as the conversation's other turns: a change would break its cache.
             channel_prompt=chat.instructions or None,
-            user_id=inb.sender_id, user_name=inb.sender_name or None, allow_gateway_control=False)
+            user_id=self._me.user_id or self._me.open_id, user_name=self._me.name or None, allow_gateway_control=False)
         logger.info("lark_user: revision %d for %s chat=%s", revision, anchor, hash_for_log(inb.chat_id))
         await self.handle_message(event)
 

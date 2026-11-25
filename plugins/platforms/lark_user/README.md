@@ -88,6 +88,8 @@ lark-cli 搜索 ──► 过滤（自己/bot/@所有人/白名单/过期/限流
 
    可以用 `HERMES_HOME=~/.hermes lark-cli auth check --scope "search:message im:message.send_as_user"` 检查。
 
+   每一轮会用发送者的**租户级 user_id**（同一租户内所有应用都一样，不像 open_id 按应用区分）标明是谁在提问，比如 Aegis 的 `<source>` 头里的 `uid`。插件每次轮询用一次 `im/v1/messages/mget` 查出新出现的发送者的 user_id 并缓存。这要求 lark-cli 登录的应用能读取 user_id（飞书后台的“获取用户 user ID”权限，`contact:user.employee_id:readonly`）；查不到时（没有这个权限、外部租户的发送者、调用失败）回退为 open_id，回复照常进行。白名单、会话划分仍然按 open_id。
+
 4. **审核卡片需要一个专用的 Lark 应用（审核应用）**。卡片按钮的点击回调只会推送给应用，用户身份收不到；而且同一个应用有多个长连接时，每次点击只会随机推给其中一个。所以这个应用必须**专门用于审核卡片**，不能和 Hermes 的 `feishu` 平台或 lark-cli（`hermes` 工作区）登录用的应用是同一个。没有配置审核应用时，自动退回文本命令审核（见第 4 节）。
 
    在飞书 / Lark 开发者后台：

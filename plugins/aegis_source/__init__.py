@@ -13,9 +13,10 @@ shared chat whose route carries no user. ``uname`` is always present (possibly `
 is separate from the remote A2A envelope (``plugins.aegis_a2a``), which carries parent identity only;
 both are written by ``aegis_common.source_header.format_source_header``.
 
-``lark_user`` (the user's own Lark account answering for them) names the colleague who asked, under
-its own platform name: its ``uid`` is an open_id of lark-cli's app, which differs from the open_id
-the Feishu bot's app sees for the same person, so it must never pass for a ``feishu`` id.
+``lark_user`` (the user's own Lark account answering for them) names the colleague who asked by
+their tenant ``user_id`` (the same in every app of the tenant), resolved by the adapter. It keeps its
+own platform name: when that lookup fails the ``uid`` is the open_id lark-cli's app sees, which
+differs from the open_id the Feishu bot's app sees, so it must never pass for a ``feishu`` id.
 """
 
 from __future__ import annotations

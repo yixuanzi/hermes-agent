@@ -92,6 +92,19 @@ def shape_source(build_source: Callable[..., Any], inbound: Inbound, chat: ChatS
     return source
 
 
+def labels_speakers(source: Any, extra: dict[str, Any]) -> bool:
+    """Whether the gateway prefixes each message of ``source``'s session with ``[speaker name]``:
+    a session shared across participants (the rule of ``gateway.session.is_shared_multi_user_session``,
+    with the adapter's own key settings). Elsewhere the name sits in the system prompt instead."""
+    if source.chat_type == "dm":
+        return False
+    if getattr(source, "shared_session", False):
+        return True
+    per_user = (extra.get("thread_sessions_per_user", False) if source.thread_id
+                else extra.get("group_sessions_per_user", True))
+    return not per_user
+
+
 def expiry_reason(last_active: float, now: float, chat: ChatSettings) -> str:
     """Why a conversation last active at ``last_active`` is over at ``now``; "" while it goes on."""
     if chat.idle_reset and now - last_active >= chat.idle_reset:

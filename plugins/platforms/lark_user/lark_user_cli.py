@@ -26,6 +26,7 @@ Runner = Callable[[Sequence[str], Optional[bytes], float, Optional[dict[str, str
                   Awaitable[tuple[int, bytes, bytes]]]
 
 _AUTH_HINTS = ("token", "login", "unauthor", "authenticat", "expired", "scope", "permission")
+_MGET_LIMIT = 20  # message ids per im/v1/messages/mget call
 _RATE_HINTS = ("99991400", "rate limit", "frequency", "too many")
 
 
@@ -179,3 +180,17 @@ class LarkCli:
         data = await self.call(["im", "+threads-messages-list", "--as", "user", "--thread", thread_id,
                                 "--order", "desc", "--page-size", str(page_size), "--no-reactions"])
         return list(data.get("messages") or [])
+
+    async def sender_user_ids(self, message_ids: Sequence[str]) -> dict[str, str]:
+        """message id -> its sender's tenant ``user_id`` (stable across apps, unlike an open_id). A
+        sender without one in this tenant (another tenant, an app) is left out."""
+        found: dict[str, str] = {}
+        for at in range(0, len(message_ids), _MGET_LIMIT):
+            data = await self.call(["api", "GET", "/open-apis/im/v1/messages/mget", "--as", "user", "--params",
+                                    json.dumps({"message_ids": list(message_ids[at:at + _MGET_LIMIT]),
+                                                "user_id_type": "user_id"})])
+            for item in data.get("items") or []:
+                sender = item.get("sender") or {}
+                if sender.get("id_type") == "user_id" and sender.get("id") and item.get("message_id"):
+                    found[str(item["message_id"])] = str(sender["id"])
+        return found

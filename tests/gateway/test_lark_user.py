@@ -52,6 +52,16 @@ if args[:3] == ["api", "GET", "/open-apis/authen/v1/user_info"]:
     if "user_info" in fail:
         out(error=fail["user_info"])
     out(state["me"])
+if args[:3] == ["api", "GET", "/open-apis/im/v1/messages/mget"]:
+    if "mget" in fail:
+        out(error=fail["mget"])
+    params = json.loads(args[args.index("--params") + 1])
+    known = {{m["message_id"]: m["sender"]["id"] for key in ("search_p2p", "search_group", "chat_history")
+              for m in state.get(key) or []}}
+    tenant = state.get("user_ids", {{}})
+    out({{"items": [{{"message_id": mid, "sender": {{"id": tenant[known[mid]], "id_type": "user_id"}}
+                     if known.get(mid) in tenant else {{"id": known.get(mid, ""), "id_type": "open_id"}}}}
+                   for mid in params["message_ids"]]}})
 if args[:3] == ["api", "GET", "/open-apis/bot/v3/info"]:
     out({{"bot": {{"app_name": "review-bot"}}}})
 if args[:3] == ["api", "POST", "/open-apis/im/v1/messages"]:
@@ -101,7 +111,7 @@ if args[:2] in (["im", "+messages-reply"], ["im", "+messages-send"]):
 out(error={{"type": "validation", "message": "unexpected " + " ".join(args)}})
 '''
 
-ME = {"open_id": "ou_me", "name": "Me Myself", "tenant_key": "t1", "union_id": "on_me"}
+ME = {"open_id": "ou_me", "name": "Me Myself", "tenant_key": "t1", "union_id": "on_me", "user_id": "u_me"}
 
 
 def _stamp(epoch: float) -> str:
@@ -743,6 +753,54 @@ def test_a_senders_file_name_cannot_leave_the_cache_directory():
     assert find_resources("[Image: ../../x] [Image: img_ok]")[0].key == "img_ok"
 
 
+# ── speaker identity ───────────────────────────────────────────────────────
+
+def _mgets(lark):
+    return [c for c in lark.read()["calls"] if c["args"][2:3] == ["/open-apis/im/v1/messages/mget"]]
+
+
+def _speaker_header(event):
+    from gateway.config import GatewayConfig
+    from gateway.session import build_session_context
+    from plugins.aegis_source import source_header
+    actor = build_session_context(event.source, GatewayConfig(), None, event)
+    return source_header("lark_user", event.source.chat_id, actor.actor_user_id, actor.actor_user_name)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_names_its_sender_by_tenant_user_id_and_routes_by_open_id(lark):
+    adapter, events = await opened(lark, allow_from=["ou_alice", "ou_bob"])
+    lark.write(user_ids={"ou_alice": "u_alice", "ou_bob": "u_bob"},
+               search_p2p=[msg("om_a"), msg("om_b", chat="oc_dm2", sender="ou_bob", sender_name="Bob")])
+    await adapter.poll_once("dm")
+    assert '"uid":"u_alice","uname":"Alice"' in _speaker_header(events[0])
+    assert '"uid":"u_bob","uname":"Bob"' in _speaker_header(events[1])
+    # Session keys, allowlists and mentions keep the open_id lark-cli works with.
+    assert [e.source.user_id for e in events] == ["ou_alice", "ou_bob"]
+    assert len(_mgets(lark)) == 1  # both senders in one lookup
+
+    lark.write(search_p2p=[msg("om_a"), msg("om_b", chat="oc_dm2", sender="ou_bob", sender_name="Bob"), msg("om_c")])
+    await adapter.poll_once("dm")
+    assert events[-1].user_id == "u_alice" and len(_mgets(lark)) == 1  # a known sender is not looked up again
+
+
+@pytest.mark.asyncio
+async def test_without_a_tenant_user_id_the_sender_keeps_its_open_id(lark):
+    adapter, events = await opened(lark, allow_from=["ou_alice", "ou_ext"])
+    # The lookup returns no user_id for this sender (only an open_id).
+    lark.write(user_ids={}, search_p2p=[msg("om_x", sender="ou_ext")])
+    await adapter.poll_once("dm")
+    assert events[-1].user_id == "ou_ext"
+    # A failed lookup costs nothing but the id: the turn still runs, and the sender is asked about again.
+    lark.write(fail={"mget": {"type": "api", "message": "boom"}}, user_ids={"ou_alice": "u_alice"},
+               search_p2p=[msg("om_x", sender="ou_ext"), msg("om_y")])
+    await adapter.poll_once("dm")
+    assert events[-1].message_id == "om_y" and events[-1].user_id == "ou_alice"
+    lark.write(fail={}, search_p2p=[msg("om_x", sender="ou_ext"), msg("om_y"), msg("om_z")])
+    await adapter.poll_once("dm")
+    assert events[-1].user_id == "u_alice"
+
+
 # ── instructions ───────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -925,6 +983,37 @@ async def test_revise_sends_notes_back_to_the_conversation_and_resubmits(lark, r
     assert _buttons(second) == ["approve", "revise", "reject"]
     await adapter._on_review_click(click("approve", number="2", message_id="om_card_2"))
     assert [c["stdin"] for c in lark.sends()] == ["[🤖 AI 代答] 周五下午三点发版"]
+
+
+@pytest.mark.asyncio
+async def test_revision_notes_speak_as_the_user_not_the_sender(lark, review_app):
+    from gateway.config import GatewayConfig
+    from gateway.session import build_session_context
+    adapter, events = await _card_review(lark)
+    original = events[-1]
+    await adapter._on_review_click(click("revise", notes="说具体时间"))
+    revision = events[-1]
+    # Who speaks this turn (the <source> header, approvals) is the user who wrote the notes...
+    actor = build_session_context(revision.source, GatewayConfig(), None, revision)
+    assert (actor.actor_user_id, actor.actor_user_name) == ("u_me", "Me Myself")
+    # ...while the route, and with it the session and its system prompt, stays the sender's DM.
+    assert revision.source == original.source
+    assert adapter._event_session_key(revision) == adapter._event_session_key(original)
+
+
+@pytest.mark.asyncio
+async def test_revision_in_a_shared_group_session_is_labelled_with_the_users_name(lark, review_app):
+    from gateway.session import label_shared_sender
+    adapter, events = await opened(lark, group_scope="per_chat")
+    lark.write(search_group=[_group("om_g")])
+    await adapter.poll_once("mention")
+    original = events[-1]
+    assert label_shared_sender(original.source, "x").startswith("[Alice]")
+    assert (await adapter.send("oc_g1", "Friday", reply_to="om_g")).success
+    await adapter._on_review_click(click("revise", notes="说具体时间"))
+    revision = events[-1]
+    assert label_shared_sender(revision.source, revision.text).startswith("[Me Myself] [审核修订意见]")
+    assert adapter._event_session_key(revision) == adapter._event_session_key(original)
 
 
 @pytest.mark.asyncio

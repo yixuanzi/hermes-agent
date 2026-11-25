@@ -21,6 +21,7 @@ class Identity:
     open_id: str
     name: str
     tenant_key: str
+    user_id: str = ""  # tenant-wide id, the same in every app; "" when the login cannot read it
 
 
 def looks_like_own_reply(text: str, prefix: str) -> bool:
